@@ -1,1 +1,36 @@
+const quotes=[
 
+"touch grass ❌",
+"touch moss ✅",
+
+"one more chart...",
+"just five more minutes.",
+
+"buy the dip.",
+"be the dip.",
+
+"strong claws. stronger conviction.",
+
+"paper hands feed diamond claws.",
+
+"gm legends.",
+
+"memes > fear.",
+
+"bullish until proven otherwise."
+
+];
+
+const random=quotes[Math.floor(Math.random()*quotes.length)];
+
+document.getElementById("quote").innerHTML=random;
+
+document
+.getElementById("touchMoss")
+.onclick=()=>{
+
+const next=quotes[Math.floor(Math.random()*quotes.length)];
+
+document.getElementById("quote").innerHTML=next;
+
+};

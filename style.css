@@ -1,36 +1,370 @@
-const quotes=[
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+}
 
-"touch grass ❌",
-"touch moss ✅",
+html{
+    scroll-behavior:smooth;
+}
 
-"one more chart...",
-"just five more minutes.",
+body{
 
-"buy the dip.",
-"be the dip.",
+    font-family:'Outfit',sans-serif;
 
-"strong claws. stronger conviction.",
+    color:white;
 
-"paper hands feed diamond claws.",
+    overflow-x:hidden;
 
-"gm legends.",
+    background:
+    radial-gradient(circle at top,#55208f 0%,#1a082d 35%,#09030f 100%);
 
-"memes > fear.",
+    min-height:100vh;
+}
 
-"bullish until proven otherwise."
 
-];
+/* Background Glow */
 
-const random=quotes[Math.floor(Math.random()*quotes.length)];
+.bg-glow{
 
-document.getElementById("quote").innerHTML=random;
+    position:fixed;
 
-document
-.getElementById("touchMoss")
-.onclick=()=>{
+    inset:0;
 
-const next=quotes[Math.floor(Math.random()*quotes.length)];
+    pointer-events:none;
 
-document.getElementById("quote").innerHTML=next;
+    background:
 
-};
+    radial-gradient(circle at 20% 20%,
+    rgba(174,92,255,.18),
+    transparent 40%),
+
+    radial-gradient(circle at 80% 60%,
+    rgba(138,43,226,.15),
+    transparent 45%),
+
+    radial-gradient(circle at 50% 100%,
+    rgba(124,58,237,.10),
+    transparent 55%);
+}
+
+
+/* HERO */
+
+.hero{
+
+    max-width:1300px;
+
+    margin:auto;
+
+    min-height:100vh;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:space-between;
+
+    gap:80px;
+
+    padding:80px;
+}
+
+.hero-left{
+
+    flex:1;
+
+    display:flex;
+
+    justify-content:center;
+}
+
+.hero-right{
+
+    flex:1;
+}
+
+
+/* Crab */
+
+.crab{
+
+    width:520px;
+
+    max-width:100%;
+
+    animation:float 5s ease-in-out infinite;
+
+    filter:
+
+    drop-shadow(0 0 40px rgba(180,70,255,.45));
+}
+
+
+@keyframes float{
+
+0%{
+
+transform:translateY(0px);
+
+}
+
+50%{
+
+transform:translateY(-18px);
+
+}
+
+100%{
+
+transform:translateY(0px);
+
+}
+
+}
+
+
+/* handwritten */
+
+.note{
+
+    display:inline-block;
+
+    font-family:'Caveat',cursive;
+
+    color:#d49fff;
+
+    font-size:34px;
+
+    margin-bottom:20px;
+
+    transform:rotate(-4deg);
+}
+
+
+/* title */
+
+h1{
+
+    font-size:86px;
+
+    font-weight:900;
+
+    line-height:1;
+
+    letter-spacing:-3px;
+
+    margin-bottom:18px;
+}
+
+
+/* subtitle */
+
+.subtitle{
+
+    color:#b89cff;
+
+    font-size:28px;
+
+    margin-bottom:30px;
+
+    font-family:'Caveat',cursive;
+}
+
+
+/* description */
+
+.description{
+
+    color:#d8d8d8;
+
+    line-height:1.9;
+
+    font-size:20px;
+
+    max-width:520px;
+
+    margin-bottom:40px;
+}
+
+
+/* button */
+
+button{
+
+    border:none;
+
+    cursor:pointer;
+
+    padding:18px 38px;
+
+    border-radius:999px;
+
+    background:linear-gradient(90deg,#7f3cff,#b347ff);
+
+    color:white;
+
+    font-size:18px;
+
+    font-weight:700;
+
+    transition:.3s;
+
+    box-shadow:
+
+    0 0 30px rgba(155,70,255,.35);
+}
+
+button:hover{
+
+transform:translateY(-4px);
+
+box-shadow:
+
+0 0 45px rgba(180,70,255,.7);
+
+}
+
+
+/* hidden message */
+
+#message{
+
+    margin-top:25px;
+
+    color:#8cffb5;
+
+    font-family:'Caveat',cursive;
+
+    font-size:30px;
+
+    opacity:0;
+
+    transition:.4s;
+}
+
+#message.show{
+
+opacity:1;
+}
+
+
+/* thought */
+
+.thought{
+
+padding:100px 40px;
+
+display:flex;
+
+justify-content:center;
+}
+
+
+/* card */
+
+.card{
+
+max-width:850px;
+
+width:100%;
+
+background:rgba(255,255,255,.05);
+
+backdrop-filter:blur(18px);
+
+border:1px solid rgba(255,255,255,.08);
+
+padding:55px;
+
+border-radius:32px;
+
+box-shadow:
+
+0 25px 70px rgba(0,0,0,.4);
+}
+
+
+/* handwritten */
+
+.handwritten{
+
+font-family:'Caveat',cursive;
+
+font-size:38px;
+
+color:#c987ff;
+
+margin-bottom:15px;
+}
+
+
+/* quote */
+
+.card h2{
+
+font-size:36px;
+
+line-height:1.4;
+
+font-weight:700;
+}
+
+
+/* mobile */
+
+@media(max-width:900px){
+
+.hero{
+
+flex-direction:column;
+
+padding:40px 25px;
+
+text-align:center;
+
+}
+
+.crab{
+
+width:320px;
+
+}
+
+h1{
+
+font-size:58px;
+
+}
+
+.description{
+
+margin:auto auto 35px;
+
+}
+
+.note{
+
+font-size:28px;
+
+}
+
+.subtitle{
+
+font-size:24px;
+
+}
+
+.card{
+
+padding:35px;
+
+}
+
+.card h2{
+
+font-size:26px;
+
+}
+
+}

@@ -1,344 +1,38 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRABSEM</title>
 
-<title>CRABSEM</title>
+    <meta name="description" content="just one more chart.">
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="style.css">
 
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=Caveat:wght@700&family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
-<style>
-
-*{
-margin:0;
-padding:0;
-box-sizing:border-box;
-}
-
-html{
-scroll-behavior:smooth;
-}
-
-body{
-
-font-family:Poppins,sans-serif;
-background:#09040F;
-color:white;
-overflow-x:hidden;
-
-}
-
-/* background */
-
-body:before{
-
-content:"";
-
-position:fixed;
-
-inset:0;
-
-background:
-
-radial-gradient(circle at top,#6c2cff 0%,transparent 40%),
-
-radial-gradient(circle at bottom,#3b146f 0%,transparent 50%),
-
-#09040F;
-
-z-index:-5;
-
-}
-
-body:after{
-
-content:"";
-
-position:fixed;
-
-inset:0;
-
-background-image:
-
-radial-gradient(#ffffff22 1px,transparent 1px);
-
-background-size:55px 55px;
-
-opacity:.08;
-
-z-index:-4;
-
-}
-
-/* hero */
-
-.hero{
-
-min-height:100vh;
-
-display:flex;
-
-align-items:center;
-
-justify-content:center;
-
-padding:80px 10%;
-
-gap:90px;
-
-}
-
-.left{
-
-max-width:550px;
-
-}
-
-.tag{
-
-font-family:Caveat;
-
-font-size:38px;
-
-color:#d8b8ff;
-
-margin-bottom:15px;
-
-}
-
-h1{
-
-font-family:Anton;
-
-font-size:120px;
-
-line-height:.9;
-
-letter-spacing:4px;
-
-color:white;
-
-}
-
-.subtitle{
-
-font-size:22px;
-
-margin-top:25px;
-
-opacity:.85;
-
-line-height:1.6;
-
-}
-
-.button{
-
-display:inline-block;
-
-margin-top:40px;
-
-padding:18px 42px;
-
-background:#8b3dff;
-
-border-radius:999px;
-
-text-decoration:none;
-
-color:white;
-
-font-weight:700;
-
-transition:.25s;
-
-box-shadow:
-
-0 0 30px #8b3dff80;
-
-}
-
-.button:hover{
-
-transform:translateY(-4px);
-
-background:#a55cff;
-
-}
-
-.note{
-
-font-family:Caveat;
-
-font-size:30px;
-
-margin-top:30px;
-
-color:#bb92ff;
-
-}
-
-.right{
-
-position:relative;
-
-}
-
-.right img{
-
-width:470px;
-
-animation:float 5s ease-in-out infinite;
-
-filter:drop-shadow(0 0 60px #8b3dff);
-
-}
-
-.glow{
-
-position:absolute;
-
-width:420px;
-
-height:420px;
-
-background:#8b3dff;
-
-filter:blur(130px);
-
-opacity:.35;
-
-border-radius:50%;
-
-left:50%;
-
-top:50%;
-
-transform:translate(-50%,-50%);
-
-z-index:-1;
-
-}
-
-/* about */
-
-section{
-
-padding:120px 10%;
-
-}
-
-.sectionTitle{
-
-font-family:Anton;
-
-font-size:74px;
-
-line-height:.9;
-
-margin-bottom:25px;
-
-}
-
-.story{
-
-max-width:760px;
-
-font-size:22px;
-
-line-height:1.8;
-
-opacity:.9;
-
-}
-
-.hand{
-
-font-family:Caveat;
-
-font-size:32px;
-
-color:#b889ff;
-
-margin-top:25px;
-
-}
-
-footer{
-
-padding:80px;
-
-text-align:center;
-
-opacity:.5;
-
-}
-
-@keyframes float{
-
-0%{transform:translateY(0)}
-
-50%{transform:translateY(-18px)}
-
-100%{transform:translateY(0)}
-
-}
-
-@media(max-width:900px){
-
-.hero{
-
-flex-direction:column-reverse;
-
-text-align:center;
-
-gap:40px;
-
-}
-
-.right img{
-
-width:320px;
-
-}
-
-h1{
-
-font-size:72px;
-
-}
-
-.sectionTitle{
-
-font-size:48px;
-
-}
-
-.story{
-
-font-size:18px;
-
-}
-
-}
-
-</style>
-
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@700&family=Outfit:wght@300;400;600;700;900&display=swap" rel="stylesheet">
 </head>
 
 <body>
 
-<div class="hero">
+<div class="bg-glow"></div>
 
-<div class="left">
+<section class="hero">
 
-<div class="tag">
-just a crab.
+<div class="hero-left">
+
+<img src="crab.png" class="crab">
+
+</div>
+
+<div class="hero-right">
+
+<div class="note">
+← don't panic.
 </div>
 
 <h1>
@@ -346,77 +40,52 @@ CRABSEM
 </h1>
 
 <p class="subtitle">
+just one more chart...
+</p>
 
-One chart changed everything.
+<p class="description">
+
+A tiny purple crab.
+
+Touching moss.
+
+Watching charts.
+
+Surviving every dip.
 
 </p>
 
-<a class="button" href="#about">
+<button id="touchBtn">
+🌿 TOUCH MOSS
+</button>
 
-ENTER THE TIDE
-
-</a>
-
-<div class="note">
-
-← trust your claws
-
+<div id="message">
+touching moss...
 </div>
-
-</div>
-
-<div class="right">
-
-<div class="glow"></div>
-
-<img src="crab.png">
-
-</div>
-
-</div>
-
-<section id="about">
-
-<div class="sectionTitle">
-
-ONE CHART<br>
-
-CHANGED<br>
-
-EVERYTHING.
-
-</div>
-
-<p class="story">
-
-One day...
-
-a curious crab accidentally looked at one chart.
-
-Life has never been the same.
-
-Now he spends his days checking candles,
-touching moss,
-making memes,
-and pretending everything is under control.
-
-</p>
-
-<div class="hand">
-
-touch moss.
-
-stay based.
 
 </div>
 
 </section>
 
-<footer>
+<section class="thought">
 
-© CRABSEM
+<div class="card">
 
-</footer>
+<div class="handwritten">
+today's thought
+</div>
+
+<h2>
+
+"The strongest communities keep posting through every dip."
+
+</h2>
+
+</div>
+
+</section>
+
+<script src="script.js"></script>
 
 </body>
 

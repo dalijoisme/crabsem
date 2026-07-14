@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover">
+
+<title>CRAB AGENT</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/dashboard.css">
+
+</head>
+
+<body>
+
+<div class="app">
+
+<header class="topbar">
+
+<div class="logo">
+
+<img src="images/body.png">
+
+<div>
+
+<h2>CRAB AGENT</h2>
+
+<span>Powered by CRABSEM</span>
+
+</div>
+
+</div>
+
+<div class="search">
+
+<input
+id="searchInput"
+type="text"
+placeholder="Search token or paste contract..."
+autocomplete="off">
+
+</div>
+
+<div class="top-right">
+
+<div class="live-status" id="liveStatus">
+
+<span class="live-dot" id="liveStatusDot"></span>
+
+<span id="liveStatusText">LIVE</span>
+
+</div>
+
+<div class="walletMenu" id="walletMenu">
+
+<button id="walletButton" class="walletTrigger">
+
+Connect Wallet
+
+</button>
+
+<div class="walletDropdown" id="walletDropdown">
+
+<div class="walletDropdownHeader">
+
+<div class="walletAvatar">🦀</div>
+
+<div>
+
+<div class="walletDropdownTitle" id="walletTierLabel">
+Holder Verified
+</div>
+
+<div class="walletDropdownSub" id="walletAddressShort">
+--
+</div>
+
+</div>
+
+</div>
+
+<div class="walletDropdownRow">
+
+<span>Balance</span>
+
+<strong id="walletBalanceText">--</strong>
+
+</div>
+
+<div class="walletDropdownRow">
+
+<span>Tier</span>
+
+<span class="walletTierPill" id="walletTierText">--</span>
+
+</div>
+
+<a
+id="walletExplorerLink"
+class="walletDropdownLink"
+href="#"
+target="_blank"
+rel="noopener noreferrer">
+
+View on Explorer ↗
+
+</a>
+
+<button id="walletLogoutBtn" class="walletLogoutBtn">
+
+Logout
+
+</button>
+
+</div>
+
+</div>
+
+</div>
+
+</header>
+
+
+
+<div class="stats">
+
+<div class="stat">
+
+<p>Coins Scanned</p>
+
+<h2 id="totalCoins">
+
+0
+
+</h2>
+
+</div>
+
+<div class="stat">
+
+<p>Signals</p>
+
+<h2 id="signalCount">
+
+0
+
+</h2>
+
+</div>
+
+<div class="stat liveMonitorStat">
+
+<p>Live Monitoring</p>
+
+<h2 id="lastAnalysisText">
+
+Just now
+
+</h2>
+
+<small id="nextScanText">Next scan --</small>
+
+</div>
+
+<div class="stat" id="engineStat">
+
+<p>Engine</p>
+
+<h2 id="engineStatusText">
+
+Healthy
+
+</h2>
+
+</div>
+
+</div>
+
+
+
+<div class="content">
+
+<div class="coin-area">
+
+<div id="coinGrid" class="coin-grid">
+
+</div>
+
+</div>
+
+<aside class="detail-panel">
+
+<button id="closeDetailBtn" class="closeDetailBtn">✕ Close</button>
+
+<div id="detailContent">
+
+<div class="empty">
+
+<h2>
+
+CRAB AGENT
+
+</h2>
+
+<p>
+
+Select a coin to see AI analysis.
+
+</p>
+
+</div>
+
+</div>
+
+</aside>
+
+</div>
+
+</div>
+
+<script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+
+<script src="js/config.js"></script>
+<script src="js/analytics.js"></script>
+<script src="js/api.js"></script>
+<script src="js/discovery.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/dashboard.js"></script>
+
+</body>
+
+</html>

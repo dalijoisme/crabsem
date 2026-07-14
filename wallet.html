@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover">
+
+<title>CRAB AGENT</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/wallet.css">
+
+</head>
+
+<body>
+
+<div class="bgGlow"></div>
+
+<div class="walletPage">
+
+<div class="walletCard">
+
+<img
+src="images/body.png"
+class="walletLogo">
+
+<div class="powered">
+
+Powered by CRABSEM
+
+</div>
+
+<h1>
+
+CRAB AGENT
+
+</h1>
+
+<p>
+
+Connect your wallet to verify your CRABSEM holding before accessing the platform.
+
+</p>
+
+<button
+id="walletButton"
+class="primaryBtn">
+
+Connect Wallet
+
+</button>
+
+<div
+id="walletStatus"
+class="walletStatus">
+
+Wallet not connected
+
+</div>
+
+</div>
+
+</div>
+
+<div
+id="disclaimerBox"
+class="disclaimerOverlay hidden">
+
+<div class="disclaimerModal">
+
+<h2>
+
+Disclaimer
+
+</h2>
+
+<p>
+
+CRAB AGENT provides algorithmic analysis based on publicly available market data.
+
+</p>
+
+<p>
+
+Nothing displayed inside the application should be considered financial advice or investment advice.
+
+</p>
+
+<p>
+
+Always DYOR before making any investment decision.
+
+</p>
+
+<label class="agree">
+
+<input
+type="checkbox"
+id="agreeBox">
+
+<span>
+
+I understand the risks.
+
+</span>
+
+</label>
+
+<button
+
+id="continueButton"
+
+class="primaryBtn"
+
+disabled>
+
+Enter CRAB AGENT
+
+</button>
+
+</div>
+
+</div>
+
+<div class="featureList">
+
+<div class="featureItem">
+
+<div class="featureIcon">
+
+🦀
+
+</div>
+
+<div>
+
+<h3>
+
+CRAB SCORE
+
+</h3>
+
+<p>
+
+Analyze meme coins using the CRAB scoring engine.
+
+</p>
+
+</div>
+
+</div>
+
+<div class="featureItem">
+
+<div class="featureIcon">
+
+⚡
+
+</div>
+
+<div>
+
+<h3>
+
+Real-Time Scanner
+
+</h3>
+
+<p>
+
+Live liquidity, volume and momentum analysis.
+
+</p>
+
+</div>
+
+</div>
+
+<div class="featureItem">
+
+<div class="featureIcon">
+
+🔒
+
+</div>
+
+<div>
+
+<h3>
+
+Holder Exclusive
+
+</h3>
+
+<p>
+
+Access is available only for wallets holding CRABSEM.
+
+</p>
+
+</div>
+
+</div>
+
+</div>
+
+<footer>
+
+<a
+href="index.html">
+
+← Back to Website
+
+</a>
+
+</footer>
+
+<script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+
+<script src="js/config.js"></script>
+
+<script src="js/analytics.js"></script>
+
+<script src="js/wallet.js"></script>
+
+</body>
+
+</html>

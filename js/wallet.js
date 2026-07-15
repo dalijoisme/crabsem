@@ -2,21 +2,55 @@
 // CRAB AGENT
 // WALLET.JS - orchestrator
 //
-// Actual logic lives in js/wallet-*.js (flat, same folder as
-// every other script in this project - no subfolder, to avoid
+// Actual logic lives in js/*.js (flat, same folder as every
+// other script in this project - no subfolder, to avoid
 // path-resolution mistakes across different hosting setups):
-//   wallet-detect.js        - device / in-app browser detection
-//   wallet-provider.js      - Wallet Standard registry + legacy fallback
-//   wallet-deeplink.js      - official universal "browse" links
-//   wallet-connect.js       - unified connect() for any wallet
-//   wallet-verification.js  - CRABSEM holder check (unchanged logic)
-//   wallet-picker.js        - wallet picker / install prompt UI
+//   detect.js        - device / in-app browser detection
+//   provider.js       - Wallet Standard registry + legacy fallback
+//   deeplink.js       - official universal "browse" links
+//   connect.js        - unified connect() for any wallet
+//   verification.js   - CRABSEM holder check (unchanged logic)
+//   picker.js         - wallet picker / install prompt UI
 //
 // This file just wires the buttons on this page to those
 // modules. No wallet-specific wording or logic lives here -
 // "Connect Wallet" works the same regardless of which
 // Solana wallet the user actually has.
 // =====================================
+
+// =====================================
+// SESSION KEYS
+// holderVerified / walletAddress / verifiedUntil = wallet +
+// holding check result (set once, in verifiedHolder()).
+// acceptedDisclaimer = a SEPARATE concern, only set after the
+// user actually ticks the box and clicks continue - so a
+// closed tab between "wallet connected" and "disclaimer
+// accepted" can never skip the disclaimer.
+// =====================================
+
+const SESSION_VALID_HOURS = 24;
+
+function isSessionValid(){
+
+    const verified = sessionStorage.getItem("holderVerified") === "true";
+
+    const disclaimerOk = sessionStorage.getItem("acceptedDisclaimer") === "true";
+
+    const until = Number(sessionStorage.getItem("verifiedUntil") || 0);
+
+    return verified && disclaimerOk && Date.now() < until;
+
+}
+
+// If this tab already has a fully valid session (verified +
+// disclaimer accepted + not expired), skip straight to the
+// dashboard - never reconnect, never re-show the disclaimer.
+
+if(isSessionValid()){
+
+    window.location.href = "dashboard.html";
+
+}
 
 let wallet = null;
 
@@ -47,13 +81,8 @@ continueButton.onclick = () => {
     if (!agreeBox.checked) return;
 
     sessionStorage.setItem(
-        "crab_verified",
+        "acceptedDisclaimer",
         "true"
-    );
-
-    sessionStorage.setItem(
-        "crab_wallet",
-        wallet
     );
 
     window.location.href = "dashboard.html";
@@ -180,13 +209,18 @@ async function handleConnectClick(){
 function verifiedHolder(amount) {
 
     sessionStorage.setItem(
-        "crab_verified",
+        "holderVerified",
         "true"
     );
 
     sessionStorage.setItem(
-        "crab_wallet",
+        "walletAddress",
         wallet
+    );
+
+    sessionStorage.setItem(
+        "verifiedUntil",
+        String(Date.now() + SESSION_VALID_HOURS * 3600000)
     );
 
     // Cache the balance we just verified on-chain so
@@ -194,7 +228,7 @@ function verifiedHolder(amount) {
     // the same information right after this one.
 
     sessionStorage.setItem(
-        "crab_balance",
+        "walletBalance",
         String(amount)
     );
 

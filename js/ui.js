@@ -331,15 +331,62 @@ const UI = {
 
         const price = Number(pair.priceUsd || 0);
 
-        const takeProfitPrice =
-            price * (1 + (signal.target||0)/100);
-
         const stopLossPercent =
             signal.risk==="HIGH" ? 22 :
             signal.risk==="MEDIUM" ? 14 : 8;
 
-        const stopLossPrice =
-            price * (1 - stopLossPercent/100);
+        // TP/SL now expressed as Market Cap, not token price -
+        // same underlying growth multiple as before (price and
+        // FDV scale together), just a more intuitive unit for
+        // a meme coin audience. targetMC is already fdv*(1+
+        // target/100) from the engine - takeProfitMC reuses it
+        // directly since "take profit at the target" is the
+        // same number as "target market cap".
+
+        const takeProfitMC = signal.targetMC;
+
+        const stopLossMC =
+            signal.fdv * (1 - stopLossPercent/100);
+
+        const riskTierValue =
+            signal.risk==="HIGH" ? 90 :
+            signal.risk==="MEDIUM" ? 60 : 25;
+
+        const isBuyTier =
+            signal.action==="STRONG BUY" || signal.action==="BUY";
+
+        const isHold =
+            signal.action==="HOLD";
+
+        // AVOID-tier labels: only show the specific ones that
+        // actually apply, based on the real risks[] strings the
+        // engine already produced - not a blanket static list.
+
+        const risksText =
+            (signal.risks || []).join(" ").toLowerCase();
+
+        const avoidFlags = [];
+
+        if(risksText.includes("distribution") || risksText.includes("sold into") || risksText.includes("sell pressure")){
+
+            avoidFlags.push("Possible Distribution");
+
+        }
+
+        if(risksText.includes("extended") || risksText.includes("pumped") || risksText.includes("fake breakout")){
+
+            avoidFlags.push("Overextended Move");
+
+        }
+
+        avoidFlags.push("High Downside Risk", "Avoid New Entry");
+
+        const avoidFlagsHtml =
+            avoidFlags.map(f=>
+
+                `<div class="monitorRow"><span>${f}</span><strong class="changedYes">⚠</strong></div>`
+
+            ).join("");
 
         const whyItems =
             (signal.reasons && signal.reasons.length)
@@ -502,6 +549,22 @@ const UI = {
 
         </ul>
 
+        <div class="sectionTitle">Engine Snapshot</div>
+
+        ${scoreBar("Momentum", signal.momentumScore, 30)}
+
+        ${scoreBar("Liquidity", signal.liquidityScore, 15)}
+
+        ${scoreBar("Volume", signal.ratioScore, 20)}
+
+        ${scoreBar("Volatility", Math.min(100, Math.round(Math.abs(signal.momentum))), 100)}
+
+        ${scoreBar("Risk", riskTierValue, 100)}
+
+        ${scoreBar("Market Health", signal.backingScore, 10)}
+
+        ${scoreBar("Confidence", signal.confidence, 99)}
+
         ${riskHtml ? `
 
         <div class="sectionTitle">Risks To Watch</div>
@@ -514,13 +577,17 @@ const UI = {
 
         ` : ""}
 
+        ${
+
+        isBuyTier ? `
+
         <div class="sectionTitle">Target (Estimated)</div>
 
         <div class="targetGrid">
 
             <div class="metricBox">
 
-                <small>Expected %</small>
+                <small>Expected Return</small>
 
                 <strong>+${signal.target}%</strong>
 
@@ -536,17 +603,17 @@ const UI = {
 
             <div class="metricBox tp">
 
-                <small>Take Profit (est.)</small>
+                <small>Take Profit (Market Cap)</small>
 
-                <strong>${formatPrice(takeProfitPrice)}</strong>
+                <strong>$${format(takeProfitMC)}</strong>
 
             </div>
 
             <div class="metricBox sl">
 
-                <small>Stop Loss (est.)</small>
+                <small>Stop Loss (Market Cap)</small>
 
-                <strong>${formatPrice(stopLossPrice)}</strong>
+                <strong>$${format(stopLossMC)}</strong>
 
             </div>
 
@@ -557,6 +624,64 @@ const UI = {
             Estimates only, derived from the CRAB SCORE model - not a prediction or financial advice.
 
         </div>
+
+        `
+
+        : isHold ? `
+
+        <div class="sectionTitle">Trade Status</div>
+
+        <div class="monitorBox">
+
+            <div class="monitorRow">
+
+                <span>Recommendation</span>
+
+                <strong class="changedNo">No Trade Recommendation</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Reason</span>
+
+                <strong>Waiting for stronger confirmation</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Current Market Phase</span>
+
+                <strong>Fair Valuation</strong>
+
+            </div>
+
+        </div>
+
+        `
+
+        : `
+
+        <div class="sectionTitle">Risk Assessment</div>
+
+        <div class="monitorBox">
+
+            <div class="monitorRow">
+
+                <span>Risk Level</span>
+
+                <strong class="changedYes">${signal.risk}</strong>
+
+            </div>
+
+            ${avoidFlagsHtml}
+
+        </div>
+
+        `
+
+        }
 
         <div class="sectionTitle">Market Health</div>
 

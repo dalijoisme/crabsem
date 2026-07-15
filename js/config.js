@@ -35,6 +35,15 @@ const CONFIG = {
     // ANALYTICS_ENDPOINT to a real URL later to actually
     // transmit events; until then, treat all analytics as
     // local-only instrumentation.
-    ANALYTICS_ENDPOINT: null
+    ANALYTICS_ENDPOINT: null,
+
+    // ADMIN
+    // Temporary client-side password gate for admin.html, as
+    // explicitly requested ("nanti akan saya pindahkan ke
+    // backend"). Nothing sensitive is actually protected by
+    // this - only aggregate, already-public market analytics.
+    // Replace this with a real server-side check before this
+    // is treated as an actual access control.
+    ADMIN_PASSWORD: "crabadmin2026"
 
 };

@@ -1,4 +1,16 @@
-if(sessionStorage.getItem("crab_verified")!=="true"){
+function isSessionValid(){
+
+    const verified = sessionStorage.getItem("holderVerified") === "true";
+
+    const disclaimerOk = sessionStorage.getItem("acceptedDisclaimer") === "true";
+
+    const until = Number(sessionStorage.getItem("verifiedUntil") || 0);
+
+    return verified && disclaimerOk && Date.now() < until;
+
+}
+
+if(!isSessionValid()){
 
     window.location.href="wallet.html";
 
@@ -27,7 +39,7 @@ const walletTierText=document.getElementById("walletTierText");
 const walletExplorerLink=document.getElementById("walletExplorerLink");
 const walletLogoutBtn=document.getElementById("walletLogoutBtn");
 
-const wallet=sessionStorage.getItem("crab_wallet");
+const wallet=sessionStorage.getItem("walletAddress");
 
 let timer=null;
 
@@ -88,7 +100,7 @@ function renderWalletBalance(amount){
 
 async function loadWalletBalance(walletAddress){
 
-    const cached = sessionStorage.getItem("crab_balance");
+    const cached = sessionStorage.getItem("walletBalance");
 
     if(cached !== null && cached !== undefined && cached !== ""){
 
@@ -143,7 +155,7 @@ async function loadWalletBalance(walletAddress){
                 .account.data.parsed.info
                 .tokenAmount.uiAmount;
 
-        sessionStorage.setItem("crab_balance", String(amount));
+        sessionStorage.setItem("walletBalance", String(amount));
 
         renderWalletBalance(Number(amount));
 
@@ -215,6 +227,8 @@ if(walletButton){
 // ======================================
 
 searchInput.addEventListener("keyup",()=>{
+
+    sessionStorage.setItem("crab_search_query", searchInput.value);
 
     clearTimeout(timer);
 
@@ -472,6 +486,7 @@ function renderPairs(pairs){
 // ======================================
 
 let renderToken = 0;
+let sessionRestoreDone = false;
 
 function renderPairsIncrementally(pairs){
 
@@ -506,12 +521,73 @@ function renderPairsIncrementally(pairs){
             requestAnimationFrame(renderNextBatch);
 
         }
+        else if(!sessionRestoreDone){
+
+            sessionRestoreDone = true;
+
+            restoreSessionState(pairs);
+
+        }
 
     }
 
     requestAnimationFrame(renderNextBatch);
 
 }
+
+
+// ======================================
+// SESSION STATE RESTORE (Part 7)
+// Runs once, right after the first full render after a page
+// load/refresh. Restores whichever coin was open in the
+// detail panel and the scroll position - so refreshing the
+// page, or coming back from a window.open() DexScreener tab,
+// never resets the dashboard.
+// ======================================
+
+function restoreSessionState(pairs){
+
+    const selectedAddress = sessionStorage.getItem("crab_selected_coin");
+
+    if(selectedAddress){
+
+        const match = pairs.find(p=>p.baseToken?.address === selectedAddress);
+
+        if(match){
+
+            showDetail(match);
+
+        }
+
+    }
+
+    const savedScroll = sessionStorage.getItem("crab_scroll_y");
+
+    if(savedScroll){
+
+        requestAnimationFrame(()=>{
+
+            window.scrollTo(0, Number(savedScroll));
+
+        });
+
+    }
+
+}
+
+let scrollSaveTimer = null;
+
+window.addEventListener("scroll", ()=>{
+
+    clearTimeout(scrollSaveTimer);
+
+    scrollSaveTimer = setTimeout(()=>{
+
+        sessionStorage.setItem("crab_scroll_y", String(window.scrollY));
+
+    }, 200);
+
+});
 
 
 // ======================================
@@ -686,6 +762,14 @@ function showDetail(pair){
 
     }
 
+    const address = pair.baseToken?.address;
+
+    if(address){
+
+        sessionStorage.setItem("crab_selected_coin", address);
+
+    }
+
 }
 
 if(closeDetailBtn){
@@ -697,6 +781,8 @@ if(closeDetailBtn){
             detailPanel.classList.remove("mobileOpen");
 
         }
+
+        sessionStorage.removeItem("crab_selected_coin");
 
     };
 
@@ -802,7 +888,20 @@ function updateLiveMonitoring(){
 // INIT
 // ======================================
 
-loadTrending();
+const savedQuery = sessionStorage.getItem("crab_search_query");
+
+if(savedQuery && savedQuery.trim().length>=2){
+
+    searchInput.value = savedQuery;
+
+    loadSearch();
+
+}
+else{
+
+    loadTrending();
+
+}
 
 
 // ======================================

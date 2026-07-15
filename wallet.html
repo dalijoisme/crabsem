@@ -129,6 +129,47 @@ Enter CRAB AGENT
 
 </div>
 
+<!-- Wallet picker / "no wallet detected" / mobile deep-link
+     chooser - same visual card style as the disclaimer modal
+     above. Content is filled in dynamically by js/wallet/picker.js
+     depending on what's detected (never assumes one specific
+     wallet). -->
+
+<div
+id="walletPickerOverlay"
+class="walletPickerOverlay hidden">
+
+<div class="walletPickerModal">
+
+<h2 id="walletPickerTitle">
+
+Connect Wallet
+
+</h2>
+
+<p class="walletPickerSub" id="walletPickerSub">
+
+Choose a wallet to continue
+
+</p>
+
+<div id="walletPickerList" class="walletPickerList">
+
+</div>
+
+<button
+id="walletPickerCloseBtn"
+class="walletPickerClose"
+type="button">
+
+Cancel
+
+</button>
+
+</div>
+
+</div>
+
 <div class="featureList">
 
 <div class="featureItem">
@@ -222,11 +263,21 @@ href="index.html">
 
 </footer>
 
-<script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
-
 <script src="js/config.js"></script>
 
 <script src="js/analytics.js"></script>
+
+<script src="js/detect.js"></script>
+
+<script src="js/provider.js"></script>
+
+<script src="js/deeplink.js"></script>
+
+<script src="js/connect.js"></script>
+
+<script src="js/verification.js"></script>
+
+<script src="js/picker.js"></script>
 
 <script src="js/wallet.js"></script>
 

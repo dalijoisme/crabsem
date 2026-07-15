@@ -1,6 +1,21 @@
 // =====================================
 // CRAB AGENT
-// WALLET.JS
+// WALLET.JS - orchestrator
+//
+// Actual logic lives in js/wallet-*.js (flat, same folder as
+// every other script in this project - no subfolder, to avoid
+// path-resolution mistakes across different hosting setups):
+//   wallet-detect.js        - device / in-app browser detection
+//   wallet-provider.js      - Wallet Standard registry + legacy fallback
+//   wallet-deeplink.js      - official universal "browse" links
+//   wallet-connect.js       - unified connect() for any wallet
+//   wallet-verification.js  - CRABSEM holder check (unchanged logic)
+//   wallet-picker.js        - wallet picker / install prompt UI
+//
+// This file just wires the buttons on this page to those
+// modules. No wallet-specific wording or logic lives here -
+// "Connect Wallet" works the same regardless of which
+// Solana wallet the user actually has.
 // =====================================
 
 let wallet = null;
@@ -15,11 +30,13 @@ const disclaimer = document.getElementById("disclaimerBox");
 const agreeBox = document.getElementById("agreeBox");
 const continueButton = document.getElementById("continueButton");
 
+WalletPicker.init();
+
 // =====================================
 // EVENT
 // =====================================
 
-walletButton.onclick = connectWallet;
+walletButton.onclick = handleConnectClick;
 
 agreeBox.onchange = () => {
     continueButton.disabled = !agreeBox.checked;
@@ -44,123 +61,113 @@ continueButton.onclick = () => {
 };
 
 // =====================================
-// CONNECT WALLET
+// CONNECT FLOW
+//
+// 1. Ask WalletProvider what's actually available right now
+//    (Wallet Standard registry + legacy globals). This also
+//    covers "already inside a wallet's in-app browser" - the
+//    provider is simply already there, so no redirect ever
+//    happens in that case.
+// 2. Nothing found + mobile browser -> offer deep links into
+//    each supported wallet's in-app browser (never claims a
+//    specific wallet "isn't installed" - we can't know that).
+// 3. Nothing found + desktop -> genuinely no wallet, offer
+//    installs.
+// 4. Exactly one wallet -> connect directly, no picker needed.
+// 5. More than one -> show the picker.
 // =====================================
 
-async function connectWallet() {
+async function handleConnectClick(){
 
-    try {
+    try{
 
-        if (!window.solana || !window.solana.isPhantom) {
+        walletButton.disabled = true;
 
-            alert("Please install Phantom Wallet.");
+        walletStatus.innerHTML = "Detecting wallets...";
+
+        const wallets = WalletProvider.getAvailableWallets();
+
+        if(wallets.length === 0){
+
+            if(WalletDetect.isMobile() && !WalletDetect.isInWalletBrowser()){
+
+                walletStatus.innerHTML = "Choose a wallet app to continue";
+
+                const deeplinks = WalletDeeplink.buildLinksForCurrentPage();
+
+                WalletPicker.showMobileOptions(deeplinks);
+
+                walletButton.disabled = false;
+
+                return;
+
+            }
+
+            walletStatus.innerHTML = "No wallet detected";
+
+            WalletPicker.showNoWalletModal();
+
+            walletButton.disabled = false;
+
             return;
 
         }
 
-        walletButton.disabled = true;
+        let chosen;
+
+        if(wallets.length === 1){
+
+            chosen = wallets[0];
+
+        }
+        else{
+
+            walletStatus.innerHTML = "Choose a wallet...";
+
+            chosen = await WalletPicker.showPicker(wallets);
+
+        }
+
         walletStatus.innerHTML = "Connecting Wallet...";
 
-        const response = await window.solana.connect();
+        const { address } = await WalletConnect.connect(chosen);
 
-        wallet = response.publicKey.toString();
+        wallet = address;
 
         walletStatus.innerHTML = "Checking Holder...";
 
-        const amount = await getCrabHolding(wallet);
+        const amount = await WalletVerification.getCrabHolding(wallet);
 
-        if (amount !== null && amount >= CONFIG.MIN_CRABSEM_HOLDING) {
+        if(amount !== null && amount >= CONFIG.MIN_CRABSEM_HOLDING){
 
             verifiedHolder(amount);
 
-        } else {
+        }
+        else{
 
             walletStatus.innerHTML = "❌ You must hold CRABSEM.";
+
             walletButton.disabled = false;
 
         }
 
     }
-    catch (err) {
+    catch(err){
 
         console.error(err);
 
-        walletStatus.innerHTML = "Connection Failed";
+        if(err?.message === "cancelled"){
+
+            walletStatus.innerHTML = "Wallet not connected";
+
+        }
+        else{
+
+            walletStatus.innerHTML = "Connection Failed";
+
+        }
 
         walletButton.disabled = false;
-
-    }
-
-}
-
-// =====================================
-// GET CRABSEM HOLDING
-// Returns the real on-chain balance (number),
-// or null if the account/holding cannot be
-// determined (no account, RPC error, etc).
-// =====================================
-
-async function getCrabHolding(walletAddress) {
-
-    try {
-
-        const response = await fetch(CONFIG.HELIUS_RPC, {
-
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-
-                jsonrpc: "2.0",
-
-                id: 1,
-
-                method: "getTokenAccountsByOwner",
-
-                params: [
-
-                    walletAddress,
-
-                    {
-                        mint: CONFIG.CRAB_MINT
-                    },
-
-                    {
-                        encoding: "jsonParsed"
-                    }
-
-                ]
-
-            })
-
-        });
-
-        const data = await response.json();
-
-        if (!data.result) {
-            return null;
-        }
-
-        if (data.result.value.length === 0) {
-            return 0;
-        }
-
-        const amount =
-            data.result.value[0]
-                .account.data.parsed.info
-                .tokenAmount.uiAmount;
-
-        return Number(amount || 0);
-
-    }
-    catch (e) {
-
-        console.error(e);
-
-        return null;
 
     }
 
@@ -183,8 +190,8 @@ function verifiedHolder(amount) {
     );
 
     // Cache the balance we just verified on-chain so
-    // the dashboard doesn't need a second Helius call
-    // for the same information right after this one.
+    // the dashboard doesn't need a second RPC call for
+    // the same information right after this one.
 
     sessionStorage.setItem(
         "crab_balance",

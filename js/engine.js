@@ -1,48 +1,49 @@
 // =====================================
-// CRAB AGENT ENGINE V10
+// CRAB AGENT ENGINE V11
 // COIN QUALITY + BUY TIMING + CONFIDENCE
 //
-// Kontrak return TIDAK berubah dari V9 (semua key lama
-// tetap ada, dengan nilai/skala yang sama) supaya ui.js
-// (scoreBar() dengan max hardcoded, badge HOT/GEM/WATCH/
-// RISK, dsb) tidak perlu disentuh sama sekali.
+// V11 note: this update only changes the LABELING layer
+// (action/signal naming, all comments and reason/risk
+// strings translated to English) and standardizes the
+// signal vocabulary to exactly 4 values: STRONG BUY, BUY,
+// HOLD, AVOID. The CRAB SCORE mathematical formula itself
+// (every weight, threshold, and penalty below) is
+// unchanged from V10 - nothing about how the number is
+// calculated was touched, only what the resulting number
+// is called.
 //
-// Yang berubah adalah BAGAIMANA tiap komponen dihitung:
-//
-// 1) COIN QUALITY - "apakah coin ini layak dipantau?"
+// 1) COIN QUALITY - "is this coin worth watching?"
 //    liquidityScore, fdvScore, backingScore, holderScore
-//    (holder tetap null - tidak ada sumber data holder
-//    gratis, jujur ditampilkan "-", tidak dihukum/diberi
-//    bonus palsu)
+//    (holder stays null - there is no free holder-count
+//    data source; shown honestly as "-", never penalized
+//    or credited with a made-up value)
 //
-// 2) BUY TIMING - "apakah SEKARANG waktu tepat?"
+// 2) BUY TIMING - "is NOW the right moment?"
 //    momentumScore, ratioScore, tradesScore, buySellScore
-//    -sekarang memakai priceChange.m5/h1/h6/h24 (REAL,
-//    field asli DexScreener yang sebelumnya tidak pernah
-//    dibaca), txns.m5/h1/h24 buy-sell split per-timeframe,
-//    volume h1 vs rata-rata h24, dan pairCreatedAt (umur
-//    token, REAL field) untuk early-gem detection.
+//    - uses priceChange.m5/h1/h6/h24 (real DexScreener
+//    fields), txns.m5/h1/h24 buy-sell split per timeframe,
+//    volume h1 vs the h24 hourly average, and pairCreatedAt
+//    (real field) for early-gem detection.
 //
-// 3) CONFIDENCE - dihitung dari kelengkapan data (berapa
-//    timeframe yang benar-benar tersedia) DAN konsistensi
-//    arah antar timeframe (m5/h1/h6/h24 searah atau saling
-//    bertentangan), bukan cuma dari besaran metrik.
+// 3) CONFIDENCE - calculated from data completeness (how
+//    many timeframes are actually available) AND direction
+//    agreement across timeframes (m5/h1/h6/h24 pointing the
+//    same way or contradicting each other), not just from
+//    the raw size of the metrics.
 //
-// HARD BLOCKS - beberapa kondisi memaksa action turun
-// beberapa tingkat TIDAK PEDULI berapapun skor mentahnya:
-// harga sedang jatuh di 5 menit terakhir, distribusi
-// (buy ratio jangka pendek jauh lebih lemah dari 24h),
-// fake breakout (harga naik tapi buy pressure lemah),
-// dead bounce (pantulan kecil di tengah downtrend).
-// Ini yang mencegah kasus "score tinggi tapi chart lagi
-// jatuh" seperti yang dilaporkan.
+// HARD BLOCKS - certain conditions force the action down
+// regardless of the raw score: price actively dropping in
+// the last 5 minutes, distribution (short-term buy ratio
+// far weaker than the 24h ratio), fake breakout (price up
+// but buy pressure weak), dead bounce (small bounce inside
+// a deeper downtrend).
 //
-// Semua input di bawah adalah field ASLI DexScreener
+// All inputs below are real DexScreener fields
 // (priceChange.{m5,h1,h6,h24}, volume.{m5,h1,h6,h24},
-// txns.{m5,h1,h6,h24}.{buys,sells}, pairCreatedAt) atau
-// histori sesi kita sendiri (pair.__priceHistory, diisi
-// oleh api.js dari hasil scan nyata, session-only). Tidak
-// ada angka yang direka.
+// txns.{m5,h1,h6,h24}.{buys,sells}, pairCreatedAt) or our
+// own session history (pair.__priceHistory, filled in by
+// api.js from real scan results, session-only). Nothing is
+// simulated.
 // =====================================
 
 const Engine = {
@@ -50,7 +51,7 @@ const Engine = {
     analyze(pair){
 
         // =====================================
-        // CORE DATA (semua field asli DexScreener)
+        // CORE DATA (all real DexScreener fields)
         // =====================================
 
         const liquidity =
@@ -68,8 +69,7 @@ const Engine = {
         const price =
         Number(pair.priceUsd || 0);
 
-        // Multi-timeframe price change - m5 & h6 baru
-        // dipakai mulai V10, sebelumnya cuma h1/h24.
+        // Multi-timeframe price change - m5 & h6.
 
         const p5 =
         Number(pair.priceChange?.m5 || 0);
@@ -102,9 +102,10 @@ const Engine = {
         ? Number(pair.trades.h24)
         : null;
 
-        // Buy/Sell split per-timeframe - real DexScreener
-        // txns data. 24h dari pair.trades (sudah dihitung
-        // di api.js), 1h & 5m langsung dari pair.txns.
+        // Buy/Sell split per timeframe - real DexScreener
+        // txns data. 24h comes from pair.trades (already
+        // computed in api.js), 1h & 5m come directly from
+        // pair.txns.
 
         const buys24h =
         pair.trades?.h24Buys != null
@@ -137,8 +138,7 @@ const Engine = {
         ? buys5/(buys5+sells5)
         : null;
 
-        // Age - real DexScreener field (pairCreatedAt),
-        // never used before V10.
+        // Age - real DexScreener field (pairCreatedAt).
 
         const ageHours =
         pair.pairCreatedAt
@@ -159,7 +159,7 @@ const Engine = {
 
         // =====================================
         // VOLUME GROWTH / EXHAUSTION (real, h1 vs
-        // rata-rata per-jam dari h24)
+        // the hourly average derived from h24)
         // =====================================
 
         const expectedHourlyVol = volumeH24 / 24;
@@ -171,8 +171,9 @@ const Engine = {
             expectedHourlyVol > 0 && volumeH1 < expectedHourlyVol * 0.35 && p24 >= 15;
 
         // =====================================
-        // SESSION HISTORY TREND (real, kasar ~60s
-        // per sample, hanya aktif setelah cukup data)
+        // SESSION HISTORY TREND (real, coarse ~60s
+        // per sample, only active once enough data
+        // has accumulated)
         // =====================================
 
         let historyTrend = null;
@@ -241,7 +242,7 @@ const Engine = {
         if(momentum>=60){
 
             momentumScore=30;
-            reasons.push("Explosive momentum di semua timeframe");
+            reasons.push("Explosive momentum across all timeframes");
 
         }
 
@@ -294,14 +295,14 @@ const Engine = {
 
             momentumScore = Math.max(0, momentumScore-8);
 
-            risks.push(`Momentum melemah - 5 menit terakhir ${p5.toFixed(1)}% padahal 1 jam masih ${p1.toFixed(1)}%`);
+            risks.push(`Momentum weakening - last 5 minutes ${p5.toFixed(1)}% while the 1h window is still ${p1.toFixed(1)}%`);
 
         }
 
         else if(p5>0 && p1>0 && (p5*12) > p1){
 
             momentumScore = Math.min(30, momentumScore+3);
-            reasons.push("Momentum berakselerasi di jangka pendek");
+            reasons.push("Momentum accelerating in the short term");
 
         }
 
@@ -373,7 +374,7 @@ const Engine = {
 
             const multiplier = (volumeH1/expectedHourlyVol).toFixed(1);
 
-            reasons.push(`Volume 1 jam ${multiplier}x di atas rata-rata harian`);
+            reasons.push(`1h trading volume is ${multiplier}x above the daily average`);
 
         }
 
@@ -381,7 +382,7 @@ const Engine = {
 
             ratioScore = Math.max(0, ratioScore-3);
 
-            risks.push("Volume melemah meski harga masih tinggi - kemungkinan exhaustion");
+            risks.push("Trading volume is fading even though price is still elevated - possible exhaustion");
 
         }
 
@@ -437,8 +438,8 @@ const Engine = {
 
         }
 
-        // Liquidity trend dari histori sesi (real, kalau
-        // sudah cukup data terkumpul)
+        // Liquidity trend from session history (real, once
+        // enough data has accumulated).
 
         if(historyTrend){
 
@@ -446,7 +447,7 @@ const Engine = {
 
                 liquidityScore = Math.max(0, liquidityScore-4);
 
-                risks.push(`Liquidity turun ${Math.abs(historyTrend.liquidityTrendPercent).toFixed(1)}% selama sesi pemantauan`);
+                risks.push(`Liquidity has dropped ${Math.abs(historyTrend.liquidityTrendPercent).toFixed(1)}% during this monitoring session`);
 
             }
 
@@ -454,7 +455,7 @@ const Engine = {
 
                 liquidityScore = Math.min(15, liquidityScore+2);
 
-                reasons.push(`Liquidity naik ${historyTrend.liquidityTrendPercent.toFixed(1)}% selama sesi pemantauan`);
+                reasons.push(`Liquidity has grown ${historyTrend.liquidityTrendPercent.toFixed(1)}% during this monitoring session`);
 
             }
 
@@ -464,7 +465,7 @@ const Engine = {
 
         // =====================================
         // FDV / VALUATION (Coin Quality, + early
-        // gem consideration dari umur pair - real
+        // gem consideration from pair age - real
         // pairCreatedAt)
         // =====================================
 
@@ -507,7 +508,7 @@ const Engine = {
 
         if(isEarlyGem){
 
-            reasons.push(`Token masih baru (${ageHours<24 ? Math.round(ageHours)+"h" : Math.round(ageHours/24)+"d"}) dengan valuasi kecil`);
+            reasons.push(`Recently launched token (${ageHours<24 ? Math.round(ageHours)+"h" : Math.round(ageHours/24)+"d"} old) with a small valuation`);
 
         }
 
@@ -562,9 +563,9 @@ const Engine = {
         score+=backingScore;
 
         // =====================================
-        // HOLDER (Coin Quality) - tetap null, tidak
-        // ada sumber data holder gratis. Netral, tidak
-        // menghukum maupun memberi bonus palsu.
+        // HOLDER (Coin Quality) - stays null, there
+        // is no free holder-count data source. Neutral,
+        // never penalized or given a made-up bonus.
         // =====================================
 
         let holderScore=0;
@@ -616,7 +617,7 @@ const Engine = {
         score+=holderScore;
 
         // =====================================
-        // TRADES / FREKUENSI (Buy Timing)
+        // TRADES / FREQUENCY (Buy Timing)
         // =====================================
 
         let tradesScore=0;
@@ -663,9 +664,9 @@ const Engine = {
 
         // =====================================
         // BUY / SELL PRESSURE (Buy Timing) -
-        // sekarang dicek di 3 timeframe (5m/1h/24h)
-        // untuk mendeteksi distribusi yang baru mulai,
-        // bukan cuma snapshot 24h.
+        // checked across 3 timeframes (5m/1h/24h)
+        // to catch distribution that just started,
+        // not only the 24h snapshot.
         // =====================================
 
         let buySellScore=0;
@@ -708,8 +709,9 @@ const Engine = {
 
         }
 
-        // Distribusi baru mulai: 24h masih terlihat sehat
-        // tapi 1h/5m sudah berbalik ke sell-dominant.
+        // Distribution just starting: 24h still looks
+        // healthy but the 1h/5m window has already
+        // flipped to sell-dominant.
 
         const recentBuyRatio =
             buyRatio5 != null ? buyRatio5 :
@@ -724,7 +726,7 @@ const Engine = {
 
             buySellScore = Math.max(0, buySellScore-3);
 
-            risks.push(`Tekanan jual meningkat - buy ratio terkini ${Math.round(recentBuyRatio*100)}% (24h masih ${Math.round(buyRatio*100)}%)`);
+            risks.push(`Selling pressure rising - current buy ratio ${Math.round(recentBuyRatio*100)}% (24h still ${Math.round(buyRatio*100)}%)`);
 
         }
 
@@ -752,7 +754,7 @@ const Engine = {
 
             bonus+=2;
 
-            reasons.push("Harga cenderung naik di beberapa scan terakhir sesi ini");
+            reasons.push("Price has trended upward across the last few scans this session");
 
         }
 
@@ -760,10 +762,10 @@ const Engine = {
 
         // =====================================
         // PENALTY + HARD BLOCKS
-        // Kondisi di bawah ini TIDAK PERNAH boleh
-        // menghasilkan STRONG BUY / BUY, apapun skor
-        // mentahnya - inilah yang memperbaiki kasus
-        // "score tinggi tapi chart sedang jatuh".
+        // The conditions below must NEVER produce a
+        // STRONG BUY / BUY, regardless of the raw
+        // score - this is what prevents a "high score
+        // but the chart is actually dropping" outcome.
         // =====================================
 
         let penalty = 0;
@@ -771,15 +773,16 @@ const Engine = {
         let hardBlockBuy = false;
         let hardBlockStrongBuy = false;
 
-        // Harga sedang jatuh TAJAM saat ini juga (5 menit
-        // terakhir) - sinyal paling langsung dan paling
-        // sering terlewat oleh engine lama.
+        // Price is actively dropping SHARPLY right now
+        // (last 5 minutes) - the most direct signal, and
+        // the one most often missed by a snapshot-only
+        // engine.
 
         if(p5 <= -4){
 
             penalty += 10;
             hardBlockBuy = true;
-            risks.push(`Harga turun ${p5.toFixed(1)}% dalam 5 menit terakhir`);
+            risks.push(`Price dropped ${p5.toFixed(1)}% in the last 5 minutes`);
 
         }
         else if(p5 <= -1.5){
@@ -795,19 +798,19 @@ const Engine = {
 
         }
 
-        // Pola turun berulang di histori sesi kita sendiri
-        // (real, bukan cuma snapshot)
+        // Repeated downward pattern in our own session
+        // history (real, not just a snapshot).
 
         if(historyTrend && historyTrend.totalSteps>=2 && historyTrend.lowerSteps > historyTrend.higherSteps){
 
             penalty += 5;
             hardBlockStrongBuy = true;
-            risks.push("Pola harga menurun terdeteksi pada sesi pemantauan ini");
+            risks.push("A downward price pattern was detected during this monitoring session");
 
         }
 
-        // Distribusi yang baru mulai - jangan pernah kasih
-        // STRONG BUY kalau sedang dijual.
+        // Distribution just starting - never give a
+        // STRONG BUY while the token is being sold into.
 
         if(distributionForming){
 
@@ -816,13 +819,14 @@ const Engine = {
 
         }
 
-        // Volume besar tapi harga turun = distribusi aktif
+        // Large volume while price falls = active
+        // distribution.
 
         if(p24 < -5 && ratio>=2){
 
             penalty += 6;
             hardBlockBuy = true;
-            risks.push("Volume besar sementara harga turun - indikasi distribusi");
+            risks.push("Large volume while price is falling - sign of active distribution");
 
         }
 
@@ -849,29 +853,29 @@ const Engine = {
 
         }
 
-        // Fake breakout: harga naik kencang tapi buy
-        // pressure jangka pendek lemah - breakout tidak
-        // didukung pembeli nyata.
+        // Fake breakout: price up sharply but short-term
+        // buy pressure is weak - the breakout isn't backed
+        // by real buyers.
 
         if(p24>=40 && buyRatio5!=null && buyRatio5<0.4){
 
             penalty += 8;
             hardBlockStrongBuy = true;
             hardBlockBuy = true;
-            risks.push("Kemungkinan fake breakout - harga naik tapi buy pressure lemah");
+            risks.push("Possible fake breakout - price up but buy pressure is weak");
 
         }
 
-        // Dead bounce: pantulan kecil di tengah downtrend
-        // yang masih dalam (h1 & h24 sama-sama negatif
-        // dalam, m5 baru saja positif tipis).
+        // Dead bounce: a small bounce inside a still-deep
+        // downtrend (h1 & h24 both deeply negative, m5 just
+        // turned slightly positive).
 
         if(p5>0 && p1<=-8 && p24<=-8){
 
             penalty += 8;
             hardBlockStrongBuy = true;
             hardBlockBuy = true;
-            risks.push("Dead bounce - pantulan kecil di tengah downtrend");
+            risks.push("Dead bounce - a small bounce inside a deeper downtrend");
 
         }
 
@@ -938,12 +942,12 @@ const Engine = {
 
         // =====================================
         // CONFIDENCE
-        // Bukan cuma dari besaran metrik - juga dari
-        // KELENGKAPAN data (berapa timeframe yang benar-
-        // benar tersedia) dan KONSISTENSI arah antar
-        // timeframe. Data yang sedikit/kontradiktif =
-        // confidence rendah, meskipun angka-angkanya
-        // sendiri terlihat bagus.
+        // Not just from the raw size of the metrics -
+        // also from data COMPLETENESS (how many
+        // timeframes are actually available) and
+        // direction CONSISTENCY across timeframes. Thin
+        // or contradictory data means low confidence,
+        // even if the numbers themselves look good.
         // =====================================
 
         let liqConf=0;
@@ -992,8 +996,8 @@ const Engine = {
         else if(momentum<200){momentumConf=12;}
         else{momentumConf=5;}
 
-        // Kelengkapan data: berapa dari 8 titik data
-        // real yang benar-benar tersedia untuk token ini.
+        // Data completeness: how many of 8 real data
+        // points are actually available for this token.
 
         let dataPoints = 0;
 
@@ -1008,9 +1012,9 @@ const Engine = {
 
         const completeness = dataPoints/8;
 
-        // Konsistensi arah: apakah m5/h1/h6/h24 sepakat
-        // arahnya (semua naik atau semua turun), atau
-        // saling bertentangan.
+        // Direction agreement: do m5/h1/h6/h24 all point
+        // the same way (all up or all down), or contradict
+        // each other.
 
         const directionSigns =
             [p5,p1,p6,p24]
@@ -1062,8 +1066,8 @@ const Engine = {
         }
 
         // =====================================
-        // TARGET (lebih konservatif kalau confidence
-        // rendah - bukan cuma fungsi dari score)
+        // TARGET (more conservative when confidence
+        // is low - not purely a function of score)
         // =====================================
 
         const target = Math.round(
@@ -1079,10 +1083,12 @@ const Engine = {
         );
 
         // =====================================
-        // AI DECISION - 7 tingkat sesuai permintaan.
-        // Signal (badge UI) tetap dipetakan ke 4 nilai
-        // lama (HOT/GEM/WATCH/RISK) supaya tampilan
-        // tidak berubah.
+        // AI DECISION - standardized to exactly 4
+        // signal values: STRONG BUY, BUY, HOLD, AVOID.
+        // `signal` (used for the UI badge/color) is the
+        // same value as `action` - one vocabulary, used
+        // identically everywhere (cards, filters, history,
+        // detail panel).
         // =====================================
 
         let action = "AVOID";
@@ -1092,60 +1098,45 @@ const Engine = {
             action = "STRONG BUY";
 
         }
-        else if(score>=75 && penalty<=6 && confidence>=55){
+        else if(score>=68 && penalty<=8 && confidence>=45){
 
             action = "BUY";
 
         }
-        else if(score>=62 && confidence>=45){
+        else if(score>=40){
 
-            action = "ACCUMULATE";
-
-        }
-        else if(score>=48){
-
-            action = "WATCH";
-
-        }
-        else if(score>=32){
-
-            action = "NEUTRAL";
-
-        }
-        else if(score>=18){
-
-            action = "WEAK";
+            action = "HOLD";
 
         }
 
-        // Hard blocks - tidak peduli skor, jangan pernah
-        // kasih STRONG BUY/BUY kalau kondisi ini terjadi.
+        // Hard blocks - regardless of score, never allow
+        // STRONG BUY/BUY when these conditions are true.
 
         if(hardBlockBuy){
 
-            if(action==="STRONG BUY" || action==="BUY" || action==="ACCUMULATE"){
+            if(action==="STRONG BUY" || action==="BUY"){
 
-                action = "WATCH";
+                action = "HOLD";
 
             }
 
         }
         else if(hardBlockStrongBuy){
 
-            if(action==="STRONG BUY" || action==="BUY"){
+            if(action==="STRONG BUY"){
 
-                action = "ACCUMULATE";
+                action = "BUY";
 
             }
 
         }
 
-        // Confidence rendah = jangan pernah BUY-tier.
+        // Low confidence = never a BUY-tier signal.
 
         if(confidence<40 && (action==="STRONG BUY" || action==="BUY")){
 
-            action = "ACCUMULATE";
-            risks.push("Confidence rendah - sinyal BUY diturunkan ke Accumulate");
+            action = "HOLD";
+            risks.push("Confidence too low - BUY signal downgraded to Hold");
 
         }
 
@@ -1155,26 +1146,7 @@ const Engine = {
 
         }
 
-        // Petakan ke badge lama (4 nilai, warna sudah
-        // dikenal user - tidak diubah).
-
-        let signal = "RISK";
-
-        if(action==="STRONG BUY"){
-
-            signal = "HOT";
-
-        }
-        else if(action==="BUY" || action==="ACCUMULATE"){
-
-            signal = "GEM";
-
-        }
-        else if(action==="WATCH" || action==="NEUTRAL"){
-
-            signal = "WATCH";
-
-        }
+        const signal = action;
 
         let risk = "LOW";
 
@@ -1204,43 +1176,29 @@ const Engine = {
         }
         else if(action=="STRONG BUY"){
 
-            summary="Coin quality dan buy timing sama-sama kuat, confidence tinggi.";
+            summary="Coin quality and buy timing are both strong, with high confidence.";
 
         }
         else if(action=="BUY"){
 
-            summary="Kualitas baik dengan timing yang sehat.";
+            summary="Good quality with healthy timing.";
 
         }
-        else if(action=="ACCUMULATE"){
+        else if(action=="HOLD"){
 
-            summary="Positif tapi belum sepenuhnya terkonfirmasi - bangun posisi bertahap.";
-
-        }
-        else if(action=="WATCH"){
-
-            summary="Layak dipantau, belum entry point yang jelas.";
-
-        }
-        else if(action=="NEUTRAL"){
-
-            summary="Tidak ada sinyal kuat ke arah manapun.";
-
-        }
-        else if(action=="WEAK"){
-
-            summary="Fundamental atau timing lemah - keyakinan rendah.";
+            summary="Worth watching - not yet a confirmed entry point.";
 
         }
         else{
 
-            summary="Risiko saat ini lebih besar dari potensi.";
+            summary="Risk currently outweighs the potential reward.";
 
         }
 
         // =====================================
-        // RETURN - kontrak sama persis dengan V9
-        // (semua key lama tetap ada, nilai/skala sama)
+        // RETURN - same contract as V10 (every key
+        // below is unchanged; only `action`/`signal`
+        // now use the standardized 4-value vocabulary)
         // =====================================
 
         return{

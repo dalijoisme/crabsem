@@ -1,33 +1,71 @@
 // =========================================
-// CRAB AGENT API V5.1
+// CRAB AGENT API V6.2
 // DexScreener ONLY (free, no API key, no paid tier)
 //
-// V5.1: discovery pool widened (looser admission filter,
-// DISCOVERY_LIMIT 40->100) - quality control now leans on
-// Engine's score/sort instead of a strict pre-filter, per
-// "discover more, let scoring decide". Also added a real
-// in-memory price/liquidity history sampled every scan
-// cycle, so Engine can see actual session trend instead of
-// only a single snapshot.
+// V6.2: every discovery endpoint below was verified TWICE -
+// once against the official reference (docs.dexscreener.com/
+// api/reference) and once with a live fetch that returned
+// real data - before being kept. "Latest Ads"
+// (ads/latest/v1) was removed even though the endpoint
+// itself is real and reachable: URLs containing "/ads/" are
+// a textbook pattern for browser ad-blocker filter lists
+// (uBlock, Brave Shields, etc) regardless of the actual
+// domain, so it's the kind of source that can silently fail
+// for a meaningful share of real users. Not worth it for one
+// of six sources.
 //
-// Birdeye Worker has been removed entirely - its
-// compute units are exhausted and every call returned
-// HTTP 500. DexScreener's public endpoints already
-// covered every field we used Birdeye for (liquidity,
-// volume, fdv, marketCap, priceChange, txns), so nothing
-// numeric is "faked" here - it's the same data shape,
-// just from one real free source instead of two.
+// Also: a single discovery source failing (network blip,
+// ad-blocker, DNS, temporary outage) now logs as
+// console.warn, not console.error. It was already handled
+// gracefully - the pipeline continues with whatever sources
+// did succeed - so it shouldn't read as an application error
+// in DevTools. console.error is reserved for genuine
+// pipeline-level failures (search()/trending() themselves
+// throwing), which are worth surfacing loudly.
 //
-// DexScreener already indexes Pump.fun / PumpSwap pairs
-// once they have any pool (dexId shows "pumpfun" /
-// "pumpswap"), so we get that coverage without a separate,
-// unverified Pump.fun API integration.
+// V6.1: discovery expanded from 3 to 7 real market-observation
+// sources, verified one-by-one against DexScreener's official
+// API reference rather than guessed:
+//   - Boosted (Latest) / Boosted (Top)   [already had]
+//   - New Token Profiles                 [already had,
+//     RENAMED from "Recently Updated" - that name was wrong,
+//     this endpoint is actually newest-created profiles]
+//   - Recently Updated Profiles          [the real
+//     recent-updates endpoint this was previously missing]
+//   - Community Takeovers
+//   - Trending Metas                     [genuinely
+//     market-driven: DexScreener computes which narratives/
+//     categories are trending right now, we just read the
+//     result and pull pairs from the top ones. This is NOT
+//     keyword search - we never choose the terms, the market
+//     does, via DexScreener's own trending computation]
 //
-// The one thing genuinely lost: Birdeye was our only
-// source for raw holder COUNT. `pair.holder` will now
-// always be null - Engine already treats that as neutral
-// (see engine.js), and the UI already renders "-" for it,
-// so nothing breaks or shows a fake number.
+// There is still no bulk "all Solana pairs" or paginated
+// firehose endpoint in DexScreener's free API - that ceiling
+// has not changed. Reaching genuinely "thousands" would still
+// need a paid/keyed provider (Birdeye, Helius DAS, Jupiter,
+// Pump.fun) added as one more DISCOVERY_SOURCES entry -
+// architecture already supports that without a redesign (see
+// DISCOVERY_SOURCES below).
+//
+// Keyword search (DEX_SEARCH_URL) is still intentionally
+// excluded from DISCOVERY_SOURCES - it only powers the manual
+// search box, never auto-discovery.
+//
+// Birdeye Worker itself has been removed entirely (its
+// compute units were exhausted, every call returned HTTP
+// 500). DexScreener's public endpoints already covered every
+// field we used Birdeye for (liquidity, volume, fdv,
+// marketCap, priceChange, txns), so nothing numeric is
+// "faked" here - it's the same data shape, from one real
+// free source. The one thing genuinely lost: Birdeye was our
+// only source for raw holder COUNT. `pair.holder` is always
+// null now - Engine already treats that as neutral, and the
+// UI already renders "-" for it.
+//
+// DexScreener already indexes Pump.fun / PumpSwap pairs once
+// they have any pool (dexId shows "pumpfun" / "pumpswap"),
+// so that coverage comes along automatically.
 // =========================================
 
 const DEX_BOOSTS_LATEST_URL =
@@ -38,6 +76,21 @@ const DEX_BOOSTS_TOP_URL =
 
 const DEX_PROFILES_LATEST_URL =
     "https://api.dexscreener.com/token-profiles/latest/v1";
+
+const DEX_PROFILES_RECENT_UPDATES_URL =
+    "https://api.dexscreener.com/token-profiles/recent-updates/v1";
+
+const DEX_COMMUNITY_TAKEOVERS_URL =
+    "https://api.dexscreener.com/community-takeovers/latest/v1";
+
+const DEX_METAS_TRENDING_URL =
+    "https://api.dexscreener.com/metas/trending/v1";
+
+function metaDetailUrl(slug){
+
+    return `https://api.dexscreener.com/metas/meta/v1/${encodeURIComponent(slug)}`;
+
+}
 
 const DEX_TOKENS_URL =
     "https://api.dexscreener.com/latest/dex/tokens/";
@@ -127,9 +180,6 @@ function recordPriceHistory(pairs){
 
 const API_STATUS = {
 
-    boostsLatest:"unknown",
-    boostsTop:"unknown",
-    profiles:"unknown",
     dexTokens:"unknown",
 
     lastError:null,
@@ -137,22 +187,24 @@ const API_STATUS = {
 
 };
 
+// Health is computed from whatever discovery sources are
+// actually registered (see DISCOVERY_SOURCES below), so
+// adding or removing a source never requires touching this
+// function.
+
 function computeHealth(){
 
-    const discoverySignals = [
+    const sourceKeys =
+        DISCOVERY_SOURCES.map(s=>s.statusKey);
 
-        API_STATUS.boostsLatest,
-
-        API_STATUS.boostsTop,
-
-        API_STATUS.profiles
-
-    ];
+    const discoverySignals =
+        sourceKeys.map(k=>API_STATUS[k]);
 
     const anyDiscoveryOk =
         discoverySignals.some(s=>s==="ok");
 
     const allDiscoveryFail =
+        discoverySignals.length>0 &&
         discoverySignals.every(s=>s==="error");
 
     const someDiscoveryFail =
@@ -445,13 +497,13 @@ function filterPairs(pairs){
                 0
             );
 
-        if(liquidity < 12000)
+        if(liquidity < 8000)
             return false;
 
-        if(volume < 7000)
+        if(volume < 5000)
             return false;
 
-        if(fdv < 50000)
+        if(fdv < 30000)
             return false;
 
         if(fdv > 50000000)
@@ -463,7 +515,7 @@ function filterPairs(pairs){
         if(!logo)
             return false;
 
-        if(trades24h > 0 && trades24h < 8)
+        if(trades24h > 0 && trades24h < 5)
             return false;
 
         // Spread proxy: liquidity so small relative to fdv
@@ -537,7 +589,13 @@ async function safeFetchJson(url, statusKey){
 
     catch(e){
 
-        console.error(e);
+        // A single source failing (network hiccup, ad-blocker,
+        // DNS, temporary DexScreener outage, etc) is expected
+        // and already handled gracefully below - it should not
+        // read as a red console error for something the app is
+        // actively designed to tolerate.
+
+        console.warn("Discovery source fetch failed:", url, e);
 
         if(statusKey){
 
@@ -553,47 +611,278 @@ async function safeFetchJson(url, statusKey){
 
 }
 
+// =========================================
+// DISCOVERY SOURCES (modular market-observation
+// adapters)
+//
+// Each source is a self-contained adapter with the same
+// shape: { name, statusKey, fetchCandidates() }.
+// fetchCandidates() resolves to an array of Solana token
+// addresses observed from that market feed - never from a
+// keyword/text search. Adding a new provider later
+// (Birdeye, Helius DAS "new mints", Jupiter's token list, a
+// Pump.fun feed) means adding one more object to this array
+// - nothing else in the discovery pipeline needs to change.
+// =========================================
+
+async function fetchSolanaAddressesFromFeed(url, statusKey){
+
+    const json = await safeFetchJson(url, statusKey);
+
+    const list = Array.isArray(json) ? json : [];
+
+    const addresses = [];
+
+    list.forEach(item=>{
+
+        if(item?.chainId==="solana" && item?.tokenAddress){
+
+            addresses.push(item.tokenAddress);
+
+        }
+
+    });
+
+    return addresses;
+
+}
+
+const DISCOVERY_SOURCES = [
+
+    {
+
+        name: "Boosted (Latest)",
+
+        statusKey: "boostsLatest",
+
+        fetchCandidates: ()=>
+
+            fetchSolanaAddressesFromFeed(DEX_BOOSTS_LATEST_URL, "boostsLatest")
+
+    },
+
+    {
+
+        name: "Boosted (Top)",
+
+        statusKey: "boostsTop",
+
+        fetchCandidates: ()=>
+
+            fetchSolanaAddressesFromFeed(DEX_BOOSTS_TOP_URL, "boostsTop")
+
+    },
+
+    {
+
+        // Fixed from Batch A: this endpoint is "latest NEW
+        // profiles", not "recently updated" - the real
+        // recent-updates endpoint is its own separate source
+        // right below. Renamed for accuracy only, same URL.
+
+        name: "New Token Profiles",
+
+        statusKey: "profilesLatest",
+
+        fetchCandidates: ()=>
+
+            fetchSolanaAddressesFromFeed(DEX_PROFILES_LATEST_URL, "profilesLatest")
+
+    },
+
+    {
+
+        // Real, distinct DexScreener endpoint - existing
+        // profiles that were just updated (different market
+        // signal than a brand new profile).
+
+        name: "Recently Updated Profiles",
+
+        statusKey: "profilesRecentUpdates",
+
+        fetchCandidates: ()=>
+
+            fetchSolanaAddressesFromFeed(DEX_PROFILES_RECENT_UPDATES_URL, "profilesRecentUpdates")
+
+    },
+
+    {
+
+        name: "Community Takeovers",
+
+        statusKey: "communityTakeovers",
+
+        fetchCandidates: ()=>
+
+            fetchSolanaAddressesFromFeed(DEX_COMMUNITY_TAKEOVERS_URL, "communityTakeovers")
+
+    },
+
+    {
+
+        // Genuinely market-driven, not keyword-driven: the
+        // "metas" (narrative categories) come from
+        // DexScreener's own trending computation, not from a
+        // predefined word list we chose. We just read whatever
+        // is trending right now and pull its pairs.
+
+        name: "Trending Metas",
+
+        statusKey: "trendingMetas",
+
+        fetchCandidates: async ()=>{
+
+            const metas = await safeFetchJson(DEX_METAS_TRENDING_URL, "trendingMetas");
+
+            if(!Array.isArray(metas)) return [];
+
+            // Was hardcoded to the top 5 metas - DexScreener
+            // currently returns ~19-20 trending metas total, so
+            // this was only using a quarter of what's actually
+            // available. Use everything the endpoint returns,
+            // with a generous safety cap (25) purely to bound
+            // worst-case parallel requests if the list ever
+            // grows unusually large - not a deliberate limit on
+            // coverage.
+
+            const topMetas = metas.slice(0, 25);
+
+            const results = await Promise.all(
+
+                topMetas.map(async meta=>{
+
+                    if(!meta?.slug) return [];
+
+                    try{
+
+                        // Sub-lookups don't carry their own
+                        // statusKey - one slow/broken meta
+                        // shouldn't flip overall Engine Health,
+                        // the top-level trendingMetas fetch
+                        // above already covers that signal.
+
+                        const json = await safeFetchJson(metaDetailUrl(meta.slug));
+
+                        const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+
+                        return pairs
+
+                            .filter(p=>p?.chainId==="solana" && p?.baseToken?.address)
+
+                            .map(p=>p.baseToken.address);
+
+                    }
+
+                    catch(e){
+
+                        console.warn(`Meta "${meta.slug}" lookup failed`, e);
+
+                        return [];
+
+                    }
+
+                })
+
+            );
+
+            return results.flat();
+
+        }
+
+    }
+
+    // Future market-observation sources go here, e.g.:
+    // {
+    //   name: "Birdeye Trending",
+    //   statusKey: "birdeye",
+    //   fetchCandidates: async () => { ... }
+    // }
+    // Each new entry must return Solana addresses only and
+    // report through safeFetchJson (or an equivalent that
+    // sets API_STATUS[statusKey]) so Engine Health keeps
+    // reflecting reality automatically - computeHealth()
+    // already iterates DISCOVERY_SOURCES, it never needs to
+    // be edited when a source is added.
+
+];
+
+DISCOVERY_SOURCES.forEach(s=>{
+
+    if(API_STATUS[s.statusKey]===undefined){
+
+        API_STATUS[s.statusKey]="unknown";
+
+    }
+
+});
+
+// Metadata about the last discovery cycle - real counts
+// only, used by the UI to show what's actually being
+// monitored (never a made-up number).
+
+const LAST_DISCOVERY_META = {
+
+    sourceBreakdown: {},
+
+    rawObserved: 0,
+
+    uniqueCandidatesObserved: 0,
+
+    filteredOut: 0,
+
+    qualifiedAfterFilter: 0,
+
+    displayed: 0,
+
+    discoveryDurationMs: null,
+
+    lastRunAt: null
+
+};
+
 async function fetchDiscoveryAddresses(){
+
+    const results = await Promise.all(
+
+        DISCOVERY_SOURCES.map(source=>
+
+            source.fetchCandidates().catch(e=>{
+
+                console.warn(`Discovery source "${source.name}" failed`, e);
+
+                API_STATUS[source.statusKey]="error";
+
+                return [];
+
+            })
+
+        )
+
+    );
 
     const addresses = new Set();
 
-    const sourceConfigs = [
+    const breakdown = {};
 
-        { url:DEX_BOOSTS_LATEST_URL, key:"boostsLatest" },
+    let rawTotal = 0;
 
-        { url:DEX_BOOSTS_TOP_URL, key:"boostsTop" },
+    results.forEach((list, i)=>{
 
-        { url:DEX_PROFILES_LATEST_URL, key:"profiles" }
+        breakdown[DISCOVERY_SOURCES[i].name] = list.length;
 
-    ];
+        rawTotal += list.length;
 
-    const results =
-        await Promise.all(
-            sourceConfigs.map(s=>safeFetchJson(s.url, s.key))
-        );
-
-    results.forEach(json=>{
-
-        const list =
-            Array.isArray(json)
-            ? json
-            : [];
-
-        list.forEach(item=>{
-
-            if(
-                item?.chainId==="solana"
-                &&
-                item?.tokenAddress
-            ){
-
-                addresses.add(item.tokenAddress);
-
-            }
-
-        });
+        list.forEach(addr=>addresses.add(addr));
 
     });
+
+    LAST_DISCOVERY_META.rawObserved = rawTotal;
+
+    LAST_DISCOVERY_META.sourceBreakdown = breakdown;
+
+    LAST_DISCOVERY_META.uniqueCandidatesObserved = addresses.size;
+
+    LAST_DISCOVERY_META.lastRunAt = Date.now();
 
     return addresses;
 
@@ -782,6 +1071,8 @@ const API={
 
         }
 
+        const startedAt = Date.now();
+
         try{
 
             const dexAddresses =
@@ -798,15 +1089,27 @@ const API={
             let pairs =
                 uniquePairs(rawPairs);
 
+            const preFilterCount = pairs.length;
+
             pairs =
                 filterPairs(pairs);
 
             recordPriceHistory(pairs);
 
+            LAST_DISCOVERY_META.qualifiedAfterFilter = pairs.length;
+
+            LAST_DISCOVERY_META.filteredOut =
+                Math.max(0, preFilterCount - pairs.length);
+
             API_STATUS.lastUpdated = Date.now();
 
             const result =
                 sortPairs(pairs).slice(0,DISCOVERY_LIMIT);
+
+            LAST_DISCOVERY_META.displayed = result.length;
+
+            LAST_DISCOVERY_META.discoveryDurationMs =
+                Date.now() - startedAt;
 
             trendingCache = { data: result, ts: now };
 
@@ -838,6 +1141,39 @@ const API={
             ...computeHealth(),
 
             details:{ ...API_STATUS }
+
+        };
+
+    },
+
+    // =====================================
+    // DISCOVERY META (real numbers only - how
+    // many addresses were actually observed
+    // across all market sources this cycle, and
+    // how many passed the quality filter. Used
+    // for the "Monitoring / Showing" labels -
+    // never a placeholder or a guess.)
+    // =====================================
+
+    getDiscoveryMeta(){
+
+        return{
+
+            sourceBreakdown: { ...LAST_DISCOVERY_META.sourceBreakdown },
+
+            rawObserved: LAST_DISCOVERY_META.rawObserved,
+
+            uniqueCandidatesObserved: LAST_DISCOVERY_META.uniqueCandidatesObserved,
+
+            filteredOut: LAST_DISCOVERY_META.filteredOut,
+
+            qualifiedAfterFilter: LAST_DISCOVERY_META.qualifiedAfterFilter,
+
+            displayed: LAST_DISCOVERY_META.displayed,
+
+            discoveryDurationMs: LAST_DISCOVERY_META.discoveryDurationMs,
+
+            lastRunAt: LAST_DISCOVERY_META.lastRunAt
 
         };
 

@@ -128,55 +128,47 @@ Logout
 
 
 
-<div class="stats">
+<div class="statsCompact" id="statsCompact">
 
-<div class="stat">
+<div class="statItem">
 
-<p>Coins Scanned</p>
+<span class="statLabel">Monitoring</span>
 
-<h2 id="totalCoins">
+<span class="statValue" id="totalCoins">0</span>
 
-0
-
-</h2>
+<small class="statSub" id="discoverySubLabel"></small>
 
 </div>
 
-<div class="stat">
+<div class="statDivider"></div>
 
-<p>Signals</p>
+<div class="statItem">
 
-<h2 id="signalCount">
+<span class="statLabel">Signals</span>
 
-0
-
-</h2>
+<span class="statValue" id="signalCount">0</span>
 
 </div>
 
-<div class="stat liveMonitorStat">
+<div class="statDivider"></div>
 
-<p>Live Monitoring</p>
+<div class="statItem" id="engineStat">
 
-<h2 id="lastAnalysisText">
+<span class="statLabel">Engine</span>
 
-Just now
-
-</h2>
-
-<small id="nextScanText">Next scan --</small>
+<span class="statValue" id="engineStatusText">Healthy</span>
 
 </div>
 
-<div class="stat" id="engineStat">
+<div class="statDivider"></div>
 
-<p>Engine</p>
+<div class="statItem liveMonitorStat">
 
-<h2 id="engineStatusText">
+<span class="statLabel">Updated</span>
 
-Healthy
+<span class="statValue" id="lastAnalysisText">Just now</span>
 
-</h2>
+<small class="statSub" id="nextScanText">Next scan --</small>
 
 </div>
 
@@ -187,6 +179,10 @@ Healthy
 <div class="content">
 
 <div class="coin-area">
+
+<div id="skeletonGrid" class="coin-grid skeleton-grid">
+
+</div>
 
 <div id="coinGrid" class="coin-grid">
 
@@ -223,8 +219,6 @@ Select a coin to see AI analysis.
 </div>
 
 </div>
-
-<script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
 
 <script src="js/config.js"></script>
 <script src="js/analytics.js"></script>

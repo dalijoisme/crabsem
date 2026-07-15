@@ -280,7 +280,7 @@ async function loadTrending(){
 
     trendingInFlight = true;
 
-    coinGrid.innerHTML="<h2 style='padding:20px'>Loading Market...</h2>";
+    showSkeleton();
 
     try{
 
@@ -327,7 +327,7 @@ async function loadSearch(){
 
     }
 
-    coinGrid.innerHTML="<h2 style='padding:20px'>Searching...</h2>";
+    showSkeleton();
 
     const pairs=await API.search(q);
 
@@ -393,11 +393,15 @@ function renderPairs(pairs){
 
     if(!pairs.length){
 
+        hideSkeleton();
+
         coinGrid.innerHTML="<h2>No Result</h2>";
 
         totalCoins.innerHTML=0;
 
         signalCount.innerHTML=0;
+
+        renderDiscoveryMeta(0);
 
         return;
 
@@ -413,7 +417,29 @@ function renderPairs(pairs){
 
     trackRecommendationChanges(pairs);
 
-    pairs.sort((a,b)=>b.signal.score-a.signal.score);
+    const TIER_RANK = {
+
+        "STRONG BUY":4,
+
+        "BUY":3,
+
+        "HOLD":2,
+
+        "AVOID":1
+
+    };
+
+    pairs.sort((a,b)=>{
+
+        const tierDiff =
+            (TIER_RANK[b.signal.signal]||0) -
+            (TIER_RANK[a.signal.signal]||0);
+
+        if(tierDiff !== 0) return tierDiff;
+
+        return b.signal.score-a.signal.score;
+
+    });
 
     totalCoins.innerHTML=pairs.length;
 
@@ -423,19 +449,217 @@ function renderPairs(pairs){
 
         p=>
 
-        p.signal.signal=="HOT" ||
+        p.signal.signal=="STRONG BUY" ||
 
-        p.signal.signal=="GEM"
+        p.signal.signal=="BUY"
 
     ).length;
 
-    pairs.forEach(pair=>{
+    renderDiscoveryMeta(pairs.length);
 
-        const card=UI.renderCard(pair);
+    renderPairsIncrementally(pairs);
 
-        coinGrid.appendChild(card);
+}
 
-    });
+
+// ======================================
+// INCREMENTAL / BATCH RENDERING
+// Appends cards in small chunks via
+// requestAnimationFrame instead of building
+// hundreds/thousands of DOM nodes in one frame -
+// keeps the UI responsive as the monitored
+// universe grows (Part 19: 500+/1000+/2000+).
+// ======================================
+
+let renderToken = 0;
+
+function renderPairsIncrementally(pairs){
+
+    const myToken = ++renderToken;
+
+    const BATCH_SIZE = 20;
+
+    let index = 0;
+
+    function renderNextBatch(){
+
+        if(myToken !== renderToken) return;
+
+        const fragment = document.createDocumentFragment();
+
+        const end = Math.min(index + BATCH_SIZE, pairs.length);
+
+        for(;index<end;index++){
+
+            const card = UI.renderCard(pairs[index], index+1);
+
+            fragment.appendChild(card);
+
+        }
+
+        coinGrid.appendChild(fragment);
+
+        hideSkeleton();
+
+        if(index < pairs.length){
+
+            requestAnimationFrame(renderNextBatch);
+
+        }
+
+    }
+
+    requestAnimationFrame(renderNextBatch);
+
+}
+
+
+// ======================================
+// SKELETON LOADING
+// Shown immediately while a scan/search is in
+// flight so the dashboard never shows an empty
+// area (Part 10). Purely visual - no data.
+// ======================================
+
+const skeletonGrid = document.getElementById("skeletonGrid");
+
+function renderSkeletonCards(count){
+
+    if(!skeletonGrid) return;
+
+    if(skeletonGrid.childElementCount === count) return;
+
+    skeletonGrid.innerHTML = "";
+
+    for(let i=0;i<count;i++){
+
+        const el = document.createElement("div");
+
+        el.className = "skeletonCard";
+
+        el.innerHTML = `
+
+            <div class="skeletonRow">
+
+                <div class="skeletonCircle"></div>
+
+                <div class="skeletonLines">
+
+                    <div class="skeletonLine w60"></div>
+
+                    <div class="skeletonLine w40"></div>
+
+                </div>
+
+            </div>
+
+            <div class="skeletonLine w100"></div>
+
+            <div class="skeletonLine w80"></div>
+
+        `;
+
+        skeletonGrid.appendChild(el);
+
+    }
+
+}
+
+function showSkeleton(){
+
+    renderSkeletonCards(8);
+
+    if(skeletonGrid) skeletonGrid.style.display = "grid";
+
+    if(coinGrid) coinGrid.style.display = "none";
+
+}
+
+function hideSkeleton(){
+
+    if(skeletonGrid) skeletonGrid.style.display = "none";
+
+    if(coinGrid) coinGrid.style.display = "grid";
+
+}
+
+
+// ======================================
+// DISCOVERY META LABEL (real numbers only,
+// from API.getDiscoveryMeta() - never a
+// placeholder or a guess)
+// ======================================
+
+function renderDiscoveryMeta(shownCount){
+
+    const el = document.getElementById("discoverySubLabel");
+
+    if(typeof API === "undefined" || typeof API.getDiscoveryMeta !== "function"){
+
+        return;
+
+    }
+
+    const meta = API.getDiscoveryMeta();
+
+    // "Monitoring" headline number = real observed candidates
+    // across all discovery sources this cycle (not the
+    // filtered/shown count) - answers "how much of the market
+    // is CRAB AGENT actually looking at". Falls back to the
+    // shown count only if a discovery cycle hasn't completed
+    // yet.
+
+    if(totalCoins){
+
+        totalCoins.innerHTML =
+            meta.uniqueCandidatesObserved || shownCount;
+
+    }
+
+    if(!el) return;
+
+    if(!meta.uniqueCandidatesObserved){
+
+        el.textContent = "";
+
+        return;
+
+    }
+
+    el.textContent =
+        `Qualified ${meta.qualifiedAfterFilter} · Showing top ${shownCount}`;
+
+    // Full pipeline breakdown as a hover tooltip - same
+    // element, no layout change, but exposes every real number
+    // for transparency (observed, unique, filtered out,
+    // qualified, displayed, per-source breakdown, discovery
+    // duration, last refresh).
+
+    const sourceLines =
+        Object.entries(meta.sourceBreakdown || {})
+        .map(([name,count])=>`  ${name}: ${count}`)
+        .join("\n");
+
+    const discoveryTime =
+        meta.lastRunAt
+        ? new Date(meta.lastRunAt).toLocaleTimeString()
+        : "-";
+
+    const durationText =
+        meta.discoveryDurationMs != null
+        ? `${(meta.discoveryDurationMs/1000).toFixed(1)}s`
+        : "-";
+
+    el.title =
+        `Pipeline (real data, this scan cycle):\n`+
+        `Raw observed (pre-dedup): ${meta.rawObserved}\n`+
+        `Unique observed: ${meta.uniqueCandidatesObserved}\n`+
+        `Filtered out: ${meta.filteredOut}\n`+
+        `Qualified: ${meta.qualifiedAfterFilter}\n`+
+        `Displayed: ${meta.displayed}\n`+
+        `Discovery duration: ${durationText}\n`+
+        `Last refresh: ${discoveryTime}\n\n`+
+        `Sources used:\n${sourceLines}`;
 
 }
 

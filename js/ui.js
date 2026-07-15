@@ -138,7 +138,7 @@ const UI = {
     // CARD
     // =====================================
 
-    renderCard(pair){
+    renderCard(pair, rank){
 
         const signal = pair.signal;
 
@@ -147,41 +147,50 @@ const UI = {
         pair.logoURI ||
         "images/body.png";
 
+        const medal =
+            rank===1 ? "🥇" :
+            rank===2 ? "🥈" :
+            rank===3 ? "🥉" :
+            null;
+
+        const rankLabel =
+            medal ? medal : (rank ? `#${rank}` : "");
+
         const color = {
 
-            HOT:"#16c784",
+            "STRONG BUY":"#16c784",
 
-            GEM:"#8b5cf6",
+            "BUY":"#8b5cf6",
 
-            WATCH:"#f5a623",
+            "HOLD":"#f5a623",
 
-            RISK:"#ff4d4d"
+            "AVOID":"#ff4d4d"
 
         }[signal.signal] || "#ff4d4d";
 
         const badge = {
 
-            HOT:"🔥 HOT",
+            "STRONG BUY":"🚀 STRONG BUY",
 
-            GEM:"💎 GEM",
+            "BUY":"✅ BUY",
 
-            WATCH:"👀 WATCH",
+            "HOLD":"👀 HOLD",
 
-            RISK:"⚠ RISK"
+            "AVOID":"⚠ AVOID"
 
-        }[signal.signal] || "⚠ RISK";
+        }[signal.signal] || "⚠ AVOID";
 
         const badgeClass = {
 
-            HOT:"hot",
+            "STRONG BUY":"strong-buy",
 
-            GEM:"gem",
+            "BUY":"buy",
 
-            WATCH:"watch",
+            "HOLD":"hold",
 
-            RISK:"risk"
+            "AVOID":"avoid"
 
-        }[signal.signal] || "risk";
+        }[signal.signal] || "avoid";
 
         const stage = estimateEntryStage(signal);
 
@@ -190,6 +199,8 @@ const UI = {
         card.className="coinCard";
 
         card.innerHTML=`
+
+        ${rankLabel ? `<div class="rankBadge${medal?" medal":""}">${rankLabel}</div>` : ""}
 
         <div class="entryBadge ${stage.className}">${stage.label}</div>
 
@@ -235,43 +246,27 @@ const UI = {
 
             </div>
 
-        </div>
+            <div>
 
-        <div class="signalBox" style="border:1px solid ${color}">
+                MCap
 
-            <small>CRAB SCORE</small>
+                <br>
 
-            <h2 style="
-                color:${color};
-                margin:4px 0;
-                font-size:32px;
-            ">
-
-                ${signal.score}
-
-            </h2>
-
-            <div style="
-                display:inline-block;
-                background:${color};
-                color:#fff;
-                padding:5px 14px;
-                border-radius:20px;
-                font-size:13px;
-                font-weight:700;
-                margin-bottom:8px;
-            ">
-
-                ${signal.signal}
+                <strong>${pair.marketCap>0 ? "$"+format(pair.marketCap) : "N/A"}</strong>
 
             </div>
 
-            <div style="
-                display:flex;
-                justify-content:space-between;
-                font-size:12px;
-                margin-top:8px;
-            ">
+        </div>
+
+        <div class="signalBox" style="border-color:${color}">
+
+            <small class="scoreLabel">CRAB SCORE</small>
+
+            <h2 class="scoreValue" style="color:${color}">${signal.score}</h2>
+
+            <div class="signalPill" style="background:${color}">${signal.signal}</div>
+
+            <div class="signalMetaRow">
 
                 <span>Strength ${signal.confidence}%</span>
 
@@ -279,13 +274,9 @@ const UI = {
 
             </div>
 
-            <div style="
-                margin-top:6px;
-                font-size:12px;
-                opacity:.75;
-            ">
+            <div class="signalTargetMC">
 
-                MC $${format(signal.targetMC)}
+                Target MC $${format(signal.targetMC)}
 
             </div>
 
@@ -321,13 +312,13 @@ const UI = {
 
         const color = {
 
-            HOT:"#16c784",
+            "STRONG BUY":"#16c784",
 
-            GEM:"#8b5cf6",
+            "BUY":"#8b5cf6",
 
-            WATCH:"#f5a623",
+            "HOLD":"#f5a623",
 
-            RISK:"#ff4d4d"
+            "AVOID":"#ff4d4d"
 
         }[signal.signal] || "#ff4d4d";
 

@@ -80,7 +80,11 @@ function getTier(amount){
 
     if(amount >= 1000000) return "💎 DIAMOND CLAW";
 
-    if(amount >= (CONFIG?.MIN_CRABSEM_HOLDING || 100000)) return "✅ VERIFIED";
+    // Access no longer requires a minimum (see wallet.js) - any
+    // positive holding counts as a verified holder here too,
+    // instead of the old hardcoded 100,000-token fallback.
+
+    if(amount > 0) return "✅ VERIFIED";
 
     return "GUEST";
 
@@ -744,6 +748,16 @@ function renderDiscoveryMeta(shownCount){
 // DETAIL
 // ======================================
 
+// Tracks whether WE pushed a history entry for the currently-
+// open mobile detail overlay, so the phone's Back button/swipe
+// closes the overlay instead of leaving the dashboard entirely.
+// Desktop is untouched - the detail panel there is a permanent
+// sidebar, not something "Back" should ever need to close.
+
+let detailHistoryPushed = false;
+
+const MOBILE_DETAIL_BREAKPOINT = 1100;
+
 function showDetail(pair){
 
     detailContent.innerHTML=
@@ -762,6 +776,14 @@ function showDetail(pair){
 
     }
 
+    if(window.innerWidth <= MOBILE_DETAIL_BREAKPOINT && !detailHistoryPushed){
+
+        history.pushState({ crabDetailOpen:true }, "");
+
+        detailHistoryPushed = true;
+
+    }
+
     const address = pair.baseToken?.address;
 
     if(address){
@@ -772,17 +794,48 @@ function showDetail(pair){
 
 }
 
+function closeDetailOverlay(){
+
+    if(detailPanel){
+
+        detailPanel.classList.remove("mobileOpen");
+
+    }
+
+    sessionStorage.removeItem("crab_selected_coin");
+
+}
+
+window.addEventListener("popstate", ()=>{
+
+    if(detailHistoryPushed){
+
+        detailHistoryPushed = false;
+
+        closeDetailOverlay();
+
+    }
+
+});
+
 if(closeDetailBtn){
 
     closeDetailBtn.onclick=()=>{
 
-        if(detailPanel){
+        closeDetailOverlay();
 
-            detailPanel.classList.remove("mobileOpen");
+        if(detailHistoryPushed){
+
+            detailHistoryPushed = false;
+
+            // Pop the history entry we pushed when opening, so a
+            // later real Back press doesn't land on a stale
+            // "detail open" entry that no longer matches what's
+            // on screen.
+
+            history.back();
 
         }
-
-        sessionStorage.removeItem("crab_selected_coin");
 
     };
 

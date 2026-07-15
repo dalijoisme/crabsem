@@ -15,7 +15,14 @@ const CONFIG = {
     // this value.
     SCAN_INTERVAL: 60000,
 
-    MIN_CRABSEM_HOLDING: 100000,
+    // Holder verification requires holding ANY positive amount
+    // of CRABSEM - there is intentionally no minimum. This used
+    // to be gated behind a 100,000-token minimum
+    // (MIN_CRABSEM_HOLDING); that requirement was removed per
+    // explicit product decision. The actual gate now lives in
+    // wallet.js as a plain `amount > 0` check, so this constant
+    // is no longer read anywhere - left out entirely rather than
+    // kept around as a misleading dead value.
 
     // CRABSEM
     CRAB_MINT: "EJRL33sEvmyY9HJgCom2uYHqBtRduBuRnqZpzhuapump",

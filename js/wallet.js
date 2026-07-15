@@ -167,7 +167,17 @@ async function handleConnectClick(){
 
         const amount = await WalletVerification.getCrabHolding(wallet);
 
-        if(amount !== null && amount >= CONFIG.MIN_CRABSEM_HOLDING){
+        // No minimum holding - any positive CRABSEM balance
+        // qualifies. This was previously gated behind
+        // CONFIG.MIN_CRABSEM_HOLDING (100,000 tokens); that
+        // requirement has been explicitly removed per product
+        // decision - holding ANY amount of CRABSEM unlocks the
+        // app. Using a plain `amount > 0` check here rather than
+        // depending on a config threshold makes that intent
+        // unambiguous regardless of what MIN_CRABSEM_HOLDING is
+        // set to elsewhere.
+
+        if(amount !== null && amount > 0){
 
             verifiedHolder(amount);
 

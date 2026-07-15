@@ -133,6 +133,38 @@ TOPBAR
 
 }
 
+.helpBtn{
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    width:34px;
+    height:34px;
+    min-width:34px;
+    min-height:34px;
+    aspect-ratio:1/1;
+    flex-shrink:0;
+
+    border-radius:50%;
+
+    background:var(--panel2);
+    border:1px solid var(--border);
+
+    color:white;
+    font-weight:800;
+    font-size:14px;
+
+    text-decoration:none;
+
+}
+
+.helpBtn:hover{
+
+    border-color:var(--purple);
+
+}
+
 .live-status.limited{
 
     color:#f6b93b;

@@ -17,6 +17,30 @@
 
 }
 
+.faqHero{
+
+    max-width:700px;
+    margin:30px auto 0;
+    padding:0 20px;
+    text-align:center;
+
+}
+
+.faqHero h1{
+
+    font-size:26px;
+    margin:0 0 8px;
+
+}
+
+.faqHero p{
+
+    color:var(--muted);
+    font-size:14px;
+    margin:0;
+
+}
+
 .faqContent{
 
     max-width:800px;
@@ -136,6 +160,12 @@
 }
 
 @media(max-width:600px){
+
+    .faqHero h1{
+
+        font-size:20px;
+
+    }
 
     .faqContent{
 

@@ -6,7 +6,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover">
 
-<title>CRAB AGENT - FAQ</title>
+<title>CRAB AGENT - FAQ &amp; How Signals Work</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,7 +31,7 @@
 
 <h2>CRAB AGENT</h2>
 
-<span>FAQ &amp; Documentation</span>
+<span>FAQ &amp; How Signals Work</span>
 
 </div>
 
@@ -39,11 +39,19 @@
 
 <div class="top-right">
 
-<a href="dashboard.html" class="faqBackBtn">← Back to Dashboard</a>
+<a href="index.html" class="faqBackBtn">← Back to Home</a>
 
 </div>
 
 </header>
+
+<div class="faqHero">
+
+<h1>Everything you need to know, in plain English.</h1>
+
+<p>No formulas. No jargon. Just how CRAB AGENT actually helps you.</p>
+
+</div>
 
 <div class="faqContent">
 
@@ -51,7 +59,19 @@
 
 <h3>What is CRAB AGENT?</h3>
 
-<p>CRAB AGENT is an AI-assisted market intelligence scanner for Solana meme coins. It continuously observes real market activity from DexScreener, scores each token it finds using the CRAB SCORE engine, and surfaces the highest-quality opportunities first - so you don't have to manually scan hundreds of pairs yourself.</p>
+<p>CRAB AGENT is an AI that watches the Solana meme coin market for you, all day, every day. Instead of you staring at charts trying to spot the next mover, the AI does that watching and hands you a simple signal: <strong>BUY</strong>, <strong>HOLD</strong>, or <strong>AVOID</strong>.</p>
+
+<p>Think of it like having someone scan hundreds of coins for you, non-stop, and only tap you on the shoulder when something looks genuinely worth a look.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>How does CRAB AGENT find coins?</h3>
+
+<p>It watches the market itself, not a list of keywords. It picks up real activity happening right now on Solana - coins getting boosted, new and updated projects, community activity, and whatever categories are actually trending at the moment.</p>
+
+<p>You can still search for a specific coin by name if you want to check on something yourself - but the coins that show up automatically on your dashboard got there because something real is happening with them, not because they matched a search term.</p>
 
 </section>
 
@@ -59,26 +79,35 @@
 
 <h3>What is CRAB SCORE?</h3>
 
-<p>CRAB SCORE is a 0-100 number computed from a combination of indicators: momentum across multiple timeframes, liquidity, trading volume and turnover, valuation (FDV), liquidity backing, holder data (when available), trade frequency, and buy/sell pressure. The final recommendation also depends on <strong>Signal Strength</strong> (confidence) and a penalty for overextended or risky conditions - not the score alone.</p>
+<p>CRAB SCORE is a single number from 0 to 100 that sums up how a coin looks right now - things like how much real trading is happening, how healthy its liquidity is, how big (or small) its valuation is, and whether the price action looks like a genuine build-up rather than a coin that already ran.</p>
 
-<div class="faqTable">
-
-<div class="faqTableRow"><span>Score ≥ 88</span><strong class="tag strongbuy">STRONG BUY</strong></div>
-<div class="faqTableRow"><span>Score ≥ 68</span><strong class="tag buy">BUY</strong></div>
-<div class="faqTableRow"><span>Score ≥ 40</span><strong class="tag hold">HOLD</strong></div>
-<div class="faqTableRow"><span>Below that</span><strong class="tag avoid">AVOID</strong></div>
-
-</div>
-
-<p class="faqNote">These are the real thresholds used by the engine - reaching STRONG BUY or BUY also requires a minimum Signal Strength and a low enough risk penalty, so a high score alone doesn't guarantee the top tier. CRAB SCORE is <strong>not a price prediction</strong> - it's a structured read of current market conditions, not a guarantee of future performance.</p>
+<p>You don't need to know how the number is built. Just know: higher generally means healthier, and the AI already weighs the messy parts for you.</p>
 
 </section>
 
 <section class="faqSection">
 
-<h3>What is Strength?</h3>
+<h3>Why isn't every high score a BUY?</h3>
 
-<p>Strength (shown as Signal Strength, or Confidence internally) reflects how much the engine actually trusts the signal it just computed - based on how complete the available data is and how consistently different timeframes agree with each other. A high score with low Strength means the underlying data is thin or contradictory, and the recommendation should be treated with more caution.</p>
+<p>A high score means the coin looks healthy overall - but timing matters just as much as health. A coin can look great on paper and still be a bad time to buy, for example if it already pumped hard in the last few hours. The AI checks for that separately, and if the timing looks off, it will hold back a BUY even on a coin with a decent score.</p>
+
+<p>This is on purpose. The goal isn't to find "good coins" after the fact - it's to catch them while they're still building, not after they've already moved.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>What does Signal Strength mean?</h3>
+
+<p>Signal Strength tells you how much the AI actually trusts the signal it just gave you. A BUY with high Signal Strength means the data behind it is solid and consistent. A BUY with lower Signal Strength means the same recommendation, but with less certainty behind it - worth being a bit more careful with.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>What is Confidence?</h3>
+
+<p>Confidence is closely related to Signal Strength - it reflects how complete and how consistent the information the AI had to work with actually was. Thin or contradictory data lowers Confidence, even if the numbers themselves look exciting. Think of it as the AI telling you "here's how sure I am," not just "here's what I found."</p>
 
 </section>
 
@@ -86,54 +115,135 @@
 
 <h3>What is Early / Mid / Late?</h3>
 
-<p>This is CRAB AGENT's estimate of entry timing, separate from the score itself. It looks at how young the token is, how extended the current price move already is, and whether momentum is still building or already fading, to estimate whether an opportunity is still early, already in the middle of its move, or likely late to enter.</p>
+<p>This is the AI's read on timing specifically - separate from the score itself. <strong>Early</strong> means the move looks like it's just getting started. <strong>Mid</strong> means it's already underway. <strong>Late</strong> means it's likely already played out, even if the score still looks okay. This is one of the most important things to check before acting on any signal.</p>
 
 </section>
 
 <section class="faqSection">
 
-<h3>Data Sources</h3>
+<h3>How are BUY signals created?</h3>
 
-<p>Every number in CRAB AGENT comes from DexScreener's free public API - liquidity, volume, market cap, FDV, and transaction data are pulled directly from live pairs. Discovery itself is market-driven, combining several real DexScreener feeds rather than a fixed keyword list:</p>
-
-<ul class="faqList">
-
-<li>Boosted tokens (latest and top)</li>
-<li>Recently updated and newly created token profiles</li>
-<li>Community takeovers</li>
-<li>Trending narratives/categories (DexScreener's own trending computation)</li>
-
-</ul>
-
-<p>The engine combines all of these sources, removes duplicates, and scores every unique token it finds - a keyword search box exists separately for manually looking up a specific token, but it never drives automatic discovery.</p>
+<p>The AI is specifically built to avoid handing out a BUY signal after a coin has already pumped. It looks for healthy, still-building conditions - steady volume growth, real buyers stepping in, a trend that isn't already stretched - rather than rewarding a coin just because it moved a lot already. A BUY should ideally catch a coin while it's building, not after it has exploded.</p>
 
 </section>
 
 <section class="faqSection">
 
-<h3>How Discovery Works</h3>
+<h3>Why can a score change?</h3>
 
-<div class="faqPipeline">
-
-<div class="faqPipelineStep">Observed</div>
-<div class="faqPipelineArrow">↓</div>
-<div class="faqPipelineStep">Qualified</div>
-<div class="faqPipelineArrow">↓</div>
-<div class="faqPipelineStep">Scored</div>
-<div class="faqPipelineArrow">↓</div>
-<div class="faqPipelineStep">Displayed</div>
-
-</div>
-
-<p>Every cycle, CRAB AGENT observes all candidates it can find across its market sources, removes anything that fails basic quality checks (extremely low liquidity, near-zero volume, obvious shell pools), runs the CRAB SCORE engine on everything that qualifies, and displays the top-ranked opportunities first.</p>
+<p>The market moves, so the score moves with it. A coin can go from HOLD to BUY because real buying picked up, or from BUY to AVOID because the move already extended further than is healthy. This is exactly why CRAB AGENT keeps scanning continuously instead of giving you a one-time answer.</p>
 
 </section>
 
 <section class="faqSection">
 
-<h3>Disclaimer</h3>
+<h3>How often does the AI refresh?</h3>
 
-<p>Every signal shown in CRAB AGENT is the output of an algorithm applied to public market data. It is <strong>not financial advice</strong>, not a guarantee of any outcome, and should not be the sole basis for any investment decision. Always do your own research.</p>
+<p>The AI rescans the market roughly every 60 seconds. You don't need to manually refresh anything - new opportunities appear, and existing ones update, on their own.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Why do some coins disappear?</h3>
+
+<p>A coin drops off the dashboard when it no longer meets basic health checks - for example its liquidity dried up, trading activity died down, or it stopped showing up in any of the real market feeds the AI watches. Disappearing isn't necessarily a bad sign about that specific coin, it usually just means it's no longer a good fit for what CRAB AGENT is built to surface right now.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>What does BUY mean?</h3>
+
+<p>The AI sees healthy, still-developing conditions and believes now looks like a reasonable time to consider an entry. It is not a guarantee - it's a read on the current data.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>What does HOLD mean?</h3>
+
+<p>The coin doesn't look bad, but the AI isn't confident enough - either about the coin's health or the timing - to call it a BUY yet. HOLD generally means "worth watching, not worth acting on yet."</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>What does AVOID mean?</h3>
+
+<p>Something about the coin's current condition looks risky - this could be an already-overextended price move, signs of heavy selling, thin liquidity, or very little real trading activity. AVOID is the AI telling you the risk currently outweighs the potential.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Where does the data come from?</h3>
+
+<p>Everything comes from live, public Solana market data - the same on-chain activity anyone can see, just watched continuously and summarized for you automatically instead of you having to track it yourself.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Can the AI be wrong?</h3>
+
+<p>Yes. CRAB AGENT reads real market data and applies a consistent process to it, but it cannot predict the future and it cannot see things that haven't happened yet. Meme coins are volatile by nature - treat every signal as a well-informed read on the current situation, not a certainty.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>How should I use the signal?</h3>
+
+<p>Use it as a starting point, not a final answer. A BUY signal means "this looks worth a closer look right now" - it's still worth glancing at the coin yourself before acting, and always sizing any position sensibly.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Do I need trading knowledge?</h3>
+
+<p>No. That's the entire point of CRAB AGENT - the AI does the reading of charts and indicators for you and hands you a plain BUY, HOLD, or AVOID.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Do I need technical analysis?</h3>
+
+<p>No. You don't need to know what a candle, an indicator, or a chart pattern is to use CRAB AGENT. The AI has already looked at all of that for you.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Do I need a minimum amount of CRABSEM?</h3>
+
+<p>No. There is no minimum holding requirement. Holding even a small amount of CRABSEM is enough to unlock the app - wallet verification happens automatically the moment you connect.</p>
+
+</section>
+
+<section class="faqSection">
+
+<h3>Is this financial advice?</h3>
+
+<p>No. CRAB AGENT is an algorithmic tool that reads public market data and summarizes it into a signal. Nothing shown in the app is financial advice, and it shouldn't be the only thing you base a decision on. Always do your own research.</p>
+
+</section>
+
+<section class="faqSection" id="privacy">
+
+<h3>Privacy</h3>
+
+<p>CRAB AGENT does not collect personal information. Wallet verification only reads your public on-chain token balance to confirm you hold CRABSEM - it never requests a transaction, never touches your funds, and nothing you do inside the app is tied to your identity.</p>
+
+</section>
+
+<section class="faqSection" id="terms">
+
+<h3>Terms</h3>
+
+<p>CRAB AGENT is provided as-is, for informational purposes only. Signals are generated algorithmically from public market data and are not financial advice. Trading meme coins carries significant risk, including total loss of funds - only use CRAB AGENT alongside your own research and judgment.</p>
 
 </section>
 

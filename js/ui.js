@@ -352,6 +352,56 @@ const UI = {
             signal.risk==="HIGH" ? 90 :
             signal.risk==="MEDIUM" ? 60 : 25;
 
+        // Confidence Breakdown (V12, Priority #3) - explains WHY
+        // the AI trusts (or doesn't trust) this signal, using
+        // real diagnostics the engine already computes but
+        // didn't expose before now (see engine.js return object).
+        // Deliberately different framing from the CRAB SCORE
+        // Breakdown further down, which explains HOW the score
+        // itself was calculated.
+
+        const entryTimingPct =
+            stage.key==="early" ? 88 :
+            stage.key==="mid" ? 55 : 18;
+
+        const momentumQualityPct =
+            Math.round((signal.momentumScore/20)*100);
+
+        const marketStructurePct =
+            Math.round((signal.backingScore/10)*100);
+
+        const buyerDominancePct =
+            signal.buyRatio!=null ? Math.round(signal.buyRatio*100) : 50;
+
+        const breakoutProbPct = Math.min(100, Math.round(
+
+            (signal.volumeAccelerating ? 40 : 10) +
+
+            (signal.isAccumulating ? 30 : 0) +
+
+            ((signal.buySellScore/15) * 30)
+
+        ));
+
+        const trendStabilityPct =
+            (!signal.historyTrend || signal.historyTrend.totalSteps<=0)
+            ? 50
+            : Math.round((signal.historyTrend.higherSteps/signal.historyTrend.totalSteps)*100);
+
+        const trendStabilityNote =
+            (!signal.historyTrend || signal.historyTrend.totalSteps<=0)
+            ? "Not enough scans yet this session - showing neutral"
+            : null;
+
+        const patternReliabilityPct = Math.round(
+
+            ((signal.dataCompleteness||0) + (signal.dataAgreement||0)) / 2 * 100
+
+        );
+
+        const signalFreshnessText =
+            pair.__changed ? "Just updated this scan" : "Stable across recent scans";
+
         const isBuyTier =
             signal.action==="STRONG BUY" || signal.action==="BUY";
 
@@ -549,21 +599,45 @@ const UI = {
 
         </ul>
 
-        <div class="sectionTitle">Engine Snapshot</div>
-
-        ${scoreBar("Momentum", signal.momentumScore, 30)}
-
-        ${scoreBar("Liquidity", signal.liquidityScore, 15)}
-
-        ${scoreBar("Volume", signal.ratioScore, 20)}
-
-        ${scoreBar("Volatility", Math.min(100, Math.round(Math.abs(signal.momentum))), 100)}
-
-        ${scoreBar("Risk", riskTierValue, 100)}
-
-        ${scoreBar("Market Health", signal.backingScore, 10)}
+        <div class="sectionTitle">Confidence Breakdown</div>
 
         ${scoreBar("Confidence", signal.confidence, 99)}
+
+        ${scoreBar("Entry Timing", entryTimingPct, 100)}
+
+        ${scoreBar("Market Structure", marketStructurePct, 100)}
+
+        ${scoreBar("Risk Level", riskTierValue, 100)}
+
+        ${scoreBar("Trend Stability", trendStabilityPct, 100)}
+
+        ${scoreBar("Momentum Quality", momentumQualityPct, 100)}
+
+        ${scoreBar("Buyer Dominance", buyerDominancePct, 100)}
+
+        ${scoreBar("Breakout Probability", breakoutProbPct, 100)}
+
+        ${scoreBar("Pattern Reliability", patternReliabilityPct, 100)}
+
+        <div class="monitorBox">
+
+            <div class="monitorRow">
+
+                <span>Signal Freshness</span>
+
+                <strong class="liveTag">${signalFreshnessText}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Narrative Strength</span>
+
+                <strong class="changedNo">Not available yet</strong>
+
+            </div>
+
+        </div>
 
         ${riskHtml ? `
 
@@ -809,7 +883,7 @@ const UI = {
 
         ${scoreBar("Liquidity", signal.liquidityScore,15)}
 
-        ${scoreBar("Momentum", signal.momentumScore,30)}
+        ${scoreBar("Momentum", signal.momentumScore,20)}
 
         ${scoreBar("Trading", signal.ratioScore,20)}
 
@@ -821,7 +895,7 @@ const UI = {
 
         ${scoreBar("Trades", signal.tradesScore,7)}
 
-        ${scoreBar("Buy/Sell", signal.buySellScore,5)}
+        ${scoreBar("Buy/Sell", signal.buySellScore,15)}
 
         <div style="
     display:flex;

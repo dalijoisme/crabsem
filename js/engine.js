@@ -239,48 +239,69 @@ const Engine = {
 
         let momentumScore = 0;
 
-        if(momentum>=60){
+        // V12 change (Priority #1 - fix late BUY signals): this
+        // used to be monotonic - the higher the momentum
+        // reading, the higher the score, all the way up.  That
+        // rewarded coins that had ALREADY pumped hard, which is
+        // exactly backwards for an early-entry tool: by the time
+        // blended momentum is 60%+, the move is very likely
+        // already mostly done. This is now a "sweet spot" curve:
+        // moderate, still-building momentum scores highest;
+        // momentum that's already very high scores LOWER, not
+        // higher, because that's the signature of a move that's
+        // already extended rather than one that's just starting.
+        //
+        // V13 change (user refinement): max lowered from 30 to
+        // 20 - momentum should now be a CONFIRMATION factor,
+        // not the most heavily-weighted one. The freed-up weight
+        // moved to Buyer Dominance (buySellScore) below. Same
+        // sweet-spot shape, just proportionally smaller.
 
-            momentumScore=30;
-            reasons.push("Explosive momentum across all timeframes");
+        if(momentum>=15 && momentum<45){
 
-        }
-
-        else if(momentum>=35){
-
-            momentumScore=24;
-            reasons.push("Strong bullish trend");
-
-        }
-
-        else if(momentum>=20){
-
-            momentumScore=19;
-            reasons.push("Bullish momentum");
-
-        }
-
-        else if(momentum>=10){
-
-            momentumScore=14;
+            momentumScore=20;
+            reasons.push("Healthy, still-building momentum");
 
         }
 
-        else if(momentum>=5){
+        else if(momentum>=8 && momentum<15){
+
+            momentumScore=16;
+            reasons.push("Momentum starting to build");
+
+        }
+
+        else if(momentum>=45 && momentum<70){
+
+            momentumScore=12;
+            reasons.push("Strong momentum, approaching extended territory");
+
+        }
+
+        else if(momentum>=0 && momentum<8){
 
             momentumScore=9;
+            reasons.push("Early stage - momentum just starting to turn positive");
 
         }
 
-        else if(momentum>=0){
+        else if(momentum>=70 && momentum<120){
 
-            momentumScore=4;
+            momentumScore=5;
+            risks.push("Momentum already overheated - move looks late, not early");
 
         }
 
-        else if(momentum>=-10){
+        else if(momentum>=-10 && momentum<0){
+
+            momentumScore=2;
+
+        }
+
+        else if(momentum>=120){
 
             momentumScore=1;
+            risks.push("Momentum extremely overextended - high chance this move is already over");
 
         }
 
@@ -293,7 +314,7 @@ const Engine = {
 
         if(decelerating){
 
-            momentumScore = Math.max(0, momentumScore-8);
+            momentumScore = Math.max(0, momentumScore-5);
 
             risks.push(`Momentum weakening - last 5 minutes ${p5.toFixed(1)}% while the 1h window is still ${p1.toFixed(1)}%`);
 
@@ -301,7 +322,7 @@ const Engine = {
 
         else if(p5>0 && p1>0 && (p5*12) > p1){
 
-            momentumScore = Math.min(30, momentumScore+3);
+            momentumScore = Math.min(20, momentumScore+2);
             reasons.push("Momentum accelerating in the short term");
 
         }
@@ -663,42 +684,50 @@ const Engine = {
         score+=tradesScore;
 
         // =====================================
-        // BUY / SELL PRESSURE (Buy Timing) -
+        // BUY / SELL PRESSURE ("Buyer Dominance")
         // checked across 3 timeframes (5m/1h/24h)
         // to catch distribution that just started,
         // not only the 24h snapshot.
+        //
+        // V13 change (user refinement): weight tripled
+        // (max 5 -> 15) - this is now one of the most
+        // heavily-weighted components, on par with
+        // Liquidity, because consistently increasing buy
+        // pressure is exactly the kind of real, early
+        // signal that should count even when momentum
+        // itself hasn't caught up yet.
         // =====================================
 
         let buySellScore=0;
 
         if(buyRatio===null){
 
-            buySellScore=2;
+            buySellScore=6;
 
         }
 
         else if(buyRatio>=0.65){
 
-            buySellScore=5;
+            buySellScore=15;
             reasons.push("Buy pressure dominant");
 
         }
 
         else if(buyRatio>=0.55){
 
-            buySellScore=4;
+            buySellScore=12;
 
         }
 
         else if(buyRatio>=0.45){
 
-            buySellScore=2;
+            buySellScore=6;
 
         }
 
         else if(buyRatio>=0.35){
 
-            buySellScore=1;
+            buySellScore=3;
 
         }
 
@@ -724,9 +753,33 @@ const Engine = {
 
         if(distributionForming){
 
-            buySellScore = Math.max(0, buySellScore-3);
+            buySellScore = Math.max(0, buySellScore-9);
 
             risks.push(`Selling pressure rising - current buy ratio ${Math.round(recentBuyRatio*100)}% (24h still ${Math.round(buyRatio*100)}%)`);
+
+        }
+
+        // V13 addition (user refinement, Priority #2 - "buyer
+        // dominance more prioritized"): the mirror-image of
+        // distributionForming above. Buy pressure that is
+        // CONSISTENTLY INCREASING as the window gets shorter
+        // (5m > 1h > 24h baseline) means sellers are getting
+        // weaker and buyers are getting stronger right now -
+        // real, and worth rewarding even if price/momentum
+        // hasn't moved much yet, which is exactly the kind of
+        // early signal this update asks for.
+
+        const buyerDominanceIncreasing =
+            buyRatio5 != null && buyRatio1h != null &&
+            buyRatio5 > buyRatio1h &&
+            buyRatio1h >= (buyRatio ?? 0.4) &&
+            buyRatio5 >= 0.55;
+
+        if(buyerDominanceIncreasing && !distributionForming){
+
+            buySellScore = Math.min(15, buySellScore + 6);
+
+            reasons.push(`Buyer dominance building - buy ratio rising from ${Math.round((buyRatio||0)*100)}% (24h) to ${Math.round(buyRatio1h*100)}% (1h) to ${Math.round(buyRatio5*100)}% (5m)`);
 
         }
 
@@ -744,11 +797,138 @@ const Engine = {
         if(liquidity>=1000000)
             bonus+=1;
 
-        if(momentum>=30)
+        // V12 change: this used to be `momentum>=30`, which
+        // also fired for badly overextended momentum (100%,
+        // 200%+) - directly undermining the sweet-spot redesign
+        // above. Now only rewards momentum inside the same
+        // "healthy building" zone the momentum score itself
+        // rewards.
+
+        if(momentum>=15 && momentum<45)
             bonus+=2;
 
         if(isEarlyGem && volumeAccelerating)
             bonus+=3;
+
+        // =====================================
+        // VOLUME QUALITY (V13 addition, user
+        // refinement) - distinguishes volume made of
+        // many smaller trades (more organic/healthy)
+        // from volume made of a few large trades,
+        // using only data already available (trade
+        // COUNT + $ volume, both real) - no new API.
+        // =====================================
+
+        const avgTradeSize24h =
+            trades24h != null && trades24h > 0
+            ? volumeH24 / trades24h
+            : null;
+
+        const avgTradeSizeVsLiquidity =
+            avgTradeSize24h != null && liquidity > 0
+            ? (avgTradeSize24h / liquidity) * 100
+            : null;
+
+        const manySmallTrades =
+            avgTradeSizeVsLiquidity != null && avgTradeSizeVsLiquidity < 0.5;
+
+        const fewLargeTrades =
+            avgTradeSizeVsLiquidity != null && avgTradeSizeVsLiquidity >= 1.5;
+
+        if(manySmallTrades && trades24h >= 100){
+
+            bonus += 2;
+            reasons.push("Healthy volume - made up of many smaller trades, not a few large ones");
+
+        }
+
+        // "Large Buyer Activity" (V13 addition, user Priority #4
+        // - honest framing): we do NOT have wallet-level data, so
+        // this is NOT true whale/smart-money wallet tracking.
+        // It's a proxy built only from real, already-available
+        // numbers: average trade size relative to the pool,
+        // combined with a strong buy-side lean. Bigger-than-usual
+        // trades that are also buy-dominant is the closest real
+        // signal available to "a larger buyer stepping in" without
+        // adding any new data source.
+
+        const largeBuyerActivity =
+            fewLargeTrades &&
+            buyRatio != null && buyRatio >= 0.6;
+
+        if(largeBuyerActivity){
+
+            bonus += 4;
+            reasons.push("Larger-than-average trades leaning strongly toward buying");
+
+        }
+
+        // =====================================
+        // EARLY ACCUMULATION (V12, made significantly
+        // more aggressive in V13 per user request - this
+        // is now the highest-priority bonus in the engine).
+        // Tiered instead of a single flat bonus: the more
+        // of the real "textbook accumulation" traits are
+        // present at once (rising volume, buyers building,
+        // price still flat, no big candle yet, no
+        // distribution), the bigger the reward - using only
+        // data already computed above.
+        // =====================================
+
+        const noBigCandleYet = p1 < 10 && p5 < 5;
+
+        const veryFlatPrice = p24 >= -5 && p24 <= 10;
+
+        const flatPrice = p24 >= -5 && p24 <= 15;
+
+        let accumulationTier = null;
+
+        if(
+
+            volumeAccelerating &&
+            buyRatio != null && buyRatio >= 0.55 &&
+            veryFlatPrice &&
+            noBigCandleYet &&
+            !distributionForming
+
+        ){
+
+            accumulationTier = "strong";
+            bonus += 18;
+            reasons.push("Strong accumulation - volume and buyers both rising while price is still flat, no big candle yet");
+
+        }
+
+        else if(
+
+            volumeAccelerating &&
+            (buyRatio == null || buyRatio >= 0.5) &&
+            flatPrice &&
+            !distributionForming
+
+        ){
+
+            accumulationTier = "moderate";
+            bonus += 12;
+            reasons.push("Early accumulation - volume rising while price is still flat");
+
+        }
+
+        else if(
+
+            (volumeAccelerating || buyerDominanceIncreasing) &&
+            p24 >= -8 && p24 <= 18 &&
+            !distributionForming
+
+        ){
+
+            accumulationTier = "early";
+            bonus += 6;
+            reasons.push("Early signs of accumulation building");
+
+        }
+
+        const isAccumulating = accumulationTier !== null;
 
         if(historyTrend && historyTrend.higherSteps > historyTrend.lowerSteps && historyTrend.totalSteps>=2){
 
@@ -830,15 +1010,34 @@ const Engine = {
 
         }
 
-        if(p24 >= 500){
+        // V12 change (Priority #1): these thresholds used to
+        // start at 120%/250%/500% - meaning a coin that had
+        // already pumped 80-100% in 24h got ZERO overextension
+        // penalty. That's a big part of why BUY signals kept
+        // showing up on coins that were already falling by the
+        // time someone opened DexScreener. Thresholds are now
+        // roughly half of what they were.
+
+        if(p24 >= 200){
 
             penalty += 15;
             risks.push("Already pumped significantly");
             hardBlockStrongBuy = true;
 
+            // V13 (user refinement - more conservative on late
+            // signals): this used to only block STRONG BUY,
+            // capping down to BUY. Since Buyer Dominance now
+            // carries much more weight, a coin that already
+            // pumped 200%+ could still reach BUY on strong buy-
+            // side order flow alone (which can just as easily be
+            // late FOMO chasing as it can be genuine strength).
+            // At this level of extension, cap at HOLD - never BUY.
+
+            hardBlockBuy = true;
+
         }
 
-        else if(p24 >= 250){
+        else if(p24 >= 100){
 
             penalty += 8;
             risks.push("Very extended price move");
@@ -846,7 +1045,7 @@ const Engine = {
 
         }
 
-        else if(p24 >= 120){
+        else if(p24 >= 50){
 
             penalty += 3;
             risks.push("Price already moved strongly");
@@ -1070,9 +1269,30 @@ const Engine = {
         // is low - not purely a function of score)
         // =====================================
 
-        const target = Math.round(
+        // V12 change (Priority #2): this used to be
+        // score*0.45, which routinely produced +40-60% targets
+        // - exciting on paper, but unrealistic often enough
+        // that it set the wrong expectation. Lower multiplier +
+        // a hard cap now aim for smaller, more consistently
+        // achievable exits (~12-25% typical) instead of chasing
+        // big numbers. A floor of 5% keeps the figure meaningful
+        // even for lower-scoring qualifying entries.
 
-            score * 0.45 * Math.min(1, confidence/70)
+        const target = Math.min(
+
+            25,
+
+            Math.max(
+
+                5,
+
+                Math.round(
+
+                    score * 0.22 * Math.min(1, confidence/70)
+
+                )
+
+            )
 
         );
 
@@ -1262,6 +1482,36 @@ const Engine = {
             buyRatio,
 
             deadProject,
+
+            // Additive only (V12) - these were already computed
+            // internally for scoring/confidence but never
+            // returned. Exposing them lets the UI show WHY the
+            // engine trusts a signal using real, already-computed
+            // diagnostics instead of re-deriving anything new.
+
+            decelerating,
+
+            volumeAccelerating,
+
+            volumeExhausting,
+
+            isAccumulating,
+
+            accumulationTier,
+
+            buyerDominanceIncreasing,
+
+            manySmallTrades,
+
+            largeBuyerActivity,
+
+            distributionForming,
+
+            historyTrend,
+
+            dataCompleteness: completeness,
+
+            dataAgreement: agreement,
 
             reasons,
 

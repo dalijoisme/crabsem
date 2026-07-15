@@ -28,9 +28,44 @@ const adminLiveText = document.getElementById("adminLiveText");
 // treated as actual access control)
 // =====================================
 
-function attemptLogin(){
+// =====================================
+// PASSWORD GATE (temporary client-side,
+// per explicit instruction - move to a
+// real backend check before this is
+// treated as actual access control)
+//
+// The plain password is never stored anywhere in this
+// project. CONFIG only holds a SHA-256 hash; the entered
+// password is hashed in-browser (Web Crypto SubtleCrypto,
+// built into every modern browser - no new dependency) and
+// only the two hashes are compared. This is still NOT real
+// security (no rate limiting, no server verification, a
+// hash can still be attacked offline given enough time) -
+// it only prevents the trivial "read the password straight
+// out of DevTools/config.js" case. Migrate to real
+// server-side auth before treating this as actual access
+// control.
+// =====================================
 
-    if(adminPassword.value === CONFIG.ADMIN_PASSWORD){
+async function sha256Hex(text){
+
+    const encoded = new TextEncoder().encode(text);
+
+    const digest = await crypto.subtle.digest("SHA-256", encoded);
+
+    return Array.from(new Uint8Array(digest))
+
+        .map(b=>b.toString(16).padStart(2,"0"))
+
+        .join("");
+
+}
+
+async function attemptLogin(){
+
+    const enteredHash = await sha256Hex(adminPassword.value);
+
+    if(enteredHash === CONFIG.ADMIN_PASSWORD_HASH){
 
         adminGate.style.display = "none";
 

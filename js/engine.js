@@ -48,6 +48,53 @@
 
 const Engine = {
 
+    // =====================================
+    // SCAN MEMORY (session-only, in-memory,
+    // self-contained inside engine.js - no
+    // database, no external storage).
+    //
+    // Mirrors the exact same pattern api.js already
+    // uses for PRICE_HISTORY, but keyed for the
+    // engine's own needs: last momentum reading (for
+    // delta-momentum), last smoothed score
+    // (exponential smoothing), and consecutive-scan
+    // streak counters (multi-scan confirmation for
+    // distribution/downtrend before hard-blocking).
+    //
+    // Bounded to avoid unbounded memory growth over a
+    // long-running tab: if more than MAX_TRACKED
+    // addresses accumulate, the least-recently-touched
+    // entries are evicted.
+    // =====================================
+
+    _scanMemory: {},
+
+    _MAX_TRACKED: 500,
+
+    _touchMemory(address, updates){
+
+        const now = Date.now();
+
+        const existing = this._scanMemory[address] || {};
+
+        this._scanMemory[address] = Object.assign({}, existing, updates, { lastSeenAt: now });
+
+        const keys = Object.keys(this._scanMemory);
+
+        if(keys.length > this._MAX_TRACKED){
+
+            keys
+
+                .sort((a,b)=>this._scanMemory[a].lastSeenAt - this._scanMemory[b].lastSeenAt)
+
+                .slice(0, keys.length - this._MAX_TRACKED)
+
+                .forEach(k=>delete this._scanMemory[k]);
+
+        }
+
+    },
+
     analyze(pair){
 
         // =====================================
@@ -152,6 +199,10 @@ const Engine = {
 
         const history = pair.__priceHistory || null;
 
+        const address = pair.baseToken?.address || null;
+
+        const previousMemory = address ? this._scanMemory[address] : null;
+
         let score = 0;
 
         const reasons = [];
@@ -226,6 +277,21 @@ const Engine = {
             (p6 * 0.20) +
 
             (p24 * 0.30);
+
+        // Delta Momentum (early detector, ROI-audit item 5):
+        // how much momentum improved since the LAST time we
+        // scanned this exact token - not "is momentum positive"
+        // (that's the existing sweet-spot check below), but "is
+        // it improving right now, even before crossing into the
+        // healthy zone". This is what lets a token get an early
+        // nudge one scan before its raw momentum reading alone
+        // would justify it - without replacing the original
+        // momentum model at all.
+
+        const deltaMomentum =
+            previousMemory?.lastMomentum != null
+            ? momentum - previousMemory.lastMomentum
+            : null;
 
         // "Decelerating": the last 5 minutes, projected
         // to an hourly rate, is already weaker than the
@@ -635,7 +701,18 @@ const Engine = {
 
         }
 
-        score+=holderScore;
+        // ROI audit item 2: holderScore is NOT added to `score`
+        // anymore. `holder` has no free data source and is
+        // always null, so holderScore was always exactly the
+        // same neutral constant (4) for every single token -
+        // zero discriminative information, just dead weight in
+        // the score budget. Its 8-point budget was moved to
+        // Buyer Dominance (buySellScore) above, which is a
+        // genuinely predictive, real-data component. holderScore
+        // itself is still computed and returned below so the
+        // existing "CRAB SCORE Breakdown" UI keeps rendering
+        // exactly as before - it just no longer affects the
+        // final score.
 
         // =====================================
         // TRADES / FREQUENCY (Buy Timing)
@@ -698,36 +775,46 @@ const Engine = {
         // itself hasn't caught up yet.
         // =====================================
 
+        // Weight rescaled 15 -> 23 (ROI audit item 2): the 8
+        // points freed up by removing holderScore's constant,
+        // uninformative contribution to `score` were moved here
+        // - Buyer Dominance is a genuinely predictive, real-data
+        // component, unlike holderScore which was always the
+        // same neutral value for every token (no holder-count
+        // data source exists). See holderScore below - it's
+        // still computed and shown for display continuity, it
+        // just no longer counts toward the final score.
+
         let buySellScore=0;
 
         if(buyRatio===null){
 
-            buySellScore=6;
+            buySellScore=9;
 
         }
 
         else if(buyRatio>=0.65){
 
-            buySellScore=15;
+            buySellScore=23;
             reasons.push("Buy pressure dominant");
 
         }
 
         else if(buyRatio>=0.55){
 
-            buySellScore=12;
+            buySellScore=18;
 
         }
 
         else if(buyRatio>=0.45){
 
-            buySellScore=6;
+            buySellScore=9;
 
         }
 
         else if(buyRatio>=0.35){
 
-            buySellScore=3;
+            buySellScore=5;
 
         }
 
@@ -753,7 +840,7 @@ const Engine = {
 
         if(distributionForming){
 
-            buySellScore = Math.max(0, buySellScore-9);
+            buySellScore = Math.max(0, buySellScore-14);
 
             risks.push(`Selling pressure rising - current buy ratio ${Math.round(recentBuyRatio*100)}% (24h still ${Math.round(buyRatio*100)}%)`);
 
@@ -777,7 +864,7 @@ const Engine = {
 
         if(buyerDominanceIncreasing && !distributionForming){
 
-            buySellScore = Math.min(15, buySellScore + 6);
+            buySellScore = Math.min(23, buySellScore + 9);
 
             reasons.push(`Buyer dominance building - buy ratio rising from ${Math.round((buyRatio||0)*100)}% (24h) to ${Math.round(buyRatio1h*100)}% (1h) to ${Math.round(buyRatio5*100)}% (5m)`);
 
@@ -796,6 +883,21 @@ const Engine = {
 
         if(liquidity>=1000000)
             bonus+=1;
+
+        // Delta Momentum early nudge (ROI-audit item 5): reward
+        // momentum that is CLEARLY improving scan-over-scan even
+        // while it's still below the healthy zone - this is
+        // exactly the "detect it before it's fully positive"
+        // behaviour that was missing. Deliberately modest (+3)
+        // since this is a supporting early signal, not a
+        // replacement for the main momentum score.
+
+        if(deltaMomentum != null && deltaMomentum >= 3 && momentum < 15){
+
+            bonus += 3;
+            reasons.push("Momentum improving scan-over-scan, even before reaching the healthy zone");
+
+        }
 
         // V12 change: this used to be `momentum>=30`, which
         // also fired for badly overextended momentum (100%,
@@ -965,27 +1067,81 @@ const Engine = {
             risks.push(`Price dropped ${p5.toFixed(1)}% in the last 5 minutes`);
 
         }
+
+        // Soft hard-block (ROI audit item 1): -1.5% in 5 minutes
+        // is a completely normal wiggle, not a real danger signal
+        // - it was blocking STRONG BUY outright before. Now only
+        // a genuinely sharp -2.5%+ drop triggers the hard block;
+        // anything milder gets a proportional soft penalty
+        // instead, scaled to how negative it actually is.
+
+        else if(p5 <= -2.5){
+
+            penalty += 6;
+            hardBlockStrongBuy = true;
+
+        }
+
         else if(p5 <= -1.5){
 
-            penalty += 4;
-            hardBlockStrongBuy = true;
+            penalty += Math.round(Math.abs(p5) * 2);
 
         }
 
-        if(momentum < 0){
+        // Soft hard-block (ROI audit item 1): ANY negative
+        // momentum (even -0.01%) used to hard-block STRONG BUY
+        // outright - far too sensitive, a routine source of
+        // noisy late/flickering signals. Only meaningfully
+        // negative momentum (<-5) still hard-blocks; mild
+        // negative momentum gets a small proportional penalty
+        // instead, preserving protection without over-blocking.
+
+        if(momentum < -5){
 
             hardBlockStrongBuy = true;
+            penalty += 3;
 
         }
+        else if(momentum < 0){
+
+            penalty += Math.round(Math.abs(momentum) * 0.5);
+
+        }
+
+        // Multi-scan confirmation streaks (ROI audit item 4).
+        // Computed once here, used below to decide whether
+        // distribution/downtrend get a soft penalty (first time
+        // seen) or the full hard-block (confirmed 2 scans in a
+        // row) - reduces noisy single-scan false positives
+        // without slowing down genuinely fast, healthy signals
+        // (those paths are untouched).
+
+        const priorDistributionStreak = previousMemory?.distributionStreak || 0;
+        const distributionStreak = distributionForming ? priorDistributionStreak + 1 : 0;
+
+        const currentlyDowntrend =
+            historyTrend && historyTrend.totalSteps>=2 && historyTrend.lowerSteps > historyTrend.higherSteps;
+
+        const priorDowntrendStreak = previousMemory?.downtrendStreak || 0;
+        const downtrendStreak = currentlyDowntrend ? priorDowntrendStreak + 1 : 0;
 
         // Repeated downward pattern in our own session
         // history (real, not just a snapshot).
 
-        if(historyTrend && historyTrend.totalSteps>=2 && historyTrend.lowerSteps > historyTrend.higherSteps){
+        if(currentlyDowntrend){
 
-            penalty += 5;
-            hardBlockStrongBuy = true;
-            risks.push("A downward price pattern was detected during this monitoring session");
+            if(downtrendStreak >= 2){
+
+                penalty += 5;
+                hardBlockStrongBuy = true;
+                risks.push("A downward price pattern was detected during this monitoring session");
+
+            }
+            else{
+
+                penalty += 2;
+
+            }
 
         }
 
@@ -994,8 +1150,17 @@ const Engine = {
 
         if(distributionForming){
 
-            penalty += 5;
-            hardBlockStrongBuy = true;
+            if(distributionStreak >= 2){
+
+                penalty += 5;
+                hardBlockStrongBuy = true;
+
+            }
+            else{
+
+                penalty += 2;
+
+            }
 
         }
 
@@ -1136,6 +1301,32 @@ const Engine = {
         if(deadProject){
 
             score = Math.min(score, 35);
+
+        }
+
+        // Exponential Smoothing (ROI audit item 6): anti-flicker,
+        // not latency. alpha=0.6 deliberately favors THIS scan's
+        // reading over history, so a genuine fast move still
+        // shows up strongly on the very next scan - it just
+        // stops a single noisy reading from swinging the score
+        // (and the action tier derived from it) on its own. The
+        // very first time a token is seen, there's no prior
+        // value to smooth against, so it's simply the raw score
+        // - never delayed on first sight.
+
+        const rawScore = score;
+
+        const SMOOTHING_ALPHA = 0.6;
+
+        if(previousMemory?.smoothedScore != null){
+
+            score = Math.round(
+
+                SMOOTHING_ALPHA * rawScore +
+
+                (1 - SMOOTHING_ALPHA) * previousMemory.smoothedScore
+
+            );
 
         }
 
@@ -1415,6 +1606,30 @@ const Engine = {
 
         }
 
+        // ROI audit items 3/4/5/6: persist this scan's values so
+        // the NEXT call to analyze() for this same address can
+        // compute delta-momentum, apply exponential smoothing,
+        // and evaluate multi-scan confirmation streaks. Skipped
+        // if we don't have an address to key by (shouldn't
+        // normally happen, but analyze() must never throw over
+        // missing optional data).
+
+        if(address){
+
+            this._touchMemory(address, {
+
+                lastMomentum: momentum,
+
+                smoothedScore: score,
+
+                distributionStreak,
+
+                downtrendStreak
+
+            });
+
+        }
+
         // =====================================
         // RETURN - same contract as V10 (every key
         // below is unchanged; only `action`/`signal`
@@ -1424,6 +1639,8 @@ const Engine = {
         return{
 
             score,
+
+            rawScore,
 
             confidence,
 
@@ -1496,6 +1713,8 @@ const Engine = {
             volumeExhausting,
 
             isAccumulating,
+
+            deltaMomentum,
 
             accumulationTier,
 

@@ -379,7 +379,7 @@ const UI = {
 
             (signal.isAccumulating ? 30 : 0) +
 
-            ((signal.buySellScore/15) * 30)
+            ((signal.buySellScore/23) * 30)
 
         ));
 
@@ -895,7 +895,7 @@ const UI = {
 
         ${scoreBar("Trades", signal.tradesScore,7)}
 
-        ${scoreBar("Buy/Sell", signal.buySellScore,15)}
+        ${scoreBar("Buy/Sell", signal.buySellScore,23)}
 
         <div style="
     display:flex;

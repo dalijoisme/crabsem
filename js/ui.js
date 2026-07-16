@@ -919,7 +919,7 @@ const UI = {
 
         ${scoreBar("Buy/Sell", signal.buySellScore,23)}
 
-        <div style="
+        <div class="detailActions" style="
     display:flex;
     flex-direction:column;
     gap:10px;
@@ -949,6 +949,12 @@ const UI = {
 </button>
 
 </div>
+
+${(typeof WalletDetect !== "undefined" && WalletDetect.isInWalletBrowser && WalletDetect.isInWalletBrowser()) ? `
+
+<div class="disclaimerNote walletBrowserHint">💡 You're inside ${WalletDetect.inAppBrowserName()}'s built-in browser. After opening DexScreener, use its tab switcher (not the Back button) to return to CRAB AGENT.</div>
+
+` : ""}
 
         `;
 
@@ -994,16 +1000,16 @@ function scoreBar(name,value,max){
 
     );
 
+    // V14: class-based instead of inline styles so the mobile
+    // stylesheet can actually control bar sizing/spacing per
+    // breakpoint (inline styles can't be overridden by media
+    // queries without !important everywhere).
+
     return `
 
-    <div style="margin-bottom:14px">
+    <div class="scoreBarRow">
 
-        <div style="
-            display:flex;
-            justify-content:space-between;
-            margin-bottom:6px;
-            font-size:13px;
-        ">
+        <div class="scoreBarHead">
 
             <span>${name}</span>
 
@@ -1011,19 +1017,9 @@ function scoreBar(name,value,max){
 
         </div>
 
-        <div style="
-            height:8px;
-            background:#24213b;
-            border-radius:999px;
-            overflow:hidden;
-        ">
+        <div class="scoreBarTrack">
 
-            <div style="
-                width:${percent}%;
-                height:100%;
-                background:#8b5cf6;
-                border-radius:999px;
-            "></div>
+            <div class="scoreBarFill" style="width:${percent}%"></div>
 
         </div>
 
@@ -1063,6 +1059,28 @@ function trackAndOpen(url, eventName){
 
     }
 
-    window.open(url, "_blank", "noopener,noreferrer");
+    // Temuan 11 (mobile testing): inside wallet in-app browsers
+    // (Phantom etc.), window.open() often navigates the SAME
+    // WebView instead of opening a real new tab - so the phone's
+    // Back button then lands on the wallet's home screen, not
+    // back in CRAB AGENT. A real anchor element with
+    // target=_blank is treated as a genuine new-tab intent by
+    // more WebViews than the JS API is, so we synthesize one.
+    // This is a best-effort improvement - Phantom's WebView
+    // behaviour is ultimately theirs, which is why there is ALSO
+    // a visible hint for users in that environment (see
+    // renderDetail external-link section).
+
+    const a = document.createElement("a");
+
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+
+    document.body.appendChild(a);
+
+    a.click();
+
+    a.remove();
 
 }

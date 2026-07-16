@@ -2257,3 +2257,272 @@ button{
     }
 
 }
+
+/* =======================
+V14 MOBILE UX OVERHAUL
+Comprehensive mobile polish per user
+request: comfortable reading, no
+horizontal overflow, one-hand reach,
+proportional bars/badges, smoother
+loading, readable detail panel.
+======================= */
+
+html, body{
+
+    overflow-x:hidden;
+
+    max-width:100vw;
+
+}
+
+img{
+
+    max-width:100%;
+
+}
+
+/* Smoother loading: cards fade+rise in
+   instead of popping */
+
+.coinCard{
+
+    animation:cardIn .25s ease both;
+
+}
+
+@keyframes cardIn{
+
+    from{ opacity:0; transform:translateY(6px); }
+
+    to{ opacity:1; transform:none; }
+
+}
+
+@media (prefers-reduced-motion: reduce){
+
+    .coinCard{ animation:none; }
+
+}
+
+@media(max-width:600px){
+
+    /* Base readability: slightly larger
+       body text + relaxed line height */
+
+    .detail-panel{
+
+        font-size:15px;
+
+        line-height:1.55;
+
+    }
+
+    .detail-panel .sectionTitle{
+
+        font-size:13px;
+
+        letter-spacing:1.2px;
+
+        margin-top:22px;
+
+    }
+
+    .whyList li{
+
+        font-size:14.5px;
+
+        line-height:1.55;
+
+        margin-bottom:10px;
+
+    }
+
+    /* Score bars: taller + labels never
+       cramped against values */
+
+    .scoreBarRow{
+
+        margin-bottom:14px;
+
+    }
+
+    .scoreBarHead{
+
+        font-size:13.5px;
+
+    }
+
+    .scoreBarTrack{
+
+        height:9px;
+
+    }
+
+    /* Target / Market Health stat tiles:
+       force 2-col grid that can never
+       overflow, numbers wrap gracefully */
+
+    .targetGrid, .healthGrid{
+
+        display:grid;
+
+        grid-template-columns:repeat(2, minmax(0,1fr));
+
+        gap:10px;
+
+    }
+
+    .targetGrid > div, .healthGrid > div{
+
+        min-width:0;
+
+    }
+
+    .targetGrid strong, .healthGrid strong{
+
+        font-size:16px;
+
+        word-break:break-word;
+
+    }
+
+    /* Action buttons: full-width, tall,
+       thumb-reach friendly */
+
+    .detail-panel button,
+    .detailActions button{
+
+        width:100%;
+
+        min-height:48px;
+
+        font-size:15px;
+
+        border-radius:14px;
+
+    }
+
+    /* Badges proportional, never squashed */
+
+    .tag, .signalPill, .entryBadge{
+
+        font-size:11px;
+
+        padding:4px 10px;
+
+        white-space:nowrap;
+
+    }
+
+    /* History timeline breathing room */
+
+    .historyTimeline{
+
+        padding-left:6px;
+
+    }
+
+    /* Monitor box rows never overflow */
+
+    .monitorRow{
+
+        display:flex;
+
+        justify-content:space-between;
+
+        gap:10px;
+
+        min-width:0;
+
+    }
+
+    .monitorRow strong{
+
+        text-align:right;
+
+        word-break:break-word;
+
+    }
+
+    /* Wallet-browser hint stands out just
+       enough without shouting */
+
+    .walletBrowserHint{
+
+        background:rgba(139,92,246,.08);
+
+        border:1px solid rgba(139,92,246,.25);
+
+        border-radius:12px;
+
+        padding:10px 12px;
+
+    }
+
+    /* Ticker/stats rows: hard stop on
+       sideways scroll */
+
+    .statsCompact, .coin-grid, .detail-panel{
+
+        max-width:100%;
+
+        overflow-x:hidden;
+
+    }
+
+}
+
+@media(max-width:380px){
+
+    .detail-panel{ font-size:14px; }
+
+    .targetGrid strong, .healthGrid strong{ font-size:14.5px; }
+
+}
+
+/* Base (desktop) styles for the refactored
+   class-based scoreBar - previously inline */
+
+.scoreBarRow{
+
+    margin-bottom:14px;
+
+}
+
+.scoreBarHead{
+
+    display:flex;
+
+    justify-content:space-between;
+
+    align-items:center;
+
+    gap:12px;
+
+    margin-bottom:6px;
+
+    font-size:13px;
+
+}
+
+.scoreBarTrack{
+
+    height:8px;
+
+    background:#24213b;
+
+    border-radius:999px;
+
+    overflow:hidden;
+
+}
+
+.scoreBarFill{
+
+    height:100%;
+
+    background:#8b5cf6;
+
+    border-radius:999px;
+
+}

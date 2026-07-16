@@ -67,7 +67,38 @@ const Engine = {
     // entries are evicted.
     // =====================================
 
-    _scanMemory: {},
+    _scanMemory: (function(){
+
+        // V14 (history must survive refresh): scan memory is now
+        // hydrated from sessionStorage at load, so smoothing,
+        // delta-momentum and confirmation streaks continue right
+        // where they left off after a page refresh instead of
+        // resetting to zero. sessionStorage (not localStorage) is
+        // deliberate: same tab survives refresh, but a fresh tab
+        // starts clean - stale hours-old readings shouldn't leak
+        // into a brand new session.
+
+        try{
+
+            const raw = sessionStorage.getItem("crab_engine_memory");
+
+            if(raw) return JSON.parse(raw);
+
+        }catch(e){}
+
+        return {};
+
+    })(),
+
+    _persistMemory(){
+
+        try{
+
+            sessionStorage.setItem("crab_engine_memory", JSON.stringify(this._scanMemory));
+
+        }catch(e){}
+
+    },
 
     _MAX_TRACKED: 500,
 
@@ -78,6 +109,8 @@ const Engine = {
         const existing = this._scanMemory[address] || {};
 
         this._scanMemory[address] = Object.assign({}, existing, updates, { lastSeenAt: now });
+
+        this._persistMemory();
 
         const keys = Object.keys(this._scanMemory);
 
@@ -228,7 +261,14 @@ const Engine = {
             ? ((historyPeakPrice-price)/historyPeakPrice)*100
             : null;
 
-        const alreadyHadBigMove = p1>=50 || p6>=80;
+        // Temuan 10 fix: p24 added - the engine's own penalty
+        // section already treats p24>=120 as "price already moved
+        // strongly", but the EARLY/MID/LATE downgrade was only
+        // checking 1h/6h windows, so a pump spread across >6h
+        // could still be labeled EARLY (verified in real testing:
+        // The Prophecy). Same threshold, now used consistently.
+
+        const alreadyHadBigMove = p1>=50 || p6>=80 || p24>=120;
 
         const address = pair.baseToken?.address || null;
 
@@ -363,7 +403,7 @@ const Engine = {
 
         else if(momentum>=8 && momentum<15){
 
-            momentumScore=16;
+            momentumScore=17;
             reasons.push("Momentum starting to build");
 
         }
@@ -377,7 +417,7 @@ const Engine = {
 
         else if(momentum>=0 && momentum<8){
 
-            momentumScore=9;
+            momentumScore=12;
             reasons.push("Early stage - momentum just starting to turn positive");
 
         }
@@ -923,9 +963,18 @@ const Engine = {
         // since this is a supporting early signal, not a
         // replacement for the main momentum score.
 
-        if(deltaMomentum != null && deltaMomentum >= 3 && momentum < 15){
+        // V14: tiered & more sensitive - reacting the moment
+        // momentum starts turning, not after it's already high.
 
-            bonus += 3;
+        if(deltaMomentum != null && deltaMomentum >= 5 && momentum < 20){
+
+            bonus += 7;
+            reasons.push("Momentum turning up fast scan-over-scan - early reversal signal");
+
+        }
+        else if(deltaMomentum != null && deltaMomentum >= 2 && momentum < 15){
+
+            bonus += 4;
             reasons.push("Momentum improving scan-over-scan, even before reaching the healthy zone");
 
         }
@@ -1125,6 +1174,30 @@ const Engine = {
 
         }
 
+        // Temuan 9 (real-testing evidence: every SL hit in live
+        // testing was a thin-liquidity token): RATIO-based backing
+        // can look perfect while the pool is tiny in absolute
+        // dollars - $15K of liquidity moves violently on a single
+        // moderate sell no matter how healthy the ratio is.
+        // Calibrated against the actual test set so it blocks the
+        // sub-$10K deathtraps without killing thin-but-real
+        // winners (Yuki hit TP at ~$15K liquidity - stays BUY).
+
+        if(liquidity < 10000){
+
+            hardBlockBuy = true;
+            penalty += 5;
+            risks.push("Liquidity is extremely thin (under $10K) - a single sell can crash the price");
+
+        }
+        else if(liquidity < 20000){
+
+            hardBlockStrongBuy = true;
+            penalty += 2;
+            risks.push("Liquidity is very thin in absolute terms - expect violent price swings");
+
+        }
+
         if(backingScore <= 3){
 
             hardBlockStrongBuy = true;
@@ -1172,7 +1245,7 @@ const Engine = {
 
         else if(p5 <= -1.5){
 
-            penalty += Math.round(Math.abs(p5) * 2);
+            penalty += Math.round(Math.abs(p5));
 
         }
 
@@ -1203,6 +1276,13 @@ const Engine = {
         // row) - reduces noisy single-scan false positives
         // without slowing down genuinely fast, healthy signals
         // (those paths are untouched).
+
+        // V14: positive confirmation streak - consecutive scans
+        // where this token already qualified as BUY-tier. Used
+        // BELOW to RAISE confidence (persistence = more trust),
+        // never to gate/delay the entry itself.
+
+        const priorBuyStreak = previousMemory?.buyStreak || 0;
 
         const priorDistributionStreak = previousMemory?.distributionStreak || 0;
         const distributionStreak = distributionForming ? priorDistributionStreak + 1 : 0;
@@ -1339,7 +1419,12 @@ const Engine = {
 
         if(ratio >= 25){
 
-            penalty += 5;
+            // V14 penalty audit: extreme turnover is how newborn
+            // winners LOOK (verified in real testing - tokens that
+            // hit TP had 20x+ turnover too). Softened 5 -> 2; real
+            // protection comes from exhaustion/distribution checks.
+
+            penalty += 2;
             risks.push("Extremely volatile trading");
 
         }
@@ -1404,15 +1489,22 @@ const Engine = {
 
         const rawScore = score;
 
-        const SMOOTHING_ALPHA = 0.6;
+        // V14 asymmetric smoothing: a RISING raw score passes
+        // through almost immediately (alpha 0.85) so a newborn
+        // pump is never slowed down by its own history, while a
+        // FALLING raw score is damped harder (alpha 0.5) - which
+        // is where flicker actually hurts (BUY blinking off from
+        // one noisy scan). Anti-flicker without entry lag.
 
         if(previousMemory?.smoothedScore != null){
 
+            const alpha = rawScore >= previousMemory.smoothedScore ? 0.85 : 0.5;
+
             score = Math.round(
 
-                SMOOTHING_ALPHA * rawScore +
+                alpha * rawScore +
 
-                (1 - SMOOTHING_ALPHA) * previousMemory.smoothedScore
+                (1 - alpha) * previousMemory.smoothedScore
 
             );
 
@@ -1523,6 +1615,19 @@ const Engine = {
 
             dataQualityAdj;
 
+        // V14 (multi-scan confirmation as a BOOSTER, not a gate):
+        // a token that has ALREADY been sitting at BUY-tier for
+        // consecutive scans has proven persistence - reward that
+        // with extra confidence. Crucially this only ADDS trust
+        // to signals that already fired; it never delays the
+        // first entry, which fires at full speed on scan one.
+
+        if(priorBuyStreak >= 1){
+
+            confidence += Math.min(12, 4 + priorBuyStreak * 4);
+
+        }
+
         confidence = Math.max(
 
             5,
@@ -1592,12 +1697,19 @@ const Engine = {
 
         let action = "AVOID";
 
-        if(score>=88 && penalty<=3 && confidence>=65){
+        // V14 (early-detection objective): thresholds lowered so the
+        // engine commits to newborn winners earlier. STRONG BUY
+        // 88->85 & conf 65->58; BUY 68->62, penalty tolerance
+        // 8->10, conf 45->40. Protection against obvious rugs is
+        // handled by hard-blocks + the new absolute-liquidity
+        // check, not by keeping these gates high.
+
+        if(score>=85 && penalty<=4 && confidence>=58){
 
             action = "STRONG BUY";
 
         }
-        else if(score>=68 && penalty<=8 && confidence>=45){
+        else if(score>=62 && penalty<=10 && confidence>=40){
 
             action = "BUY";
 
@@ -1632,7 +1744,7 @@ const Engine = {
 
         // Low confidence = never a BUY-tier signal.
 
-        if(confidence<40 && (action==="STRONG BUY" || action==="BUY")){
+        if(confidence<34 && (action==="STRONG BUY" || action==="BUY")){
 
             action = "HOLD";
             risks.push("Confidence too low - BUY signal downgraded to Hold");
@@ -1704,6 +1816,8 @@ const Engine = {
 
         if(address){
 
+            const qualifiesBuyTier = (action === "STRONG BUY" || action === "BUY");
+
             this._touchMemory(address, {
 
                 lastMomentum: momentum,
@@ -1712,7 +1826,9 @@ const Engine = {
 
                 distributionStreak,
 
-                downtrendStreak
+                downtrendStreak,
+
+                buyStreak: qualifiesBuyTier ? priorBuyStreak + 1 : 0
 
             });
 

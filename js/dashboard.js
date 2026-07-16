@@ -57,7 +57,33 @@ let trendingInFlight = false;
 // in-memory for this session only.
 
 const previousAction = {};
-const actionHistory = {};
+const actionHistory = (function(){
+
+    // V14: recommendation history (BUY/HOLD timeline in the
+    // detail panel) survives refresh - hydrated from
+    // sessionStorage, same policy as engine scan memory.
+
+    try{
+
+        const raw = sessionStorage.getItem("crab_action_history");
+
+        if(raw) return JSON.parse(raw);
+
+    }catch(e){}
+
+    return {};
+
+})();
+
+function persistActionHistory(){
+
+    try{
+
+        sessionStorage.setItem("crab_action_history", JSON.stringify(actionHistory));
+
+    }catch(e){}
+
+}
 
 searchInput.focus();
 
@@ -376,6 +402,8 @@ function trackRecommendationChanges(pairs){
 
             actionHistory[address]=[{ action, time:Date.now() }];
 
+            persistActionHistory();
+
         }
 
         else if(prev!==action){
@@ -387,6 +415,8 @@ function trackRecommendationChanges(pairs){
                 actionHistory[address].shift();
 
             }
+
+            persistActionHistory();
 
         }
 

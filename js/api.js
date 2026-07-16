@@ -125,7 +125,33 @@ let trendingCache = { data:null, ts:0 };
 // sample per scan interval) and lost on page reload.
 // =========================================
 
-const PRICE_HISTORY = {};
+const PRICE_HISTORY = (function(){
+
+    // V14: hydrate from sessionStorage so session price history
+    // (peak detection, trend, drawdown) survives a page refresh
+    // instead of silently resetting to zero.
+
+    try{
+
+        const raw = sessionStorage.getItem("crab_price_history");
+
+        if(raw) return JSON.parse(raw);
+
+    }catch(e){}
+
+    return {};
+
+})();
+
+function persistPriceHistory(){
+
+    try{
+
+        sessionStorage.setItem("crab_price_history", JSON.stringify(PRICE_HISTORY));
+
+    }catch(e){}
+
+}
 
 const HISTORY_MAX_SAMPLES = 6;
 
@@ -168,6 +194,8 @@ function recordPriceHistory(pairs){
         pair.__priceHistory = PRICE_HISTORY[address];
 
     });
+
+    persistPriceHistory();
 
 }
 

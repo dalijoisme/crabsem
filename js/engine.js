@@ -199,6 +199,37 @@ const Engine = {
 
         const history = pair.__priceHistory || null;
 
+        // Temuan 3 fix (user testing): "EARLY" was being shown for
+        // tokens that had ALREADY completed a pump-and-crash cycle
+        // (age alone said "recently launched", but the chart had
+        // clearly already moved and pulled back hard). Two real,
+        // already-available signals catch this:
+        //
+        // 1) pctBelowSessionPeak - if we've been watching this
+        //    token for a few scans, is the current price
+        //    meaningfully below the highest price we've actually
+        //    observed? (Limited to what we've personally tracked
+        //    since discovery - can't see a move that happened
+        //    entirely before that.)
+        //
+        // 2) alreadyHadBigMove - DexScreener's own 1h/6h change
+        //    fields, which reflect real price history regardless
+        //    of when we started watching. A huge 1h or 6h move
+        //    means something big already happened recently, even
+        //    on a token we just started tracking.
+
+        const historyPeakPrice =
+            history && history.length>0
+            ? Math.max(...history.map(h=>h.price))
+            : null;
+
+        const pctBelowSessionPeak =
+            (historyPeakPrice && price>0 && historyPeakPrice>0)
+            ? ((historyPeakPrice-price)/historyPeakPrice)*100
+            : null;
+
+        const alreadyHadBigMove = p1>=50 || p6>=80;
+
         const address = pair.baseToken?.address || null;
 
         const previousMemory = address ? this._scanMemory[address] : null;
@@ -1032,6 +1063,26 @@ const Engine = {
 
         const isAccumulating = accumulationTier !== null;
 
+        // Breakout Probability (Temuan 1 fix, user testing): this
+        // used to be computed ONLY in ui.js purely for display in
+        // the Confidence Breakdown - the action tier (BUY/STRONG
+        // BUY/etc) never actually saw it, so a token could show
+        // "Breakout Probability 34/100" while still carrying a
+        // STRONG BUY badge. Moving the same formula here means it
+        // can now genuinely cap the action below (see hard-block
+        // section), and ui.js reads this returned value instead
+        // of recomputing it (removes duplicated logic too).
+
+        const breakoutProbability = Math.min(100, Math.round(
+
+            (volumeAccelerating ? 40 : 10) +
+
+            (isAccumulating ? 30 : 0) +
+
+            ((buySellScore/23) * 30)
+
+        ));
+
         if(historyTrend && historyTrend.higherSteps > historyTrend.lowerSteps && historyTrend.totalSteps>=2){
 
             bonus+=2;
@@ -1054,6 +1105,32 @@ const Engine = {
 
         let hardBlockBuy = false;
         let hardBlockStrongBuy = false;
+
+        // Temuan 1 fix (user testing): Breakout Probability and
+        // Market Structure (backing) were previously shown in the
+        // Confidence Breakdown purely for information - a token
+        // could display "Breakout Probability 34/100" and
+        // "Market Structure 30/100" while still carrying a STRONG
+        // BUY badge, which is a real contradiction users caught.
+        // Both now genuinely cap STRONG BUY down to BUY when
+        // they're weak - they don't block BUY entirely, since a
+        // low breakout probability or thin structural backing
+        // isn't the same severity as active selling/overextension,
+        // it just means the highest-confidence tier isn't earned.
+
+        if(breakoutProbability < 40){
+
+            hardBlockStrongBuy = true;
+            risks.push("Breakout probability is low - continuation isn't well supported yet");
+
+        }
+
+        if(backingScore <= 3){
+
+            hardBlockStrongBuy = true;
+            risks.push("Liquidity backing is thin relative to valuation");
+
+        }
 
         // Price is actively dropping SHARPLY right now
         // (last 5 minutes) - the most direct signal, and
@@ -1715,6 +1792,12 @@ const Engine = {
             isAccumulating,
 
             deltaMomentum,
+
+            breakoutProbability,
+
+            pctBelowSessionPeak,
+
+            alreadyHadBigMove,
 
             accumulationTier,
 

@@ -47,7 +47,33 @@ function estimateEntryStage(signal){
 
     if(ratio>=1 && ratio<10) points+=1;
 
+    // Temuan 3 fix (user testing, confirmed across multiple real
+    // tokens): a token can look "early" by age/momentum alone
+    // while its own chart shows a pump-and-crash cycle already
+    // completed. Real evidence of a prior move now downgrades the
+    // stage regardless of how many points were earned above.
+
+    const pctBelowPeak = signal.pctBelowSessionPeak;
+
+    const strongPriorMoveEvidence =
+        (pctBelowPeak != null && pctBelowPeak >= 30) && signal.alreadyHadBigMove;
+
+    const somePriorMoveEvidence =
+        (pctBelowPeak != null && pctBelowPeak >= 15) || signal.alreadyHadBigMove;
+
     if(points>=5){
+
+        if(strongPriorMoveEvidence){
+
+            return{ key:"late", className:"late", label:"LATE" };
+
+        }
+
+        if(somePriorMoveEvidence){
+
+            return{ key:"mid", className:"mid", label:"MID" };
+
+        }
 
         return{ key:"early", className:"early", label:"EARLY" };
 
@@ -373,15 +399,7 @@ const UI = {
         const buyerDominancePct =
             signal.buyRatio!=null ? Math.round(signal.buyRatio*100) : 50;
 
-        const breakoutProbPct = Math.min(100, Math.round(
-
-            (signal.volumeAccelerating ? 40 : 10) +
-
-            (signal.isAccumulating ? 30 : 0) +
-
-            ((signal.buySellScore/23) * 30)
-
-        ));
+        const breakoutProbPct = signal.breakoutProbability ?? 0;
 
         const trendStabilityPct =
             (!signal.historyTrend || signal.historyTrend.totalSteps<=0)

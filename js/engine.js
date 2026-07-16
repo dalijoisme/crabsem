@@ -1130,6 +1130,17 @@ const Engine = {
             hardBlockStrongBuy = true;
             risks.push("Liquidity backing is thin relative to valuation");
 
+            // Temuan 2 fix (user testing): weak backing used to
+            // only cap the action label (Temuan 1 fix above) - it
+            // never touched `penalty`, which means it never
+            // lowered Confidence either (confidence = ... -
+            // penalty + ...). Thin structural backing is a real
+            // risk, not just a reason to withhold the top label -
+            // it should measurably reduce how much the engine
+            // trusts the signal too.
+
+            penalty += (backingScore === 0) ? 6 : 4;
+
         }
 
         // Price is actively dropping SHARPLY right now

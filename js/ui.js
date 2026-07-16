@@ -525,6 +525,8 @@ const UI = {
             ? pair.__history
             : [{ action: signal.action, time: Date.now() }];
 
+        const justStartedWatching = history.length <= 1;
+
         const historyHtml =
             history.map((h,i)=>{
 
@@ -619,21 +621,21 @@ const UI = {
 
         <div class="sectionTitle">Confidence Breakdown</div>
 
-        ${scoreBar("Confidence", signal.confidence, 99)}
-
         ${scoreBar("Entry Timing", entryTimingPct, 100)}
+
+        ${scoreBar("Breakout Probability", breakoutProbPct, 100)}
 
         ${scoreBar("Market Structure", marketStructurePct, 100)}
 
         ${scoreBar("Risk Level", riskTierValue, 100)}
 
-        ${scoreBar("Trend Stability", trendStabilityPct, 100)}
+        ${scoreBar("Data Confidence", signal.confidence, 99)}
 
         ${scoreBar("Momentum Quality", momentumQualityPct, 100)}
 
         ${scoreBar("Buyer Dominance", buyerDominancePct, 100)}
 
-        ${scoreBar("Breakout Probability", breakoutProbPct, 100)}
+        ${scoreBar("Trend Stability", trendStabilityPct, 100)}
 
         ${scoreBar("Pattern Reliability", patternReliabilityPct, 100)}
 
@@ -890,6 +892,8 @@ const UI = {
         </div>
 
         <div class="sectionTitle">History</div>
+
+        ${justStartedWatching ? `<div class="disclaimerNote">Just started watching this token - the picture will get clearer as more data comes in.</div>` : ""}
 
         <div class="historyTimeline">
 

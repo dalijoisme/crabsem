@@ -61,7 +61,7 @@ const CONFIG = {
     // stay loaded on index.html/admin.html only, unrelated to
     // this). Local dev default - point this at a real deployed
     // URL before shipping.
-    BACKEND_API_URL: "http://145.223.74.112:4000/api/v1",
+    BACKEND_API_URL: "https://api.crabsem.online/api/v1",
 
     // How often the dashboard polls the backend for fresh
     // trending data. Matches the backend collector's own 30s

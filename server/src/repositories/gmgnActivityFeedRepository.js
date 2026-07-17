@@ -70,8 +70,9 @@ function countByType(feedType){
 function findByToken(tokenAddress, feedType, limit = 20){
 
     return db.prepare(`
-        SELECT id, feed_type, transaction_hash, maker_address, maker_tags,
-               maker_twitter, side, amount_usd, price_usd, tx_timestamp
+        SELECT id, feed_type, transaction_hash, chain, maker_address, maker_tags,
+               maker_twitter, side, token_address, token_symbol, amount_usd,
+               price_usd, tx_timestamp, collected_at
         FROM gmgn_activity_feed
         WHERE token_address = ? AND feed_type = ?
         ORDER BY tx_timestamp DESC
@@ -80,4 +81,46 @@ function findByToken(tokenAddress, feedType, limit = 20){
 
 }
 
-module.exports = { insertEntries, findByType, countByType, findByToken };
+// Full-table read for one feed type, for the Intelligence Engine's
+// list-mode analysis - one query to group in memory by token_address
+// instead of one findByToken() call per token. Unlike findByType()
+// (which serves the public /activity/kol and /activity/smart-money
+// endpoints and is meant to be capped), this must return every row
+// or a token whose real trades are older than the newest N
+// system-wide would wrongly look like it has no smart-money/KOL
+// activity at all. Safe only because retention pruning (see
+// scheduler/pruneJob.js) keeps this table's total size bounded.
+
+function findAllByType(feedType){
+
+    return db.prepare(`
+        SELECT id, feed_type, transaction_hash, chain, maker_address, maker_tags,
+               maker_twitter, side, token_address, token_symbol, amount_usd,
+               price_usd, tx_timestamp, collected_at
+        FROM gmgn_activity_feed
+        WHERE feed_type = ?
+        ORDER BY tx_timestamp DESC
+    `).all(feedType);
+
+}
+
+// Retention: the Intelligence Engine (via findAllByType) only ever
+// needs recent activity - old trades stop influencing any live
+// recommendation long before `maxAgeHours` (the smart-money/KOL
+// participant modules only look at whether *recent* activity exists),
+// so pruning older rows keeps this genuinely append-only table from
+// growing forever without losing anything a current recommendation
+// depends on.
+
+function pruneOlderThan(maxAgeHours){
+
+    const info = db.prepare(`
+        DELETE FROM gmgn_activity_feed
+        WHERE datetime(collected_at) < datetime('now', '-' || ? || ' hours')
+    `).run(maxAgeHours);
+
+    return info.changes;
+
+}
+
+module.exports = { insertEntries, findByType, countByType, findByToken, findAllByType, pruneOlderThan };

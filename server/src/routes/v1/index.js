@@ -9,6 +9,7 @@ const statsRoutes = require("./stats");
 const searchRoutes = require("./search");
 const marketIntelligenceRoutes = require("./marketIntelligence");
 const gmgnOndemandRoutes = require("./gmgnOndemand");
+const validationRoutes = require("./validation");
 
 const router = express.Router();
 
@@ -18,5 +19,6 @@ router.use(statsRoutes);
 router.use(searchRoutes);
 router.use(marketIntelligenceRoutes);
 router.use(gmgnOndemandRoutes);
+router.use(validationRoutes);
 
 module.exports = router;

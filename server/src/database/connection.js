@@ -22,4 +22,14 @@ db.pragma("foreign_keys = ON");
 
 db.pragma("journal_mode = WAL");
 
+// How long a write waits for a lock before throwing SQLITE_BUSY,
+// instead of failing immediately. Same-process API + scheduler writes
+// are already serialized safely by WAL above; this is a safety net
+// for the standalone scripts in package.json (`scheduler:gmgn`,
+// `collect:gmgn-trending`) which open a second process against the
+// same file with no coordination otherwise - see the
+// production-readiness audit.
+
+db.pragma("busy_timeout = 5000");
+
 module.exports = db;

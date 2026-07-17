@@ -57,4 +57,22 @@ function getLatestSnapshotMeta(endpoint){
 
 }
 
-module.exports = { insertSnapshot, countSnapshots, getLatestSnapshot, getLatestSnapshotMeta };
+// Retention: raw_response blobs are only ever read for the most
+// recent row (getLatestSnapshot/Meta) - older ones exist purely for
+// point-in-time debugging, not for any live feature, so they're safe
+// to prune once older than `maxAgeHours`. token_price_history is the
+// structured, indexed alternative for anything that needs real
+// historical price data.
+
+function pruneOlderThan(maxAgeHours){
+
+    const info = db.prepare(`
+        DELETE FROM gmgn_raw_snapshots
+        WHERE datetime(fetched_at) < datetime('now', '-' || ? || ' hours')
+    `).run(maxAgeHours);
+
+    return info.changes;
+
+}
+
+module.exports = { insertSnapshot, countSnapshots, getLatestSnapshot, getLatestSnapshotMeta, pruneOlderThan };

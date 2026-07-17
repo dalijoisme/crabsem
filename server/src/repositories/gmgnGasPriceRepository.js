@@ -43,4 +43,15 @@ function getRecent(chain, limit = 50){
 
 }
 
-module.exports = { insertSnapshot, getLatest, getRecent };
+function pruneOlderThan(maxAgeHours){
+
+    const info = db.prepare(`
+        DELETE FROM gmgn_gas_price_snapshots
+        WHERE datetime(collected_at) < datetime('now', '-' || ? || ' hours')
+    `).run(maxAgeHours);
+
+    return info.changes;
+
+}
+
+module.exports = { insertSnapshot, getLatest, getRecent, pruneOlderThan };

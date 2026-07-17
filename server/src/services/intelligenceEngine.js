@@ -102,7 +102,7 @@ function buildSecurityFacts(trenchesEntry, cachedSecurity){
 
 }
 
-function gatherCachedWalletStats(addresses){
+function gatherCachedWalletStats(addresses, cacheMap){
 
     const results = [];
 
@@ -114,17 +114,94 @@ function gatherCachedWalletStats(addresses){
 
         seen.add(addr);
 
-        const cached = gmgnOndemandCacheRepository.getIgnoringExpiry(
+        const key = gmgnOndemandCacheRepository.buildCacheKey("wallet_stats", { chain: "sol", walletAddress: addr });
 
-            gmgnOndemandCacheRepository.buildCacheKey("wallet_stats", { chain: "sol", walletAddress: addr })
-
-        );
+        const cached = cacheMap ? (cacheMap.get(key) ?? null) : gmgnOndemandCacheRepository.getIgnoringExpiry(key);
 
         if(cached?.data) results.push(cached.data);
 
     }
 
     return results;
+
+}
+
+// =====================================
+// BATCH PRELOAD (list-mode performance path)
+//
+// Everything analyzeToken() would otherwise fetch one-token-at-a-time
+// (trenches, activity feed, hot searches, on-demand cache, launchpad
+// stats), gathered up front in a small, fixed number of queries for
+// a whole page of tokens. Scoring logic is untouched - this only
+// changes WHERE the data comes from (a preloaded Map instead of a
+// per-token SQL call), so a token's computed signal is identical
+// whether analyzeToken() is called alone or via analyzeTokens().
+// =====================================
+
+function preloadContext(tokens){
+
+    const addresses = tokens.map(t => t.token_address);
+
+    const trenchesByAddress = gmgnTrenchesRepository.findManyByTokenAddresses(addresses);
+
+    const hotSearchByAddress = gmgnHotSearchesRepository.findManyByTokenAddresses(addresses);
+
+    // Full table per feed type, grouped in memory - see
+    // findAllByType's own doc comment for why this can't be capped
+    // the way findByType() is for the public activity endpoints.
+    const smartMoneyByAddress = groupByToken(gmgnActivityFeedRepository.findAllByType("smart_money"));
+
+    const kolByAddress = groupByToken(gmgnActivityFeedRepository.findAllByType("kol"));
+
+    const creatorAddresses = [...trenchesByAddress.values()].map(t => t.creator).filter(Boolean);
+
+    const walletAddresses = new Set(creatorAddresses);
+
+    for(const list of smartMoneyByAddress.values()) list.forEach(a => a.maker_address && walletAddresses.add(a.maker_address));
+
+    for(const list of kolByAddress.values()) list.forEach(a => a.maker_address && walletAddresses.add(a.maker_address));
+
+    const cacheKeys = [];
+
+    for(const address of addresses){
+
+        cacheKeys.push(gmgnOndemandCacheRepository.buildCacheKey("token_security", { chain: "sol", address }));
+
+        cacheKeys.push(gmgnOndemandCacheRepository.buildCacheKey("token_top_holders", { chain: "sol", address }));
+
+    }
+
+    for(const walletAddress of walletAddresses){
+
+        cacheKeys.push(gmgnOndemandCacheRepository.buildCacheKey("wallet_activity", { chain: "sol", walletAddress }));
+
+        cacheKeys.push(gmgnOndemandCacheRepository.buildCacheKey("wallet_stats", { chain: "sol", walletAddress }));
+
+    }
+
+    const cacheMap = gmgnOndemandCacheRepository.getManyIgnoringExpiry(cacheKeys);
+
+    const launchpadNames = [...new Set([...trenchesByAddress.values()].map(t => t.launchpad).filter(Boolean))];
+
+    const launchpadStatsByName = new Map(launchpadNames.map(name => [name, gmgnLaunchpadStatsRepository.findByLaunchpad(name)]));
+
+    return { trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, launchpadStatsByName };
+
+}
+
+function groupByToken(rows){
+
+    const map = new Map();
+
+    for(const row of rows){
+
+        if(!map.has(row.token_address)) map.set(row.token_address, []);
+
+        map.get(row.token_address).push(row);
+
+    }
+
+    return map;
 
 }
 
@@ -194,7 +271,7 @@ function combineScore(modules, maxTotal, neutralFraction){
 
 }
 
-function computeConfidence(participantScore, marketScore, allModules){
+function computeConfidence(participantScore, marketScore, allModules, freshnessPenalty){
 
     const c = config.confidence;
 
@@ -212,7 +289,65 @@ function computeConfidence(participantScore, marketScore, allModules){
 
     const completenessPenalty = (1 - completeness) * c.maxCompletenessPenalty;
 
-    return Math.round(Math.min(c.max, Math.max(c.min, blended - mismatchPenalty - completenessPenalty)));
+    return Math.round(Math.min(c.max, Math.max(c.min, blended - mismatchPenalty - completenessPenalty - freshnessPenalty)));
+
+}
+
+// =====================================
+// FRESHNESS / LIFECYCLE
+//
+// A token's gmgn_tokens row is only as fresh as the last time it
+// appeared in GMGN's trending top-N (see the data-integrity audit) -
+// nothing deletes or flags a row once a token falls out of that
+// response, so without this, a token untouched for hours would be
+// scored and displayed exactly like one updated 10 seconds ago.
+// =====================================
+
+// SQLite CURRENT_TIMESTAMP is stored as "YYYY-MM-DD HH:MM:SS" (UTC,
+// no offset) - append "Z" so Date parses it as UTC instead of local
+// time, the same convention already used by gmgnOndemandCacheRepository.
+
+function ageSecondsSince(timestamp){
+
+    if(!timestamp) return null;
+
+    const then = new Date(`${String(timestamp).replace(" ", "T")}Z`).getTime();
+
+    if(Number.isNaN(then)) return null;
+
+    return Math.max(0, (Date.now() - then) / 1000);
+
+}
+
+function lifecycleForAge(ageSeconds){
+
+    if(ageSeconds == null) return "UNKNOWN";
+
+    const l = config.freshness.lifecycle;
+
+    if(ageSeconds <= l.activeMaxAgeSeconds) return "ACTIVE";
+
+    if(ageSeconds <= l.watchlistMaxAgeSeconds) return "WATCHLIST";
+
+    return "ARCHIVED";
+
+}
+
+function freshnessBlock(ageSeconds, collectedAt){
+
+    return { hasData: ageSeconds != null, ageSeconds: ageSeconds != null ? Math.round(ageSeconds) : null, collectedAt: collectedAt ?? null, status: lifecycleForAge(ageSeconds) };
+
+}
+
+function computeFreshnessPenalty(marketAgeSeconds){
+
+    if(marketAgeSeconds == null) return 0;
+
+    const f = config.freshness.confidencePenalty;
+
+    const ratio = Math.min(1, marketAgeSeconds / f.fullPenaltyAfterSeconds);
+
+    return ratio * f.maxPenalty;
 
 }
 
@@ -250,50 +385,61 @@ function computeRisk(riskReasons, hardTriggers){
 // PUBLIC ENTRY POINT
 // =====================================
 
-function analyzeToken(token){
+function analyzeToken(token, ctx){
 
     const address = token.token_address;
 
     const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
 
     // ---- gather real data (once) ----
+    //
+    // If `ctx` (from preloadContext(), via analyzeTokens()) is
+    // supplied, every lookup below is an in-memory Map read instead
+    // of a SQL query - same data, same shape, just fetched for the
+    // whole page up front instead of once per token. Without `ctx`
+    // (the single-token path used by GET /token/:address) this is
+    // byte-for-byte the original per-token query behavior.
 
-    const trenchesEntry = gmgnTrenchesRepository.findByTokenAddress(address);
+    const trenchesEntry = ctx
+        ? (ctx.trenchesByAddress.get(address) ?? null)
+        : gmgnTrenchesRepository.findByTokenAddress(address);
 
-    const smartMoneyActivity = gmgnActivityFeedRepository.findByToken(address, "smart_money", 20);
+    const smartMoneyActivity = ctx
+        ? (ctx.smartMoneyByAddress.get(address) ?? []).slice(0, 20)
+        : gmgnActivityFeedRepository.findByToken(address, "smart_money", 20);
 
-    const kolActivity = gmgnActivityFeedRepository.findByToken(address, "kol", 20);
+    const kolActivity = ctx
+        ? (ctx.kolByAddress.get(address) ?? []).slice(0, 20)
+        : gmgnActivityFeedRepository.findByToken(address, "kol", 20);
 
-    const hotSearchEntry = gmgnHotSearchesRepository.findByToken(address);
+    const hotSearchEntry = ctx
+        ? (ctx.hotSearchByAddress.get(address) ?? null)
+        : gmgnHotSearchesRepository.findByToken(address);
 
-    const cachedSecurity = gmgnOndemandCacheRepository.getIgnoringExpiry(
+    const securityCacheKey = gmgnOndemandCacheRepository.buildCacheKey("token_security", { chain: "sol", address });
 
-        gmgnOndemandCacheRepository.buildCacheKey("token_security", { chain: "sol", address })
+    const cachedSecurity = ctx
+        ? (ctx.cacheMap.get(securityCacheKey) ?? null)
+        : gmgnOndemandCacheRepository.getIgnoringExpiry(securityCacheKey);
 
-    );
+    const holdersCacheKey = gmgnOndemandCacheRepository.buildCacheKey("token_top_holders", { chain: "sol", address });
 
-    const cachedHolders = gmgnOndemandCacheRepository.getIgnoringExpiry(
-
-        gmgnOndemandCacheRepository.buildCacheKey("token_top_holders", { chain: "sol", address })
-
-    );
+    const cachedHolders = ctx
+        ? (ctx.cacheMap.get(holdersCacheKey) ?? null)
+        : gmgnOndemandCacheRepository.getIgnoringExpiry(holdersCacheKey);
 
     const creatorAddress = trenchesEntry?.creator || null;
 
     const cachedCreatorActivity = creatorAddress
-
-        ? gmgnOndemandCacheRepository.getIgnoringExpiry(
-
-            gmgnOndemandCacheRepository.buildCacheKey("wallet_activity", { chain: "sol", walletAddress: creatorAddress })
-
-          )
-
+        ? (ctx
+            ? (ctx.cacheMap.get(gmgnOndemandCacheRepository.buildCacheKey("wallet_activity", { chain: "sol", walletAddress: creatorAddress })) ?? null)
+            : gmgnOndemandCacheRepository.getIgnoringExpiry(gmgnOndemandCacheRepository.buildCacheKey("wallet_activity", { chain: "sol", walletAddress: creatorAddress })))
         : null;
 
     const launchpadStats = trenchesEntry?.launchpad
-
-        ? gmgnLaunchpadStatsRepository.findByLaunchpad(trenchesEntry.launchpad)
-
+        ? (ctx
+            ? (ctx.launchpadStatsByName.get(trenchesEntry.launchpad) ?? null)
+            : gmgnLaunchpadStatsRepository.findByLaunchpad(trenchesEntry.launchpad))
         : null;
 
     const relevantWallets = [
@@ -306,9 +452,33 @@ function analyzeToken(token){
 
     ].filter(Boolean).slice(0, 8);
 
-    const walletStatsList = gatherCachedWalletStats(relevantWallets);
+    const walletStatsList = gatherCachedWalletStats(relevantWallets, ctx?.cacheMap);
 
     const securityFacts = buildSecurityFacts(trenchesEntry, cachedSecurity);
+
+    // ---- FRESHNESS (per category - see config/scoringConfig.js) ----
+
+    const marketAgeSeconds = ageSecondsSince(token.updated_at);
+
+    const securityCollectedAt = trenchesEntry ? trenchesEntry.updated_at : (cachedSecurity?.fetchedAt ?? null);
+
+    const smartMoneyCollectedAt = smartMoneyActivity.length
+        ? smartMoneyActivity.map(a => a.tx_timestamp).sort().slice(-1)[0]
+        : null;
+
+    const freshness = {
+
+        market: freshnessBlock(marketAgeSeconds, token.updated_at),
+
+        security: freshnessBlock(ageSecondsSince(securityCollectedAt), securityCollectedAt),
+
+        holders: freshnessBlock(ageSecondsSince(cachedHolders?.fetchedAt), cachedHolders?.fetchedAt ?? null),
+
+        smartMoney: freshnessBlock(ageSecondsSince(smartMoneyCollectedAt), smartMoneyCollectedAt)
+
+    };
+
+    const lifecycle = lifecycleForAge(marketAgeSeconds);
 
     // ---- PARTICIPANT SCORE ----
 
@@ -380,7 +550,9 @@ function analyzeToken(token){
 
     const allModules = [...Object.values(participantModules), ...Object.values(marketModules)];
 
-    const confidence = computeConfidence(participantScore, marketScore, allModules);
+    const freshnessPenalty = computeFreshnessPenalty(marketAgeSeconds);
+
+    const confidence = computeConfidence(participantScore, marketScore, allModules, freshnessPenalty);
 
     const hardTriggers = [
 
@@ -411,6 +583,10 @@ function analyzeToken(token){
         confidence,
 
         risk,
+
+        lifecycle,
+
+        freshness,
 
         reasons,
 
@@ -508,4 +684,21 @@ function analyzeToken(token){
 
 }
 
-module.exports = { analyzeToken, PARTICIPANT_MAX, MARKET_MAX };
+// List-mode entry point - same per-token result as calling
+// analyzeToken() individually for every row, but at a fixed, small
+// number of queries for the whole page instead of ~8-16 queries PER
+// token. Used by tokenQueryService for /tokens, /trending, /search;
+// GET /token/:address still calls analyzeToken() directly (a single
+// token doesn't need the batch machinery).
+
+function analyzeTokens(tokens){
+
+    if(!tokens.length) return [];
+
+    const ctx = preloadContext(tokens);
+
+    return tokens.map(token => analyzeToken(token, ctx));
+
+}
+
+module.exports = { analyzeToken, analyzeTokens, PARTICIPANT_MAX, MARKET_MAX };

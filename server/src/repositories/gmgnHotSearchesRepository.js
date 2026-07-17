@@ -72,4 +72,41 @@ function findByToken(tokenAddress){
 
 }
 
-module.exports = { upsertEntries, findByChain, countAll, findByToken };
+// Batch version of findByToken for the Intelligence Engine's
+// list-mode analysis - one query per page instead of one per token.
+// Same "latest updated_at wins" tie-break as findByToken.
+
+function findManyByTokenAddresses(tokenAddresses){
+
+    const map = new Map();
+
+    if(!tokenAddresses.length) return map;
+
+    const CHUNK = 400;
+
+    for(let i = 0; i < tokenAddresses.length; i += CHUNK){
+
+        const chunk = tokenAddresses.slice(i, i + CHUNK);
+
+        const placeholders = chunk.map(() => "?").join(",");
+
+        const rows = db.prepare(`
+            SELECT token_address, chain, interval, rank_position, price_change_percent, updated_at
+            FROM gmgn_hot_searches
+            WHERE token_address IN (${placeholders})
+            ORDER BY updated_at DESC
+        `).all(...chunk);
+
+        for(const row of rows){
+
+            if(!map.has(row.token_address)) map.set(row.token_address, row);
+
+        }
+
+    }
+
+    return map;
+
+}
+
+module.exports = { upsertEntries, findByChain, countAll, findByToken, findManyByTokenAddresses };

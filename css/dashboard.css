@@ -782,6 +782,78 @@ RANK BADGE
 
 }
 
+/* Data-integrity: only rendered for WATCHLIST/ARCHIVED tokens (see
+   js/ui.js lifecycleTag) - ACTIVE tokens show nothing here at all. */
+.lifecycleTag{
+
+    position:absolute;
+
+    top:38px;
+
+    right:10px;
+
+    max-width:62%;
+
+    padding:3px 8px;
+
+    border-radius:999px;
+
+    font-size:9.5px;
+
+    font-weight:800;
+
+    letter-spacing:.02em;
+
+    text-align:center;
+
+    line-height:1.3;
+
+}
+
+.lifecycleTag.watchlist{
+
+    background:rgba(246,185,59,.16);
+
+    color:#f6b93b;
+
+}
+
+.lifecycleTag.archived{
+
+    background:rgba(255,77,77,.16);
+
+    color:#ff4d4d;
+
+}
+
+.riskConflictNote{
+
+    margin-top:8px;
+
+    padding:6px 8px;
+
+    border-radius:8px;
+
+    background:rgba(255,77,77,.12);
+
+    color:#ff8080;
+
+    font-size:10.5px;
+
+    font-weight:600;
+
+    line-height:1.35;
+
+    text-align:center;
+
+}
+
+.lifecycleLabel.active{ color:#16c784; }
+
+.lifecycleLabel.watchlist{ color:#f6b93b; }
+
+.lifecycleLabel.archived{ color:#ff4d4d; }
+
 /* =======================
 INFO BOX
 ======================= */
@@ -1709,6 +1781,20 @@ RESPONSIVE
 
     }
 
+    .lifecycleTag{
+
+        top:30px;
+
+        right:96px;
+
+        max-width:88px;
+
+        font-size:8px;
+
+        padding:2px 6px;
+
+    }
+
     .coinHeader{
 
         grid-area:header;
@@ -2477,6 +2563,20 @@ img{
     .detail-panel{ font-size:14px; }
 
     .targetGrid strong, .healthGrid strong{ font-size:14.5px; }
+
+    .lifecycleTag{
+
+        font-size:8px;
+
+        max-width:56%;
+
+        padding:2px 6px;
+
+        top:8px;
+
+        right:8px;
+
+    }
 
 }
 

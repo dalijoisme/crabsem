@@ -110,4 +110,44 @@ function findByTokenAddress(tokenAddress){
 
 }
 
-module.exports = { upsertEntries, findBySection, countAll, findByTokenAddress };
+// Batch version of findByTokenAddress, for the Intelligence Engine's
+// list-mode analysis (analyzeTokens) - one query for a whole page of
+// tokens instead of one query per token. Returns a Map keyed by
+// token_address; when a token appears more than once (multiple
+// sections), the most recently updated entry wins, matching
+// findByTokenAddress's own `ORDER BY updated_at DESC LIMIT 1`
+// semantics exactly.
+
+function findManyByTokenAddresses(tokenAddresses){
+
+    const map = new Map();
+
+    if(!tokenAddresses.length) return map;
+
+    const CHUNK = 400;
+
+    for(let i = 0; i < tokenAddresses.length; i += CHUNK){
+
+        const chunk = tokenAddresses.slice(i, i + CHUNK);
+
+        const placeholders = chunk.map(() => "?").join(",");
+
+        const rows = db.prepare(`
+            SELECT ${LIST_COLUMNS}, raw_json FROM gmgn_trenches
+            WHERE token_address IN (${placeholders})
+            ORDER BY updated_at DESC
+        `).all(...chunk);
+
+        for(const row of rows){
+
+            if(!map.has(row.token_address)) map.set(row.token_address, row);
+
+        }
+
+    }
+
+    return map;
+
+}
+
+module.exports = { upsertEntries, findBySection, countAll, findByTokenAddress, findManyByTokenAddresses };

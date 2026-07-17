@@ -49,9 +49,65 @@ let timer=null;
 
 const REFRESH_INTERVAL_MS = (CONFIG && CONFIG.BACKEND_REFRESH_INTERVAL) || 30000;
 
-let lastScanAt = Date.now();
+// The REAL scheduler clock (server-side, from GET /health's
+// scheduler.lastRunAt - see server/src/services/health.js), not a
+// client-side "time since my browser last fetched" clock. That
+// distinction matters: the scheduler can be actively ticking every
+// 30s while a specific token's own row is hours old (it fell out of
+// GMGN's trending top-N) - see the data-integrity audit. This value
+// answers "is the collector alive", not "is this token's data fresh"
+// (that's Data Last Updated, driven by the token's own updated_at).
+let schedulerLastRunAt = null;
 
 let trendingInFlight = false;
+
+// ======================================
+// CONNECTION RETRY (backend connection UX)
+// A failed load no longer just waits for the next scheduled 30s
+// tick - it retries with a short, capped exponential backoff, and an
+// 'online' browser event (the network actually coming back) triggers
+// an immediate retry instead of waiting out the backoff.
+// ======================================
+
+let consecutiveFailures = 0;
+
+let retryTimer = null;
+
+const RETRY_BASE_MS = 3000;
+
+const RETRY_MAX_MS = 24000;
+
+function scheduleRetry(retryFn){
+
+    clearTimeout(retryTimer);
+
+    consecutiveFailures++;
+
+    const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * Math.pow(2, consecutiveFailures - 1));
+
+    retryTimer = setTimeout(retryFn, delay);
+
+    return delay;
+
+}
+
+function clearRetry(){
+
+    consecutiveFailures = 0;
+
+    clearTimeout(retryTimer);
+
+}
+
+window.addEventListener("online", () => {
+
+    clearTimeout(retryTimer);
+
+    if(searchInput.value.trim().length >= 2) loadSearch();
+
+    else loadTrending();
+
+});
 
 // Recommendation history per token address (BUY/HOLD/AVOID timeline
 // in the detail panel), kept in sessionStorage - same policy as
@@ -317,6 +373,12 @@ async function applyStatus(){
 
         const health = await BackendAPI.getHealth();
 
+        if(health.scheduler?.lastRunAt){
+
+            schedulerLastRunAt = parseBackendTimestamp(health.scheduler.lastRunAt);
+
+        }
+
         const schedulerOk = health.scheduler?.status === "active";
 
         const liveState =
@@ -402,7 +464,7 @@ async function loadTrending(){
 
         const result = await BackendAPI.getTrending(50);
 
-        lastScanAt = Date.now();
+        clearRetry();
 
         applyStatus();
 
@@ -417,7 +479,9 @@ async function loadTrending(){
 
         console.error("Failed to load trending tokens", err);
 
-        showLoadError();
+        const delayMs = scheduleRetry(loadTrending);
+
+        showLoadError(delayMs);
 
     }
     finally{
@@ -463,6 +527,8 @@ async function loadSearch(){
 
         currentSearchQuery = q;
 
+        clearRetry();
+
         applyStatus();
 
         renderTokens(result.tokens || []);
@@ -474,7 +540,9 @@ async function loadSearch(){
 
         console.error("Search failed", err);
 
-        showLoadError();
+        const delayMs = scheduleRetry(loadSearch);
+
+        showLoadError(delayMs);
 
     }
 
@@ -823,13 +891,20 @@ function hideSkeleton(){
 // leaves the last-good render in place and retries next cycle).
 // ======================================
 
-function showLoadError(){
+function showLoadError(delayMs){
 
     hideSkeleton();
 
     if(coinGrid.childElementCount === 0 && renderedTokens.size === 0){
 
-        coinGrid.innerHTML = "<h2>Unable to reach the CRAB backend. Retrying automatically...</h2>";
+        const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+
+        const retryLabel = delayMs ? `Retrying in ${Math.round(delayMs/1000)}s...` : "Retrying automatically...";
+
+        coinGrid.innerHTML =
+            offline
+            ? `<h2>You appear to be offline. CRAB will reconnect automatically as soon as your connection returns.</h2>`
+            : `<h2>Unable to reach the CRAB backend. ${retryLabel}</h2>`;
 
     }
 
@@ -1050,43 +1125,48 @@ function updateLiveMonitoring(){
 
     const nextScanText=document.getElementById("nextScanText");
 
-    const elapsed = Date.now()-lastScanAt;
+    const detailLastScan=document.getElementById("detailLastScan");
 
-    if(lastAnalysisText){
+    const detailNextScan=document.getElementById("detailNextScan");
 
-        lastAnalysisText.innerHTML=formatDuration(elapsed);
+    // schedulerLastRunAt is only known once GET /health has answered
+    // at least once (see applyStatus) - until then, say so honestly
+    // instead of showing a fake "Just now".
+
+    if(schedulerLastRunAt == null){
+
+        if(lastAnalysisText) lastAnalysisText.innerHTML = "Checking...";
+        if(nextScanText) nextScanText.innerHTML = "";
+        if(detailLastScan) detailLastScan.innerHTML = "Checking...";
+        if(detailNextScan) detailNextScan.innerHTML = "--s";
+
+        return;
 
     }
+
+    const elapsed = Date.now()-schedulerLastRunAt;
+
+    const scanLabel = formatDuration(elapsed);
+
+    if(lastAnalysisText) lastAnalysisText.innerHTML = scanLabel;
 
     const remain=Math.max(
 
         0,
 
-        Math.ceil((lastScanAt+REFRESH_INTERVAL_MS-Date.now())/1000)
+        Math.ceil((schedulerLastRunAt+REFRESH_INTERVAL_MS-Date.now())/1000)
 
     );
 
     if(nextScanText){
 
-        nextScanText.innerHTML="Next scan in "+remain+"s";
+        nextScanText.innerHTML = remain>0 ? ("Next scan in "+remain+"s") : "Scan due now";
 
     }
 
-    const detailLastScan=document.getElementById("detailLastScan");
+    if(detailLastScan) detailLastScan.innerHTML = scanLabel;
 
-    const detailNextScan=document.getElementById("detailNextScan");
-
-    if(detailLastScan){
-
-        detailLastScan.innerHTML=formatDuration(elapsed);
-
-    }
-
-    if(detailNextScan){
-
-        detailNextScan.innerHTML=remain+"s";
-
-    }
+    if(detailNextScan) detailNextScan.innerHTML = remain>0 ? (remain+"s") : "due now";
 
 }
 

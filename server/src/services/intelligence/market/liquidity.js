@@ -36,7 +36,33 @@ function score(token){
 
         const ratio = liquidity / valuationBasis;
 
-        if(ratio >= 0.15){ backingPoints = MAX_SCORE*0.5; confirmations.push("Liquidity well-backed relative to valuation"); }
+        if(ratio >= 0.15){
+
+            backingPoints = MAX_SCORE*0.5;
+
+            // A healthy ratio on a tiny absolute liquidity figure
+            // (common on very-low-cap tokens, where liquidity can
+            // nominally exceed market cap) is not the same claim as a
+            // healthy ratio backed by real depth - saying "well-
+            // backed" in both cases the same way was found to read as
+            // more reassuring than the absolute number supports (see
+            // the recommendation-quality audit's ANGELBULL example:
+            // $3,194 liquidity, a hair above the $2,000 safety-veto
+            // floor, still worded as "well-backed"). Score is
+            // unchanged - this only corrects the wording.
+
+            if(liquidity >= 10000){
+
+                confirmations.push("Liquidity well-backed relative to valuation");
+
+            }
+            else{
+
+                confirmations.push(`Liquidity ratio is healthy (${(ratio*100).toFixed(0)}% of valuation), but the absolute amount is still low ($${Math.round(liquidity).toLocaleString()}) - slippage risk remains`);
+
+            }
+
+        }
         else if(ratio >= 0.08) backingPoints = MAX_SCORE*0.35;
         else if(ratio >= 0.03) backingPoints = MAX_SCORE*0.2;
         else{ backingPoints = MAX_SCORE*0.05; riskReasons.push(`Liquidity thin relative to valuation (${(ratio*100).toFixed(1)}%) - possible rug risk`); }

@@ -232,6 +232,50 @@ module.exports = {
 
         // above midMaxAbsChange1h => LATE
 
+    },
+
+    // =====================================
+    // FRESHNESS / LIFECYCLE - how old is the data a recommendation is
+    // actually computed from. `market` age is the token's own
+    // gmgn_tokens row (price/liquidity/market cap/volume/holders) -
+    // the fastest-moving, most important category. A token whose row
+    // hasn't been touched recently has simply fallen out of GMGN's
+    // trending top-N (see server/data-integrity audit); it is not
+    // deleted, so without this it would keep being scored and shown
+    // as if it were live.
+    // =====================================
+
+    freshness: {
+
+        lifecycle: {
+
+            // <= this age (seconds): still being refreshed every
+            // scheduler tick.
+            activeMaxAgeSeconds: 5 * 60,
+
+            // <= this age: dropped out of the live scan, but recent
+            // enough to keep showing (clearly labeled) rather than
+            // hide outright.
+            watchlistMaxAgeSeconds: 60 * 60
+
+            // older than watchlistMaxAgeSeconds => ARCHIVED
+
+        },
+
+        // Confidence penalty for stale market data - 0 at 0s old,
+        // ramping linearly to maxPenalty at fullPenaltyAfterSeconds
+        // and beyond. This is separate from (and in addition to) the
+        // existing completeness penalty, which measures whether data
+        // exists at all, not how old it is.
+
+        confidencePenalty: {
+
+            maxPenalty: 20,
+
+            fullPenaltyAfterSeconds: 60 * 60
+
+        }
+
     }
 
 };

@@ -2,6 +2,13 @@
 // PRICE FORMAT (handles small meme prices)
 // =====================================
 
+// Meme-coin prices routinely sit at $0.0000001-$0.001 - showing
+// scientific notation ("$8.47e-6") there is unreadable for a general
+// audience, so decimal precision scales with magnitude instead:
+// always enough digits to show ~3 significant figures, never
+// switching to exponential notation for any price CRAB would
+// realistically see.
+
 function formatPrice(v){
 
     const n = Number(v || 0);
@@ -10,9 +17,11 @@ function formatPrice(v){
 
     if(n>=1) return "$"+n.toFixed(2);
 
-    if(n>=0.001) return "$"+n.toFixed(5);
+    const magnitude = Math.floor(Math.log10(n));
 
-    return "$"+n.toExponential(2);
+    const decimals = Math.min(18, Math.max(4, -magnitude + 2));
+
+    return "$"+n.toFixed(decimals);
 
 }
 
@@ -69,6 +78,111 @@ function signalBadgeText(action){
         "AVOID":"⚠ AVOID"
 
     }[action] || "⚠ AVOID";
+
+}
+
+// =====================================
+// LIFECYCLE / DATA-QUALITY (Sprint 1: data integrity)
+// signal.lifecycle comes from the Intelligence Engine, derived from
+// how old the token's own gmgn_tokens row is (see freshness config in
+// server/src/config/scoringConfig.js). ACTIVE tokens show nothing
+// extra - only WATCHLIST/ARCHIVED get a visible callout, since those
+// are the cases where data integrity is actually in question.
+// =====================================
+
+// =====================================
+// ENTRY TIMING (restored - see the feature audit: this existed
+// before the backend rewrite, was dropped because the old heuristic
+// didn't survive the move to server-side scoring, and is reimplemented
+// here off `signal.stage` - a real field already computed by the
+// engine from price_change_1h (server/src/services/intelligenceEngine.js
+// deriveStage()), not a resurrected client-side guess.
+// =====================================
+
+function entryBadge(stage){
+
+    if(stage !== "EARLY" && stage !== "MID" && stage !== "LATE") return "";
+
+    return `<div class="entryBadge ${stage.toLowerCase()}">${stage}</div>`;
+
+}
+
+function entryMeter(stage){
+
+    const cls = s => s===stage ? `active ${s.toLowerCase()}` : "";
+
+    return `
+        <div class="entryMeter">
+            <div class="${cls("EARLY")}">EARLY</div>
+            <div class="${cls("MID")}">MID</div>
+            <div class="${cls("LATE")}">LATE</div>
+        </div>
+    `;
+
+}
+
+function lifecycleTag(lifecycle){
+
+    if(lifecycle === "WATCHLIST"){
+
+        return `<div class="lifecycleTag watchlist" title="This token dropped out of the live scan - data may be several minutes to an hour old">WATCHLIST</div>`;
+
+    }
+
+    if(lifecycle === "ARCHIVED"){
+
+        return `<div class="lifecycleTag archived" title="This token's data is over an hour old - treat this recommendation as historical, not current">ARCHIVED - STALE DATA</div>`;
+
+    }
+
+    return "";
+
+}
+
+// =====================================
+// RISK / ACTION CONSISTENCY (Sprint 4: engine quality)
+// The action tier (from Participant Score) and the risk tier (from
+// counted risk flags) are computed on independent paths - a BUY can
+// legitimately coexist with HIGH risk. Rather than changing that
+// scoring logic, make the conflict visible where a user would
+// otherwise only see the more prominent action pill.
+// =====================================
+
+function lifecycleLabel(lifecycle){
+
+    return {
+
+        ACTIVE: "ACTIVE - refreshed every scheduler tick",
+
+        WATCHLIST: "WATCHLIST - dropped out of the live scan",
+
+        ARCHIVED: "ARCHIVED - stale, not a current signal",
+
+        UNKNOWN: "UNKNOWN"
+
+    }[lifecycle] || lifecycle || "UNKNOWN";
+
+}
+
+function freshnessAgeLabel(block){
+
+    if(!block || !block.hasData || block.ageSeconds == null) return "No data collected yet";
+
+    return formatDuration(block.ageSeconds * 1000);
+
+}
+
+function riskConflictNote(signal){
+
+    const isBuyTier = signal.action === "STRONG BUY" || signal.action === "BUY";
+
+    if(isBuyTier && signal.risk === "HIGH"){
+
+        return `<div class="riskConflictNote">⚠ ${signal.action} recommendation carries HIGH risk - read the risk factors before acting</div>`;
+
+    }
+
+    return "";
 
 }
 
@@ -413,6 +527,10 @@ const UI = {
 
         ${rankLabel ? `<div class="rankBadge${medal?" medal":""}">${rankLabel}</div>` : ""}
 
+        ${entryBadge(signal.stage)}
+
+        ${lifecycleTag(signal.lifecycle)}
+
         <div class="coinHeader">
 
             <img src="${logo}" class="coinLogo">
@@ -484,6 +602,8 @@ const UI = {
                 <span>Risk ${signal.risk}</span>
 
             </div>
+
+            ${riskConflictNote(signal)}
 
         </div>
 
@@ -652,6 +772,10 @@ const UI = {
 
         </div>
 
+        ${entryMeter(signal.stage)}
+
+        ${riskConflictNote(signal)}
+
         <div class="sectionTitle">Why ${signal.action}</div>
 
         <ul class="whyList">
@@ -810,7 +934,7 @@ const UI = {
 
             <div class="monitorRow">
 
-                <span>Last Scan</span>
+                <span>Scheduler Last Run</span>
 
                 <strong id="detailLastScan">Just now</strong>
 
@@ -818,7 +942,7 @@ const UI = {
 
             <div class="monitorRow">
 
-                <span>Next Scan</span>
+                <span>Next Scheduler Run</span>
 
                 <strong id="detailNextScan">--s</strong>
 
@@ -826,9 +950,41 @@ const UI = {
 
             <div class="monitorRow">
 
-                <span>Data Last Updated</span>
+                <span>Token Last Updated</span>
 
                 <strong>${updatedLabel}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Data Lifecycle</span>
+
+                <strong class="lifecycleLabel ${(signal.lifecycle||"unknown").toLowerCase()}">${lifecycleLabel(signal.lifecycle)}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Market Data Age</span>
+
+                <strong>${freshnessAgeLabel(signal.freshness?.market)}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Security Check Age</span>
+
+                <strong>${freshnessAgeLabel(signal.freshness?.security)}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
+                <span>Smart Money Data Age</span>
+
+                <strong>${freshnessAgeLabel(signal.freshness?.smartMoney)}</strong>
 
             </div>
 

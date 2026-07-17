@@ -95,4 +95,42 @@ function buildCacheKey(endpoint, params){
 
 }
 
-module.exports = { get, set, countByEndpoint, getIgnoringExpiry, buildCacheKey };
+// Batch version of getIgnoringExpiry, for the Intelligence Engine's
+// list-mode analysis - one query for a whole page of tokens/wallets
+// instead of one query per cache key. Same ignore-expiry semantics.
+
+function getManyIgnoringExpiry(cacheKeys){
+
+    const map = new Map();
+
+    const unique = [...new Set(cacheKeys.filter(Boolean))];
+
+    if(!unique.length) return map;
+
+    const CHUNK = 400;
+
+    for(let i = 0; i < unique.length; i += CHUNK){
+
+        const chunk = unique.slice(i, i + CHUNK);
+
+        const placeholders = chunk.map(() => "?").join(",");
+
+        const rows = db.prepare(`
+            SELECT cache_key, response_json, fetched_at
+            FROM gmgn_ondemand_cache
+            WHERE cache_key IN (${placeholders})
+        `).all(...chunk);
+
+        for(const row of rows){
+
+            map.set(row.cache_key, { data: JSON.parse(row.response_json), fetchedAt: row.fetched_at });
+
+        }
+
+    }
+
+    return map;
+
+}
+
+module.exports = { get, set, countByEndpoint, getIgnoringExpiry, getManyIgnoringExpiry, buildCacheKey };

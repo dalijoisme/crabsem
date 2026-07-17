@@ -59,9 +59,19 @@ function checkHealth(){
         "SELECT COUNT(*) as count FROM schema_migrations"
     ).get();
 
+    const scheduler = getSchedulerStatus();
+
+    // Previously hardcoded to "ok" regardless of scheduler.status, so
+    // a monitor/orchestrator gating on this one field could never see
+    // a degraded collector - see the production-readiness audit.
+    // "stale"/"never_run" both mean real data has stopped flowing in,
+    // which is exactly what a health check exists to surface.
+
+    const status = scheduler.status === "active" ? "ok" : "degraded";
+
     return {
 
-        status: "ok",
+        status,
 
         database: "connected",
 
@@ -69,7 +79,7 @@ function checkHealth(){
 
         tokenCount: gmgnTokenRepository.countTokens(),
 
-        scheduler: getSchedulerStatus(),
+        scheduler,
 
         uptime: process.uptime()
 

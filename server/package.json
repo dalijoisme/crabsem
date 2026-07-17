@@ -1,0 +1,25 @@
+{
+  "name": "crabsem-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CRAB AGENT backend (Node.js + SQLite)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "gmgn:generate-keys": "node src/collectors/gmgn/generateKeys.js",
+    "gmgn:verify-auth": "node src/collectors/gmgn/verifyAuth.js",
+    "collect:gmgn-trending": "node src/collectors/gmgn/runTrendingCollector.js",
+    "scheduler:gmgn": "node src/scheduler/runGmgnScheduler.js",
+    "scheduler:gmgn-once": "node src/scheduler/runGmgnSchedulerOnce.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

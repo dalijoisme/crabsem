@@ -51,6 +51,22 @@ const CONFIG = {
     // this - only aggregate, already-public market analytics.
     // Replace this with a real server-side check before this
     // is treated as an actual access control.
-    ADMIN_PASSWORD: "crabadmin2026"
+    ADMIN_PASSWORD: "crabadmin2026",
+
+    // BACKEND API (dashboard.html only)
+    // Our own Node/SQLite backend (see /server) - GMGN data
+    // flows GMGN -> Collector -> SQLite -> this REST API ->
+    // dashboard.js/backendApi.js. dashboard.html no longer
+    // calls DexScreener directly (js/api.js + js/discovery.js
+    // stay loaded on index.html/admin.html only, unrelated to
+    // this). Local dev default - point this at a real deployed
+    // URL before shipping.
+    BACKEND_API_URL: "http://localhost:4000/api/v1",
+
+    // How often the dashboard polls the backend for fresh
+    // trending data. Matches the backend collector's own 30s
+    // scheduler interval (server/src/scheduler/gmgnTrendingScheduler.js)
+    // - polling faster would just re-fetch the same SQLite rows.
+    BACKEND_REFRESH_INTERVAL: 30000
 
 };

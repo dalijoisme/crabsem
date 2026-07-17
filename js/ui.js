@@ -1,89 +1,4 @@
 // =====================================
-// ENTRY STAGE ESTIMATION
-// (frontend-only heuristic on top of the
-// existing Engine signal - does not touch
-// engine.js)
-// =====================================
-
-function estimateEntryStage(signal){
-
-    const fdv = signal.fdv || 0;
-
-    const penalty = signal.penalty || 0;
-
-    const momentum = signal.momentum || 0;
-
-    const liqPercent = signal.liqPercent || 0;
-
-    const ratio = signal.ratio || 0;
-
-    if(signal.deadProject){
-
-        return{ key:"late", className:"late", label:"LATE" };
-
-    }
-
-    // Hard "late" conditions - already extended
-    // / overheated / valuation too big to be early.
-
-    if(penalty>=8 || fdv>15000000 || momentum>=150){
-
-        return{ key:"late", className:"late", label:"LATE" };
-
-    }
-
-    let points = 0;
-
-    if(fdv<=3000000) points+=2;
-    else if(fdv<=10000000) points+=1;
-
-    if(penalty===0) points+=2;
-    else if(penalty<=3) points+=1;
-
-    if(liqPercent>=15) points+=1;
-
-    if(momentum>=10 && momentum<60) points+=2;
-    else if(momentum>=60) points-=1;
-
-    if(ratio>=1 && ratio<10) points+=1;
-
-    // Temuan 3 fix (user testing, confirmed across multiple real
-    // tokens): a token can look "early" by age/momentum alone
-    // while its own chart shows a pump-and-crash cycle already
-    // completed. Real evidence of a prior move now downgrades the
-    // stage regardless of how many points were earned above.
-
-    const pctBelowPeak = signal.pctBelowSessionPeak;
-
-    const strongPriorMoveEvidence =
-        (pctBelowPeak != null && pctBelowPeak >= 30) && signal.alreadyHadBigMove;
-
-    const somePriorMoveEvidence =
-        (pctBelowPeak != null && pctBelowPeak >= 15) || signal.alreadyHadBigMove;
-
-    if(points>=5){
-
-        if(strongPriorMoveEvidence){
-
-            return{ key:"late", className:"late", label:"LATE" };
-
-        }
-
-        if(somePriorMoveEvidence){
-
-            return{ key:"mid", className:"mid", label:"MID" };
-
-        }
-
-        return{ key:"early", className:"early", label:"EARLY" };
-
-    }
-
-    return{ key:"mid", className:"mid", label:"MID" };
-
-}
-
-// =====================================
 // PRICE FORMAT (handles small meme prices)
 // =====================================
 
@@ -103,18 +18,17 @@ function formatPrice(v){
 
 // =====================================
 // MARKET CAP DISPLAY
-// Never show FDV under the "Market Cap"
-// label. If a real market cap isn't
-// available, show N/A explicitly.
+// If a real market cap isn't available,
+// show N/A explicitly - never a guess.
 // =====================================
 
-function marketCapLabelValue(pair, signal){
+function marketCapLabelValue(token){
 
-    const raw = Number(pair.marketCap || 0);
+    const raw = Number(token.market_cap || 0);
 
     if(raw > 0){
 
-        return format(raw);
+        return "$"+format(raw);
 
     }
 
@@ -123,20 +37,69 @@ function marketCapLabelValue(pair, signal){
 }
 
 // =====================================
-// DEXSCREENER LINK
-// Prefer the pair's own native URL (exact
-// pool that produced the numbers shown).
+// SIGNAL COLOR
 // =====================================
 
-function dexscreenerLink(pair){
+function signalColor(action){
 
-    if(pair.url){
+    return {
 
-        return pair.url;
+        "STRONG BUY":"#16c784",
 
-    }
+        "BUY":"#8b5cf6",
 
-    return `https://dexscreener.com/solana/${pair.baseToken.address}`;
+        "HOLD":"#f5a623",
+
+        "AVOID":"#ff4d4d"
+
+    }[action] || "#ff4d4d";
+
+}
+
+function signalBadgeText(action){
+
+    return {
+
+        "STRONG BUY":"🚀 STRONG BUY",
+
+        "BUY":"✅ BUY",
+
+        "HOLD":"👀 HOLD",
+
+        "AVOID":"⚠ AVOID"
+
+    }[action] || "⚠ AVOID";
+
+}
+
+function signalBadgeClass(action){
+
+    return {
+
+        "STRONG BUY":"strong-buy",
+
+        "BUY":"buy",
+
+        "HOLD":"hold",
+
+        "AVOID":"avoid"
+
+    }[action] || "avoid";
+
+}
+
+// =====================================
+// DEXSCREENER LINK
+// (external chart viewer - unrelated to
+// where our own data comes from)
+// =====================================
+
+function dexscreenerLink(token){
+
+    const chainSlug =
+        token.chain === "sol" ? "solana" : (token.chain || "solana");
+
+    return `https://dexscreener.com/${chainSlug}/${token.token_address}`;
 
 }
 
@@ -146,15 +109,265 @@ function dexscreenerLink(pair){
 // Built dynamically per token contract.
 // =====================================
 
-function gmgnLink(pair){
+function gmgnLink(token){
 
     const code = CONFIG?.GMGN_REFERRAL_CODE || "";
 
-    const address = pair.baseToken?.address || "";
+    const address = token.token_address || "";
 
     if(!address) return "https://gmgn.ai/";
 
-    return `https://gmgn.ai/sol/token/${code}_${address}`;
+    const chainSlug = token.chain || "sol";
+
+    return `https://gmgn.ai/${chainSlug}/token/${code}_${address}`;
+
+}
+
+// =====================================
+// INTELLIGENCE SECTION HELPERS
+// Every section below either shows real data or an honest "No data"
+// row - never a guess, never silently omitted. Reuses the existing
+// sectionTitle/monitorBox/monitorRow CSS classes, no new styling.
+// =====================================
+
+function monitorRow(label, value, cls){
+
+    return `<div class="monitorRow"><span>${label}</span><strong${cls?` class="${cls}"`:""}>${value}</strong></div>`;
+
+}
+
+function noDataRow(){
+
+    return monitorRow("Status", "No data", "changedNo");
+
+}
+
+function intelSection(title, hasData, bodyHtml){
+
+    return `
+
+    <div class="sectionTitle">${title}</div>
+
+    <div class="monitorBox">
+
+        ${hasData ? bodyHtml : noDataRow()}
+
+    </div>
+
+    `;
+
+}
+
+function yesNoUnknown(v){
+
+    if(v === 1) return "Yes";
+
+    if(v === 0) return "No";
+
+    return "Unknown";
+
+}
+
+function renderSecuritySection(security){
+
+    if(!security.hasData) return intelSection("Security", false);
+
+    const rows = [
+
+        monitorRow("Honeypot", security.isHoneypot===1 ? "⚠ Yes" : yesNoUnknown(security.isHoneypot), security.isHoneypot===1?"changedYes":"changedNo"),
+
+        monitorRow("Mint Renounced", yesNoUnknown(security.renouncedMint)),
+
+        monitorRow("Freeze Renounced", yesNoUnknown(security.renouncedFreezeAccount)),
+
+        security.rugRatio!=null ? monitorRow("Rug-Risk Score", (security.rugRatio*100).toFixed(0)+"%") : "",
+
+        monitorRow("Source", security.source)
+
+    ].join("");
+
+    return intelSection("Security", true, rows);
+
+}
+
+function renderHolderDistributionSection(holders){
+
+    if(!holders.hasData) return intelSection("Holder Distribution", false);
+
+    const rows = [
+
+        monitorRow("Holder Count", format(holders.count)),
+
+        holders.top10HolderRate!=null
+
+            ? monitorRow("Top 10 Concentration", (holders.top10HolderRate*100).toFixed(1)+"%")
+
+            : monitorRow("Top 10 Concentration", "No data"),
+
+        holders.topHoldersListCached
+
+            ? monitorRow("Detailed Holder List", `Cached ${formatDuration(Date.now()-parseBackendTimestamp(holders.topHoldersFetchedAt))}`)
+
+            : ""
+
+    ].join("");
+
+    return intelSection("Holder Distribution", true, rows);
+
+}
+
+function renderActivitySection(title, activity){
+
+    if(!activity.hasData) return intelSection(title, false);
+
+    const rows = activity.activities.slice(0,5).map(a=>{
+
+        const time = a.tx_timestamp ? new Date(a.tx_timestamp*1000).toLocaleTimeString() : "-";
+
+        const side = a.side==="buy" ? "🟢 Buy" : "🔴 Sell";
+
+        return monitorRow(`${side} $${format(a.amount_usd)}`, time);
+
+    }).join("");
+
+    return intelSection(title, true, rows);
+
+}
+
+function renderTrenchesSection(trenches){
+
+    if(!trenches.hasData) return intelSection("Trenches (Launch Status)", false);
+
+    const rows = [
+
+        monitorRow("Section", trenches.section),
+
+        trenches.progress!=null ? monitorRow("Bonding Progress", (trenches.progress*100).toFixed(1)+"%") : "",
+
+        monitorRow("24h Buys / Sells", `${format(trenches.buys24h)} / ${format(trenches.sells24h)}`),
+
+        trenches.netBuy24h!=null ? monitorRow("24h Net Buy", "$"+format(trenches.netBuy24h)) : "",
+
+        trenches.sniperCount!=null ? monitorRow("Sniper Count", format(trenches.sniperCount)) : "",
+
+        trenches.smartDegenCount!=null ? monitorRow("Smart-Degen Holders", format(trenches.smartDegenCount)) : ""
+
+    ].join("");
+
+    return intelSection("Trenches (Launch Status)", true, rows);
+
+}
+
+function renderHotSearchesSection(hs){
+
+    if(!hs.hasData) return intelSection("Hot Searches", false);
+
+    return intelSection("Hot Searches", true, monitorRow(`Rank (${hs.interval})`, "#"+hs.rank));
+
+}
+
+function renderLaunchpadSection(lp){
+
+    if(!lp.hasData) return intelSection("Launchpad", false);
+
+    const rows = [
+
+        monitorRow("Platform", lp.platform),
+
+        lp.totalTokensOnPlatform!=null
+
+            ? monitorRow("Total Tokens Created", format(lp.totalTokensOnPlatform))
+
+            : monitorRow("Total Tokens Created", "No data")
+
+    ].join("");
+
+    return intelSection("Launchpad", true, rows);
+
+}
+
+function renderDevWalletSection(devWallet, walletActivity){
+
+    if(!devWallet.hasData) return intelSection("Dev Wallet Activity", false);
+
+    const short = devWallet.address.slice(0,6)+"..."+devWallet.address.slice(-4);
+
+    let rows = monitorRow("Dev Wallet", short);
+
+    if(walletActivity.hasData && walletActivity.activities.length){
+
+        rows += walletActivity.activities.slice(0,3).map(a=>
+
+            monitorRow(a.event_type || "trade", a.token?.symbol || "-")
+
+        ).join("");
+
+    }
+    else{
+
+        rows += monitorRow("Recent Activity", "No data");
+
+    }
+
+    return intelSection("Dev Wallet Activity", true, rows);
+
+}
+
+// CRAB is participant-first: Participant Score is the primary driver
+// of BUY/HOLD/AVOID, Market Health only confirms/adjusts risk and
+// confidence - see server/src/config/scoringConfig.js for the full
+// philosophy. Shown as two clearly separate breakdown groups so that
+// distinction stays visible, not two of the same kind of bar.
+
+const PARTICIPANT_LABELS = {
+
+    accumulation: "Accumulation",
+
+    smartMoney: "Smart Money",
+
+    kol: "KOL",
+
+    whale: "Whale",
+
+    developer: "Developer",
+
+    sniperQuality: "Sniper Quality",
+
+    bundleQuality: "Bundle Quality",
+
+    insiderQuality: "Insider Quality",
+
+    walletQuality: "Wallet Quality",
+
+    walletProfitability: "Wallet Profitability"
+
+};
+
+const MARKET_LABELS = {
+
+    liquidity: "Liquidity",
+
+    security: "Security",
+
+    holderDistribution: "Holder Distribution",
+
+    volume: "Volume",
+
+    priceStability: "Price Stability"
+
+};
+
+function breakdownGroupHtml(labels, breakdown){
+
+    return Object.keys(labels).map(key=>{
+
+        const cat = breakdown[key];
+
+        const label = labels[key] + (cat.hasData ? "" : " (No data)");
+
+        return scoreBar(label, cat.score, cat.max);
+
+    }).join("");
 
 }
 
@@ -162,16 +375,20 @@ const UI = {
 
     // =====================================
     // CARD
+    //
+    // `token.signal` is computed server-side by the Intelligence
+    // Engine (server/src/services/intelligenceEngine.js), which
+    // gathers every real signal already collected about the token
+    // across every source - market, trenches, security, smart money,
+    // KOL activity. Never fabricated - a category with no real data
+    // contributes a neutral score, never a guessed reason.
     // =====================================
 
-    renderCard(pair, rank){
+    renderCard(token, rank){
 
-        const signal = pair.signal;
+        const signal = token.signal;
 
-        const logo =
-        pair.info?.imageUrl ||
-        pair.logoURI ||
-        "images/body.png";
+        const logo = "images/body.png";
 
         const medal =
             rank===1 ? "🥇" :
@@ -182,43 +399,11 @@ const UI = {
         const rankLabel =
             medal ? medal : (rank ? `#${rank}` : "");
 
-        const color = {
+        const changePct = token.price_change_1h;
 
-            "STRONG BUY":"#16c784",
+        const changeColor = (changePct||0) >= 0 ? "#16c784" : "#ff4d4d";
 
-            "BUY":"#8b5cf6",
-
-            "HOLD":"#f5a623",
-
-            "AVOID":"#ff4d4d"
-
-        }[signal.signal] || "#ff4d4d";
-
-        const badge = {
-
-            "STRONG BUY":"🚀 STRONG BUY",
-
-            "BUY":"✅ BUY",
-
-            "HOLD":"👀 HOLD",
-
-            "AVOID":"⚠ AVOID"
-
-        }[signal.signal] || "⚠ AVOID";
-
-        const badgeClass = {
-
-            "STRONG BUY":"strong-buy",
-
-            "BUY":"buy",
-
-            "HOLD":"hold",
-
-            "AVOID":"avoid"
-
-        }[signal.signal] || "avoid";
-
-        const stage = estimateEntryStage(signal);
+        const color = signalColor(signal.action);
 
         const card=document.createElement("div");
 
@@ -228,23 +413,21 @@ const UI = {
 
         ${rankLabel ? `<div class="rankBadge${medal?" medal":""}">${rankLabel}</div>` : ""}
 
-        <div class="entryBadge ${stage.className}">${stage.label}</div>
-
         <div class="coinHeader">
 
             <img src="${logo}" class="coinLogo">
 
             <div>
 
-                <h3>${pair.baseToken.symbol}</h3>
+                <h3>${token.symbol || "-"}</h3>
 
-                <small>${pair.baseToken.name}</small>
+                <small>${token.name || "-"}</small>
 
             </div>
 
-            <span style="color:${pair.priceChange?.h24>=0?"#16c784":"#ff4d4d"}">
+            <span style="color:${changeColor}">
 
-                ${pair.priceChange?.h24?.toFixed(2) || 0}%
+                ${changePct!=null ? changePct.toFixed(2) : "0.00"}%
 
             </span>
 
@@ -254,11 +437,11 @@ const UI = {
 
             <div>
 
-                Vol
+                Vol 1h
 
                 <br>
 
-                <strong>$${format(pair.volume?.h24)}</strong>
+                <strong>$${format(token.volume_1h)}</strong>
 
             </div>
 
@@ -268,7 +451,7 @@ const UI = {
 
                 <br>
 
-                <strong>$${format(pair.liquidity?.usd)}</strong>
+                <strong>$${format(token.liquidity)}</strong>
 
             </div>
 
@@ -278,7 +461,7 @@ const UI = {
 
                 <br>
 
-                <strong>${pair.marketCap>0 ? "$"+format(pair.marketCap) : "N/A"}</strong>
+                <strong>${marketCapLabelValue(token)}</strong>
 
             </div>
 
@@ -286,43 +469,39 @@ const UI = {
 
         <div class="signalBox" style="border-color:${color}">
 
-            <small class="scoreLabel">CRAB SCORE</small>
+            <small class="scoreLabel">PARTICIPANT SCORE</small>
 
-            <h2 class="scoreValue" style="color:${color}">${signal.score}</h2>
+            <h2 class="scoreValue" style="color:${color}">${signal.participantScore}</h2>
 
-            <div class="signalPill" style="background:${color}">${signal.signal}</div>
+            <div class="signalPill" style="background:${color}">${signal.action}</div>
 
             <div class="signalMetaRow">
 
-                <span>Strength ${signal.confidence}%</span>
+                <span>${signal.stage}</span>
 
-                <span>+${signal.target}%</span>
+                <span>Confidence ${signal.confidence}%</span>
 
-            </div>
-
-            <div class="signalTargetMC">
-
-                Target MC $${format(signal.targetMC)}
+                <span>Risk ${signal.risk}</span>
 
             </div>
 
         </div>
 
-        <div class="statusBadge ${badgeClass}">
+        <div class="statusBadge ${signalBadgeClass(signal.action)}">
 
-            ${badge}
+            ${signalBadgeText(signal.action)}
 
         </div>
 
         <div class="dexBadge">
 
-            ${(pair.dexId||"dex").toUpperCase()}
+            ${(token.chain||"chain").toUpperCase()}
 
         </div>
 
         `;
 
-        card.onclick=()=>showDetail(pair);
+        card.onclick=()=>showDetail(token);
 
         return card;
 
@@ -332,197 +511,78 @@ const UI = {
     // DETAIL PANEL
     // =====================================
 
-    renderDetail(pair){
+    renderDetail(token){
 
-        const signal = pair.signal;
+        const signal = token.signal;
 
-        const color = {
+        const color = signalColor(signal.action);
 
-            "STRONG BUY":"#16c784",
+        let logo = "images/body.png";
 
-            "BUY":"#8b5cf6",
+        try{
 
-            "HOLD":"#f5a623",
+            const raw = token.raw_json ? JSON.parse(token.raw_json) : null;
 
-            "AVOID":"#ff4d4d"
+            if(raw?.logo) logo = raw.logo;
 
-        }[signal.signal] || "#ff4d4d";
+        }
+        catch(e){}
 
-        const logo =
-            pair.info?.imageUrl ||
-            pair.logoURI ||
-            "images/body.png";
+        const dexUrl = dexscreenerLink(token);
 
-        const stage = estimateEntryStage(signal);
+        const gmgnUrl = gmgnLink(token);
 
-        const price = Number(pair.priceUsd || 0);
+        if(typeof Analytics !== "undefined"){
 
-        const stopLossPercent =
-            signal.risk==="HIGH" ? 22 :
-            signal.risk==="MEDIUM" ? 14 : 8;
-
-        // TP/SL now expressed as Market Cap, not token price -
-        // same underlying growth multiple as before (price and
-        // FDV scale together), just a more intuitive unit for
-        // a meme coin audience. targetMC is already fdv*(1+
-        // target/100) from the engine - takeProfitMC reuses it
-        // directly since "take profit at the target" is the
-        // same number as "target market cap".
-
-        const takeProfitMC = signal.targetMC;
-
-        const stopLossMC =
-            signal.fdv * (1 - stopLossPercent/100);
-
-        const riskTierValue =
-            signal.risk==="HIGH" ? 90 :
-            signal.risk==="MEDIUM" ? 60 : 25;
-
-        // Confidence Breakdown (V12, Priority #3) - explains WHY
-        // the AI trusts (or doesn't trust) this signal, using
-        // real diagnostics the engine already computes but
-        // didn't expose before now (see engine.js return object).
-        // Deliberately different framing from the CRAB SCORE
-        // Breakdown further down, which explains HOW the score
-        // itself was calculated.
-
-        const entryTimingPct =
-            stage.key==="early" ? 88 :
-            stage.key==="mid" ? 55 : 18;
-
-        const momentumQualityPct =
-            Math.round((signal.momentumScore/20)*100);
-
-        const marketStructurePct =
-            Math.round((signal.backingScore/10)*100);
-
-        const buyerDominancePct =
-            signal.buyRatio!=null ? Math.round(signal.buyRatio*100) : 50;
-
-        const breakoutProbPct = signal.breakoutProbability ?? 0;
-
-        const trendStabilityPct =
-            (!signal.historyTrend || signal.historyTrend.totalSteps<=0)
-            ? 50
-            : Math.round((signal.historyTrend.higherSteps/signal.historyTrend.totalSteps)*100);
-
-        const trendStabilityNote =
-            (!signal.historyTrend || signal.historyTrend.totalSteps<=0)
-            ? "Not enough scans yet this session - showing neutral"
-            : null;
-
-        const patternReliabilityPct = Math.round(
-
-            ((signal.dataCompleteness||0) + (signal.dataAgreement||0)) / 2 * 100
-
-        );
-
-        const signalFreshnessText =
-            pair.__changed ? "Just updated this scan" : "Stable across recent scans";
-
-        const isBuyTier =
-            signal.action==="STRONG BUY" || signal.action==="BUY";
-
-        const isHold =
-            signal.action==="HOLD";
-
-        // AVOID-tier labels: only show the specific ones that
-        // actually apply, based on the real risks[] strings the
-        // engine already produced - not a blanket static list.
-
-        const risksText =
-            (signal.risks || []).join(" ").toLowerCase();
-
-        const avoidFlags = [];
-
-        if(risksText.includes("distribution") || risksText.includes("sold into") || risksText.includes("sell pressure")){
-
-            avoidFlags.push("Possible Distribution");
+            Analytics.track("detail_open");
 
         }
 
-        if(risksText.includes("extended") || risksText.includes("pumped") || risksText.includes("fake breakout")){
+        const launchLabel =
+            (token.launch_time && token.launch_time !== "1970-01-01 00:00:00")
+            ? new Date(parseBackendTimestamp(token.launch_time)).toLocaleString()
+            : "Unknown";
 
-            avoidFlags.push("Overextended Move");
+        const updatedLabel =
+            token.updated_at
+            ? formatDuration(Date.now()-parseBackendTimestamp(token.updated_at))
+            : "-";
 
-        }
-
-        avoidFlags.push("High Downside Risk", "Avoid New Entry");
-
-        const avoidFlagsHtml =
-            avoidFlags.map(f=>
-
-                `<div class="monitorRow"><span>${f}</span><strong class="changedYes">⚠</strong></div>`
-
-            ).join("");
-
-        const whyItems =
-            (signal.reasons && signal.reasons.length)
-            ? signal.reasons
-            : ["No strong standout factor yet"];
+        const changeColor = (token.price_change_1h||0) >= 0 ? "#16c784" : "#ff4d4d";
 
         const whyHtml =
-            whyItems.map(r=>
+            signal.reasons.map(r=>
 
                 `<li><span class="tick">✓</span>${r}</li>`
 
             ).join("");
 
         const riskHtml =
-            (signal.risks && signal.risks.length)
-            ? signal.risks.map(r=>
+            signal.riskReasons.length
+            ? signal.riskReasons.map(r=>
 
                 `<li><span class="tick">✕</span>${r}</li>`
 
             ).join("")
             : "";
 
-        const holderDisplay =
-            signal.holder!=null
-            ? format(signal.holder)
-            : "-";
+        // Confirmations are market-side observations that support or
+        // weaken the participant-driven reasons above - never listed
+        // as reasons themselves. "Liquidity confirms accumulation" is
+        // a confirmation, not a reason CRAB is participant-first.
 
-        const trades24hDisplay =
-            signal.trades24h!=null
-            ? format(signal.trades24h)
-            : (
-                signal.trades1h!=null
-                ? format(Math.round(signal.trades1h*24))+"*"
-                : "-"
-            );
+        const confirmHtml =
+            signal.confirmations.length
+            ? signal.confirmations.map(c=>
 
-        const marketCapDisplay =
-            marketCapLabelValue(pair, signal);
+                `<li><span class="tick">≈</span>${c}</li>`
 
-        const buyPct =
-            signal.buyRatio!=null
-            ? Math.round(signal.buyRatio*100)
-            : null;
-
-        const buySellHtml =
-            buyPct!=null
-            ? `
-
-            <div class="buySellBar">
-
-                <div class="buySellFill" style="width:${buyPct}%"></div>
-
-            </div>
-
-            <div class="buySellLabels">
-
-                <span>${buyPct}% Buy</span>
-
-                <span>${100-buyPct}% Sell</span>
-
-            </div>
-
-            `
-            : `<div class="disclaimerNote">Buy/Sell split unavailable for this pair.</div>`;
+            ).join("")
+            : `<li><span class="tick">≈</span>No market confirmations yet</li>`;
 
         const history =
-            (pair.__history && pair.__history.length)
-            ? pair.__history
+            (token.__history && token.__history.length)
+            ? token.__history
             : [{ action: signal.action, time: Date.now() }];
 
         const justStartedWatching = history.length <= 1;
@@ -532,8 +592,7 @@ const UI = {
 
                 const isCurrent = i===history.length-1;
 
-                const timeLabel =
-                    new Date(h.time).toLocaleTimeString();
+                const timeLabel = new Date(h.time).toLocaleTimeString();
 
                 return `
 
@@ -549,15 +608,7 @@ const UI = {
 
             }).join("");
 
-        const dexUrl = dexscreenerLink(pair);
-
-        const gmgnUrl = gmgnLink(pair);
-
-        if(typeof Analytics !== "undefined"){
-
-            Analytics.track("detail_open");
-
-        }
+        const intel = signal.intelligence;
 
         return `
 
@@ -567,9 +618,9 @@ const UI = {
 
             <div class="detailHeaderInfo">
 
-                <h2>${pair.baseToken.name}</h2>
+                <h2>${token.name || "-"}</h2>
 
-                <span>${pair.baseToken.symbol}</span>
+                <span>${token.symbol || "-"}</span>
 
             </div>
 
@@ -591,27 +642,17 @@ const UI = {
 
         <div class="disclaimerNote">
 
-            Algorithmic signal, not financial advice.
+            Algorithmic signal, not financial advice. CRAB is participant-first: Participant Score drives BUY/HOLD/AVOID, Market Health only confirms or adjusts confidence/risk. Computed only from real data already collected - a category with nothing collected yet is shown as "No data", never guessed.
 
         </div>
 
         <div style="font-size:12px;color:#8d90a8;margin-top:8px;">
 
-            CRAB SCORE ${signal.score} · Signal Strength ${signal.confidence}%
+            Stage ${signal.stage} · Participant ${signal.participantScore}/${signal.participantMax} · Market Health ${signal.marketHealth}/${signal.marketHealthMax} · Confidence ${signal.confidence}%
 
         </div>
 
-        <div class="entryMeter">
-
-            <div class="${stage.key==="early"?"active early":""}">EARLY</div>
-
-            <div class="${stage.key==="mid"?"active mid":""}">MID</div>
-
-            <div class="${stage.key==="late"?"active late":""}">LATE</div>
-
-        </div>
-
-        <div class="sectionTitle">Why AI Says ${signal.action}</div>
+        <div class="sectionTitle">Why ${signal.action}</div>
 
         <ul class="whyList">
 
@@ -619,45 +660,13 @@ const UI = {
 
         </ul>
 
-        <div class="sectionTitle">Confidence Breakdown</div>
+        <div class="sectionTitle">Market Confirmations</div>
 
-        ${scoreBar("Entry Timing", entryTimingPct, 100)}
+        <ul class="whyList">
 
-        ${scoreBar("Breakout Probability", breakoutProbPct, 100)}
+            ${confirmHtml}
 
-        ${scoreBar("Market Structure", marketStructurePct, 100)}
-
-        ${scoreBar("Risk Level", riskTierValue, 100)}
-
-        ${scoreBar("Data Confidence", signal.confidence, 99)}
-
-        ${scoreBar("Momentum Quality", momentumQualityPct, 100)}
-
-        ${scoreBar("Buyer Dominance", buyerDominancePct, 100)}
-
-        ${scoreBar("Trend Stability", trendStabilityPct, 100)}
-
-        ${scoreBar("Pattern Reliability", patternReliabilityPct, 100)}
-
-        <div class="monitorBox">
-
-            <div class="monitorRow">
-
-                <span>Signal Freshness</span>
-
-                <strong class="liveTag">${signalFreshnessText}</strong>
-
-            </div>
-
-            <div class="monitorRow">
-
-                <span>Narrative Strength</span>
-
-                <strong class="changedNo">Not available yet</strong>
-
-            </div>
-
-        </div>
+        </ul>
 
         ${riskHtml ? `
 
@@ -671,129 +680,37 @@ const UI = {
 
         ` : ""}
 
-        ${
-
-        isBuyTier ? `
-
-        <div class="sectionTitle">Target (Estimated)</div>
-
-        <div class="targetGrid">
-
-            <div class="metricBox">
-
-                <small>Expected Return</small>
-
-                <strong>+${signal.target}%</strong>
-
-            </div>
-
-            <div class="metricBox">
-
-                <small>Target Market Cap</small>
-
-                <strong>$${format(signal.targetMC)}</strong>
-
-            </div>
-
-            <div class="metricBox tp">
-
-                <small>Take Profit (Market Cap)</small>
-
-                <strong>$${format(takeProfitMC)}</strong>
-
-            </div>
-
-            <div class="metricBox sl">
-
-                <small>Stop Loss (Market Cap)</small>
-
-                <strong>$${format(stopLossMC)}</strong>
-
-            </div>
-
-        </div>
-
-        <div class="disclaimerNote">
-
-            Estimates only, derived from the CRAB SCORE model - not a prediction or financial advice.
-
-        </div>
-
-        `
-
-        : isHold ? `
-
-        <div class="sectionTitle">Trade Status</div>
+        <div class="sectionTitle">Risk Level</div>
 
         <div class="monitorBox">
 
             <div class="monitorRow">
 
-                <span>Recommendation</span>
+                <span>Risk</span>
 
-                <strong class="changedNo">No Trade Recommendation</strong>
-
-            </div>
-
-            <div class="monitorRow">
-
-                <span>Reason</span>
-
-                <strong>Waiting for stronger confirmation</strong>
-
-            </div>
-
-            <div class="monitorRow">
-
-                <span>Current Market Phase</span>
-
-                <strong>Fair Valuation</strong>
+                <strong class="${signal.risk==="LOW"?"changedNo":"changedYes"}">${signal.risk}</strong>
 
             </div>
 
         </div>
 
-        `
+        <div class="sectionTitle">Participant Score Breakdown (primary)</div>
 
-        : `
+        ${breakdownGroupHtml(PARTICIPANT_LABELS, signal.breakdown.participant)}
 
-        <div class="sectionTitle">Risk Assessment</div>
+        <div class="sectionTitle">Market Health Breakdown (confirmation only)</div>
 
-        <div class="monitorBox">
+        ${breakdownGroupHtml(MARKET_LABELS, signal.breakdown.market)}
 
-            <div class="monitorRow">
-
-                <span>Risk Level</span>
-
-                <strong class="changedYes">${signal.risk}</strong>
-
-            </div>
-
-            ${avoidFlagsHtml}
-
-        </div>
-
-        `
-
-        }
-
-        <div class="sectionTitle">Market Health</div>
+        <div class="sectionTitle">Market Data</div>
 
         <div class="healthGrid">
 
             <div class="metricBox">
 
-                <small>Liquidity</small>
+                <small>Price</small>
 
-                <strong>$${format(signal.liquidity)}</strong>
-
-            </div>
-
-            <div class="metricBox">
-
-                <small>FDV</small>
-
-                <strong>$${format(signal.fdv)}</strong>
+                <strong>${formatPrice(token.price)}</strong>
 
             </div>
 
@@ -801,47 +718,77 @@ const UI = {
 
                 <small>Market Cap</small>
 
-                <strong>${marketCapDisplay}</strong>
+                <strong>${marketCapLabelValue(token)}</strong>
 
             </div>
 
             <div class="metricBox">
 
-                <small>Volume 24h</small>
+                <small>Liquidity</small>
 
-                <strong>$${format(signal.volume)}</strong>
-
-            </div>
-
-            <div class="metricBox">
-
-                <small>Trades 24h</small>
-
-                <strong>${trades24hDisplay}</strong>
+                <strong>$${format(token.liquidity)}</strong>
 
             </div>
 
             <div class="metricBox">
 
-                <small>Holder</small>
+                <small>FDV</small>
 
-                <strong>${holderDisplay}</strong>
+                <strong>$${format(token.fdv)}</strong>
+
+            </div>
+
+            <div class="metricBox">
+
+                <small>Volume 1h</small>
+
+                <strong>$${format(token.volume_1h)}</strong>
+
+            </div>
+
+            <div class="metricBox">
+
+                <small>Price Change 1h</small>
+
+                <strong style="color:${changeColor}">${token.price_change_1h!=null ? token.price_change_1h.toFixed(2) : "0.00"}%</strong>
+
+            </div>
+
+            <div class="metricBox">
+
+                <small>Holders</small>
+
+                <strong>${token.holders!=null ? format(token.holders) : "-"}</strong>
+
+            </div>
+
+            <div class="metricBox">
+
+                <small>Launched</small>
+
+                <strong>${launchLabel}</strong>
 
             </div>
 
         </div>
 
-        ${trades24hDisplay.includes("*") ? `
+        ${renderSecuritySection(intel.security)}
 
-        <div class="disclaimerNote">* estimated from 1h trade rate, not a direct 24h count.</div>
+        ${renderHolderDistributionSection(intel.holders)}
 
-        ` : ""}
+        ${renderActivitySection("Smart Money Activity", intel.smartMoney)}
 
-        <div class="sectionTitle">Buy / Sell Pressure (24h)</div>
+        ${renderActivitySection("KOL Activity", intel.kol)}
 
-        ${buySellHtml}
+        ${renderTrenchesSection(intel.trenches)}
 
-        <div class="sectionTitle">Holder Concentration</div>
+        ${renderHotSearchesSection(intel.hotSearches)}
+
+        ${renderLaunchpadSection(intel.launchpad)}
+
+        ${renderDevWalletSection(intel.devWallet, intel.walletActivity)}
+
+        <div class="sectionTitle">Holder Concentration (Live)</div>
 
         <div class="monitorBox" id="holderConcentrationBox">
 
@@ -879,11 +826,19 @@ const UI = {
 
             <div class="monitorRow">
 
+                <span>Data Last Updated</span>
+
+                <strong>${updatedLabel}</strong>
+
+            </div>
+
+            <div class="monitorRow">
+
                 <span>Recommendation Changed?</span>
 
-                <strong class="${pair.__changed?"changedYes":"changedNo"}">
+                <strong class="${token.__changed?"changedYes":"changedNo"}">
 
-                    ${pair.__changed?"Yes":"No"}
+                    ${token.__changed?"Yes":"No"}
 
                 </strong>
 
@@ -901,24 +856,6 @@ const UI = {
 
         </div>
 
-        <div class="sectionTitle">CRAB SCORE Breakdown</div>
-
-        ${scoreBar("Liquidity", signal.liquidityScore,15)}
-
-        ${scoreBar("Momentum", signal.momentumScore,20)}
-
-        ${scoreBar("Trading", signal.ratioScore,20)}
-
-        ${scoreBar("Valuation", signal.fdvScore,10)}
-
-        ${scoreBar("Backing", signal.backingScore,10)}
-
-        ${scoreBar("Holder", signal.holderScore,8)}
-
-        ${scoreBar("Trades", signal.tradesScore,7)}
-
-        ${scoreBar("Buy/Sell", signal.buySellScore,23)}
-
         <div class="detailActions" style="
     display:flex;
     flex-direction:column;
@@ -927,7 +864,7 @@ const UI = {
 ">
 
     <button
-        onclick="copyContract('${pair.baseToken.address}')">
+        onclick="copyContract('${token.token_address}')">
 
         📋 Copy Contract
 
@@ -970,10 +907,12 @@ ${(typeof WalletDetect !== "undefined" && WalletDetect.isInWalletBrowser && Wall
     // requirements - the section stays visible so it's
     // clear this is "off", not broken, and can be
     // re-enabled later without restructuring anything.
-    // No network call is made here anymore.
+    // No network call is made here anymore. (Distinct from
+    // "Holder Distribution" above, which is real - this is
+    // specifically the live on-chain concentration check.)
     // =====================================
 
-    async loadHolderConcentration(pair){
+    async loadHolderConcentration(token){
 
         const box = document.getElementById("holderConcentrationBox");
 
@@ -999,11 +938,6 @@ function scoreBar(name,value,max){
         100
 
     );
-
-    // V14: class-based instead of inline styles so the mobile
-    // stylesheet can actually control bar sizing/spacing per
-    // breakpoint (inline styles can't be overridden by media
-    // queries without !important everywhere).
 
     return `
 

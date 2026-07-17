@@ -47,21 +47,19 @@ let timer=null;
 // LIVE MONITORING STATE
 // ======================================
 
-const SCAN_INTERVAL_MS = (CONFIG && CONFIG.SCAN_INTERVAL) || 60000;
+const REFRESH_INTERVAL_MS = (CONFIG && CONFIG.BACKEND_REFRESH_INTERVAL) || 30000;
 
 let lastScanAt = Date.now();
 
 let trendingInFlight = false;
 
-// Recommendation history per token address, kept
-// in-memory for this session only.
+// Recommendation history per token address (BUY/HOLD/AVOID timeline
+// in the detail panel), kept in sessionStorage - same policy as
+// before signals were moved server-side.
 
 const previousAction = {};
-const actionHistory = (function(){
 
-    // V14: recommendation history (BUY/HOLD timeline in the
-    // detail panel) survives refresh - hydrated from
-    // sessionStorage, same policy as engine scan memory.
+const actionHistory = (function(){
 
     try{
 
@@ -85,11 +83,55 @@ function persistActionHistory(){
 
 }
 
+function trackRecommendationChanges(tokens){
+
+    tokens.forEach(token=>{
+
+        const address = token.token_address;
+
+        if(!address) return;
+
+        const action = token.signal.action;
+
+        const prev = previousAction[address];
+
+        if(!actionHistory[address]){
+
+            actionHistory[address]=[{ action, time:Date.now() }];
+
+            persistActionHistory();
+
+        }
+        else if(prev!==action){
+
+            actionHistory[address].push({ action, time:Date.now() });
+
+            if(actionHistory[address].length>6){
+
+                actionHistory[address].shift();
+
+            }
+
+            persistActionHistory();
+
+        }
+
+        token.__changed = (prev!==undefined && prev!==action);
+
+        token.__history = actionHistory[address];
+
+        previousAction[address]=action;
+
+    });
+
+}
+
 searchInput.focus();
 
 
 // ======================================
 // WALLET DROPDOWN
+// (unrelated to the backend migration - unchanged)
 // ======================================
 
 function shortAddress(addr){
@@ -106,10 +148,6 @@ function getTier(amount){
 
     if(amount >= 1000000) return "💎 DIAMOND CLAW";
 
-    // Access no longer requires a minimum (see wallet.js) - any
-    // positive holding counts as a verified holder here too,
-    // instead of the old hardcoded 100,000-token fallback.
-
     if(amount > 0) return "✅ VERIFIED";
 
     return "GUEST";
@@ -123,10 +161,6 @@ function renderWalletBalance(amount){
     if(walletTierText) walletTierText.innerHTML=getTier(amount);
 
 }
-
-// Reuse the balance already verified during the wallet
-// flow (stored by wallet.js) instead of calling Helius
-// again for the same information right after login.
 
 async function loadWalletBalance(walletAddress){
 
@@ -254,60 +288,96 @@ if(walletButton){
 
 // ======================================
 // SEARCH
+// STEP 7: 300ms debounce, fires while typing.
 // ======================================
 
-searchInput.addEventListener("keyup",()=>{
+let currentSearchQuery = "";
+
+searchInput.addEventListener("input",()=>{
 
     sessionStorage.setItem("crab_search_query", searchInput.value);
 
     clearTimeout(timer);
 
-    timer=setTimeout(loadSearch,250);
+    timer=setTimeout(loadSearch,300);
 
 });
 
 
 // ======================================
-// ENGINE / LIVE STATUS (real, from actual
-// API call outcomes - no hardcoded value)
+// ENGINE / LIVE STATUS
+// Real backend health (GET /api/v1/health) - never a
+// hardcoded value. "Engine" here means our own backend + its
+// collector/scheduler, not DexScreener's discovery pipeline.
 // ======================================
 
-function applyStatus(){
+async function applyStatus(){
 
-    const status = API.getStatus();
+    try{
 
-    if(engineStatusText){
+        const health = await BackendAPI.getHealth();
 
-        engineStatusText.innerHTML = status.engine;
+        const schedulerOk = health.scheduler?.status === "active";
+
+        const liveState =
+            health.status !== "ok" ? "offline" :
+            schedulerOk ? "ok" :
+            "limited";
+
+        const liveLabel =
+            liveState==="ok" ? "LIVE" :
+            liveState==="limited" ? "LIMITED" :
+            "OFFLINE";
+
+        const engineLabel =
+            liveState==="ok" ? "Healthy" :
+            liveState==="limited" ? "Warning" :
+            "Offline";
+
+        if(engineStatusText){
+
+            engineStatusText.innerHTML = engineLabel;
+            engineStatusText.className = liveState;
+
+        }
+
+        if(liveStatusText){
+
+            liveStatusText.innerHTML = liveLabel;
+
+        }
+
+        if(liveStatusDot){
+
+            liveStatusDot.className = "live-dot "+liveState;
+
+        }
+
+        if(liveStatus){
+
+            liveStatus.className = "live-status "+liveState;
+
+        }
 
     }
+    catch(err){
 
-    if(liveStatusText){
+        if(err.name === "AbortError") return;
 
-        liveStatusText.innerHTML = status.live;
+        console.error("Health check failed", err);
 
-    }
+        if(engineStatusText){
 
-    const statusClass =
-        status.live==="LIVE" ? "ok" :
-        status.live==="LIMITED" ? "limited" :
-        "offline";
+            engineStatusText.innerHTML = "Offline";
+            engineStatusText.className = "offline";
 
-    if(liveStatusDot){
+        }
 
-        liveStatusDot.className = "live-dot "+statusClass;
+        if(liveStatusText) liveStatusText.innerHTML = "OFFLINE";
 
-    }
+        if(liveStatusDot) liveStatusDot.className = "live-dot offline";
 
-    if(liveStatus){
-
-        liveStatus.className = "live-status "+statusClass;
-
-    }
-
-    if(engineStatusText){
-
-        engineStatusText.className = statusClass;
+        if(liveStatus) liveStatus.className = "live-status offline";
 
     }
 
@@ -315,7 +385,7 @@ function applyStatus(){
 
 
 // ======================================
-// LOAD TRENDING
+// LOAD TRENDING - GET /api/v1/trending
 // ======================================
 
 async function loadTrending(){
@@ -324,11 +394,13 @@ async function loadTrending(){
 
     trendingInFlight = true;
 
-    showSkeleton();
-
     try{
 
-        const pairs = await Discovery.load();
+        setMode("trending");
+
+        if(coinGrid.childElementCount === 0) showSkeleton();
+
+        const result = await BackendAPI.getTrending(50);
 
         lastScanAt = Date.now();
 
@@ -336,10 +408,18 @@ async function loadTrending(){
 
         updateLiveMonitoring();
 
-        renderPairs(pairs);
+        renderTokens(result.tokens || []);
 
     }
+    catch(err){
 
+        if(err.name === "AbortError") return;
+
+        console.error("Failed to load trending tokens", err);
+
+        showLoadError();
+
+    }
     finally{
 
         trendingInFlight = false;
@@ -350,7 +430,7 @@ async function loadTrending(){
 
 
 // ======================================
-// SEARCH
+// SEARCH - GET /api/v1/search
 // ======================================
 
 async function loadSearch(){
@@ -365,164 +445,143 @@ async function loadSearch(){
 
     }
 
+    if(q === currentSearchQuery) return;
+
     if(typeof Analytics !== "undefined"){
 
         Analytics.track("search");
 
     }
 
-    showSkeleton();
+    try{
 
-    const pairs=await API.search(q);
+        setMode("search:"+q);
 
-    applyStatus();
+        if(coinGrid.childElementCount === 0) showSkeleton();
 
-    renderPairs(pairs);
+        const result = await BackendAPI.search(q, 50);
 
-}
+        currentSearchQuery = q;
 
+        applyStatus();
 
-// ======================================
-// RECOMMENDATION HISTORY TRACKING
-// ======================================
+        renderTokens(result.tokens || []);
 
-function trackRecommendationChanges(pairs){
+    }
+    catch(err){
 
-    pairs.forEach(pair=>{
+        if(err.name === "AbortError") return;
 
-        const address = pair.baseToken?.address;
+        console.error("Search failed", err);
 
-        if(!address) return;
+        showLoadError();
 
-        const action = pair.signal.action;
-
-        const prev = previousAction[address];
-
-        if(!actionHistory[address]){
-
-            actionHistory[address]=[{ action, time:Date.now() }];
-
-            persistActionHistory();
-
-        }
-
-        else if(prev!==action){
-
-            actionHistory[address].push({ action, time:Date.now() });
-
-            if(actionHistory[address].length>6){
-
-                actionHistory[address].shift();
-
-            }
-
-            persistActionHistory();
-
-        }
-
-        pair.__changed = (prev!==undefined && prev!==action);
-
-        pair.__history = actionHistory[address];
-
-        previousAction[address]=action;
-
-    });
+    }
 
 }
 
 
 // ======================================
-// RENDER
+// RENDER - keyed reconciliation
+// STEP 5: only refresh changed data, avoid unnecessary re-render.
+// STEP 6: race conditions are already prevented at the network
+// layer by BackendAPI (per-channel AbortController) - `mode`
+// additionally guards against a stale trending response landing
+// after the user has since switched to search (or vice versa).
 // ======================================
 
-function renderPairs(pairs){
+let mode = "trending";
 
-    coinGrid.innerHTML="";
+let renderedTokens = new Map(); // token_address -> { token, el }
 
-    if(!pairs.length){
+function setMode(nextMode){
+
+    if(nextMode === mode) return;
+
+    mode = nextMode;
+
+    renderedTokens = new Map();
+
+    coinGrid.innerHTML = "";
+
+}
+
+function tokenFingerprint(t){
+
+    return [
+        t.price, t.market_cap, t.liquidity, t.volume_1h,
+        t.holders, t.price_change_1h, t.price_change_5m, t.fdv,
+        t.updated_at
+    ].join("|");
+
+}
+
+function renderTokens(tokens){
+
+    if(!tokens.length){
 
         hideSkeleton();
 
-        coinGrid.innerHTML="<h2>No Result</h2>";
+        coinGrid.innerHTML =
+            mode.startsWith("search:")
+            ? "<h2>No tokens matched your search</h2>"
+            : "<h2>No data yet - waiting for the next collector run</h2>";
 
-        totalCoins.innerHTML=0;
+        renderedTokens = new Map();
 
-        signalCount.innerHTML=0;
+        totalCoins.innerHTML = 0;
 
-        renderDiscoveryMeta(0);
+        signalCount.innerHTML = 0;
+
+        renderStatsTooltip();
 
         return;
 
     }
 
-    pairs=pairs.map(pair=>{
+    trackRecommendationChanges(tokens);
 
-        pair.signal=Engine.analyze(pair);
+    signalCount.innerHTML =
 
-        return pair;
+        tokens.filter(t=>
 
-    });
+            t.signal.action==="STRONG BUY" ||
 
-    trackRecommendationChanges(pairs);
+            t.signal.action==="BUY"
 
-    const TIER_RANK = {
+        ).length;
 
-        "STRONG BUY":4,
+    if(renderedTokens.size === 0){
 
-        "BUY":3,
+        // First render for this mode - keep the original batched,
+        // animated fill-in behaviour (unchanged animation/timing).
 
-        "HOLD":2,
+        renderTokensIncrementally(tokens);
 
-        "AVOID":1
+    }
+    else{
 
-    };
+        reconcileTokens(tokens);
 
-    pairs.sort((a,b)=>{
+    }
 
-        const tierDiff =
-            (TIER_RANK[b.signal.signal]||0) -
-            (TIER_RANK[a.signal.signal]||0);
+    totalCoins.innerHTML = tokens.length;
 
-        if(tierDiff !== 0) return tierDiff;
-
-        return b.signal.score-a.signal.score;
-
-    });
-
-    totalCoins.innerHTML=pairs.length;
-
-    signalCount.innerHTML=
-
-    pairs.filter(
-
-        p=>
-
-        p.signal.signal=="STRONG BUY" ||
-
-        p.signal.signal=="BUY"
-
-    ).length;
-
-    renderDiscoveryMeta(pairs.length);
-
-    renderPairsIncrementally(pairs);
+    renderStatsTooltip();
 
 }
 
 
 // ======================================
-// INCREMENTAL / BATCH RENDERING
-// Appends cards in small chunks via
-// requestAnimationFrame instead of building
-// hundreds/thousands of DOM nodes in one frame -
-// keeps the UI responsive as the monitored
-// universe grows (Part 19: 500+/1000+/2000+).
+// INCREMENTAL / BATCH RENDERING (first render for a mode)
+// Appends cards in small chunks via requestAnimationFrame -
+// unchanged from the original implementation.
 // ======================================
 
 let renderToken = 0;
 let sessionRestoreDone = false;
 
-function renderPairsIncrementally(pairs){
+function renderTokensIncrementally(tokens){
 
     const myToken = ++renderToken;
 
@@ -536,11 +595,15 @@ function renderPairsIncrementally(pairs){
 
         const fragment = document.createDocumentFragment();
 
-        const end = Math.min(index + BATCH_SIZE, pairs.length);
+        const end = Math.min(index + BATCH_SIZE, tokens.length);
 
         for(;index<end;index++){
 
-            const card = UI.renderCard(pairs[index], index+1);
+            const rank = index+1;
+
+            const card = UI.renderCard(tokens[index], rank);
+
+            renderedTokens.set(tokens[index].token_address, { token: tokens[index], el: card, rank });
 
             fragment.appendChild(card);
 
@@ -550,7 +613,7 @@ function renderPairsIncrementally(pairs){
 
         hideSkeleton();
 
-        if(index < pairs.length){
+        if(index < tokens.length){
 
             requestAnimationFrame(renderNextBatch);
 
@@ -559,7 +622,7 @@ function renderPairsIncrementally(pairs){
 
             sessionRestoreDone = true;
 
-            restoreSessionState(pairs);
+            restoreSessionState(tokens);
 
         }
 
@@ -571,21 +634,81 @@ function renderPairsIncrementally(pairs){
 
 
 // ======================================
-// SESSION STATE RESTORE (Part 7)
-// Runs once, right after the first full render after a page
-// load/refresh. Restores whichever coin was open in the
-// detail panel and the scroll position - so refreshing the
-// page, or coming back from a window.open() DexScreener tab,
-// never resets the dashboard.
+// RECONCILE (subsequent refreshes within the same mode)
+// Unchanged tokens at their unchanged position are never touched.
+// Changed tokens get their card replaced in place. New tokens are
+// appended. Tokens no longer present are removed.
 // ======================================
 
-function restoreSessionState(pairs){
+function reconcileTokens(tokens){
+
+    const seen = new Set();
+
+    tokens.forEach((token, i)=>{
+
+        const rank = i+1;
+
+        const address = token.token_address;
+
+        seen.add(address);
+
+        const existing = renderedTokens.get(address);
+
+        if(!existing){
+
+            const card = UI.renderCard(token, rank);
+
+            coinGrid.appendChild(card);
+
+            renderedTokens.set(address, { token, el: card, rank });
+
+            return;
+
+        }
+
+        const changed =
+            existing.rank !== rank ||
+            tokenFingerprint(existing.token) !== tokenFingerprint(token);
+
+        if(!changed) return;
+
+        const card = UI.renderCard(token, rank);
+
+        existing.el.replaceWith(card);
+
+        renderedTokens.set(address, { token, el: card, rank });
+
+    });
+
+    for(const [address, entry] of renderedTokens){
+
+        if(!seen.has(address)){
+
+            entry.el.remove();
+
+            renderedTokens.delete(address);
+
+        }
+
+    }
+
+}
+
+
+// ======================================
+// SESSION STATE RESTORE
+// Runs once, right after the first full render after a page
+// load/refresh - restores whichever coin was open in the detail
+// panel and the scroll position.
+// ======================================
+
+function restoreSessionState(tokens){
 
     const selectedAddress = sessionStorage.getItem("crab_selected_coin");
 
     if(selectedAddress){
 
-        const match = pairs.find(p=>p.baseToken?.address === selectedAddress);
+        const match = tokens.find(t=>t.token_address === selectedAddress);
 
         if(match){
 
@@ -626,9 +749,9 @@ window.addEventListener("scroll", ()=>{
 
 // ======================================
 // SKELETON LOADING
-// Shown immediately while a scan/search is in
-// flight so the dashboard never shows an empty
-// area (Part 10). Purely visual - no data.
+// Purely visual - no data. Only shown when the grid is empty
+// (first load / mode switch), never on a background refresh -
+// see STEP 5, avoid unnecessary re-render.
 // ======================================
 
 const skeletonGrid = document.getElementById("skeletonGrid");
@@ -693,112 +816,92 @@ function hideSkeleton(){
 
 }
 
+// ======================================
+// LOAD ERROR STATE
+// STEP 4: never crash the UI - shown only when the grid has
+// nothing to fall back on (a background refresh failure just
+// leaves the last-good render in place and retries next cycle).
+// ======================================
+
+function showLoadError(){
+
+    hideSkeleton();
+
+    if(coinGrid.childElementCount === 0 && renderedTokens.size === 0){
+
+        coinGrid.innerHTML = "<h2>Unable to reach the CRAB backend. Retrying automatically...</h2>";
+
+    }
+
+}
+
 
 // ======================================
-// DISCOVERY META LABEL (real numbers only,
-// from API.getDiscoveryMeta() - never a
-// placeholder or a guess)
+// STATS TOOLTIP (real numbers, GET /api/v1/stats)
+// Same hover-tooltip mechanism the dashboard already used for the
+// discovery pipeline breakdown - now shows real database-wide
+// aggregates. "Signals" itself is set directly in renderTokens()
+// from real per-token signal.action values, not from this endpoint.
 // ======================================
 
-function renderDiscoveryMeta(shownCount){
+async function renderStatsTooltip(){
 
     const el = document.getElementById("discoverySubLabel");
 
-    if(typeof API === "undefined" || typeof API.getDiscoveryMeta !== "function"){
+    try{
 
-        return;
+        const stats = await BackendAPI.getStats();
 
-    }
+        if(!el) return;
 
-    const meta = API.getDiscoveryMeta();
+        el.textContent = `${stats.tokenCount} tokens tracked`;
 
-    // "Monitoring" headline number = real observed candidates
-    // across all discovery sources this cycle (not the
-    // filtered/shown count) - answers "how much of the market
-    // is CRAB AGENT actually looking at". Falls back to the
-    // shown count only if a discovery cycle hasn't completed
-    // yet.
+        const lastUpdateText =
+            stats.lastUpdate
+            ? new Date(parseBackendTimestamp(stats.lastUpdate)).toLocaleTimeString()
+            : "-";
 
-    if(totalCoins){
-
-        totalCoins.innerHTML =
-            meta.uniqueCandidatesObserved || shownCount;
-
-    }
-
-    if(!el) return;
-
-    if(!meta.uniqueCandidatesObserved){
-
-        el.textContent = "";
-
-        return;
+        el.title =
+            `Database stats (real, from GET /api/v1/stats):\n`+
+            `Tokens tracked: ${stats.tokenCount}\n`+
+            `Avg market cap: $${format(stats.avgMarketCap)}\n`+
+            `Largest market cap: $${format(stats.maxMarketCap)}\n`+
+            `Avg liquidity: $${format(stats.avgLiquidity)}\n`+
+            `Avg holders: ${format(stats.avgHolders)}\n`+
+            `Last updated: ${lastUpdateText}`;
 
     }
+    catch(err){
 
-    el.textContent =
-        `Qualified ${meta.qualifiedAfterFilter} · Showing top ${shownCount}`;
+        if(err.name === "AbortError") return;
 
-    // Full pipeline breakdown as a hover tooltip - same
-    // element, no layout change, but exposes every real number
-    // for transparency (observed, unique, filtered out,
-    // qualified, displayed, per-source breakdown, discovery
-    // duration, last refresh).
+        console.error("Failed to load stats", err);
 
-    const sourceLines =
-        Object.entries(meta.sourceBreakdown || {})
-        .map(([name,count])=>`  ${name}: ${count}`)
-        .join("\n");
-
-    const discoveryTime =
-        meta.lastRunAt
-        ? new Date(meta.lastRunAt).toLocaleTimeString()
-        : "-";
-
-    const durationText =
-        meta.discoveryDurationMs != null
-        ? `${(meta.discoveryDurationMs/1000).toFixed(1)}s`
-        : "-";
-
-    el.title =
-        `Pipeline (real data, this scan cycle):\n`+
-        `Raw observed (pre-dedup): ${meta.rawObserved}\n`+
-        `Unique observed: ${meta.uniqueCandidatesObserved}\n`+
-        `Filtered out: ${meta.filteredOut}\n`+
-        `Qualified: ${meta.qualifiedAfterFilter}\n`+
-        `Displayed: ${meta.displayed}\n`+
-        `Discovery duration: ${durationText}\n`+
-        `Last refresh: ${discoveryTime}\n\n`+
-        `Sources used:\n${sourceLines}`;
+    }
 
 }
 
 
 // ======================================
 // DETAIL
+// GET /api/v1/token/:address - the list row is shown instantly
+// (loading state) while the full row (incl. raw_json, used for the
+// real token logo) loads in the background.
 // ======================================
-
-// Tracks whether WE pushed a history entry for the currently-
-// open mobile detail overlay, so the phone's Back button/swipe
-// closes the overlay instead of leaving the dashboard entirely.
-// Desktop is untouched - the detail panel there is a permanent
-// sidebar, not something "Back" should ever need to close.
 
 let detailHistoryPushed = false;
 
 const MOBILE_DETAIL_BREAKPOINT = 1100;
 
-function showDetail(pair){
+async function showDetail(token){
 
-    detailContent.innerHTML=
-
-    UI.renderDetail(pair);
+    detailContent.innerHTML = UI.renderDetail(token);
 
     detailContent.scrollTop=0;
 
     updateLiveMonitoring();
 
-    UI.loadHolderConcentration(pair);
+    UI.loadHolderConcentration(token);
 
     if(detailPanel){
 
@@ -814,11 +917,38 @@ function showDetail(pair){
 
     }
 
-    const address = pair.baseToken?.address;
+    const address = token.token_address;
 
     if(address){
 
         sessionStorage.setItem("crab_selected_coin", address);
+
+    }
+
+    // Fetch the full row (adds raw_json -> real logo). If it fails
+    // or is superseded by a newer click, the list-row render above
+    // stays on screen - never a crash, never a blank panel.
+
+    try{
+
+        const full = await BackendAPI.getToken(address);
+
+        if(sessionStorage.getItem("crab_selected_coin") !== address) return;
+
+        detailContent.innerHTML = UI.renderDetail(full);
+
+        detailContent.scrollTop=0;
+
+        updateLiveMonitoring();
+
+        UI.loadHolderConcentration(full);
+
+    }
+    catch(err){
+
+        if(err.name === "AbortError") return;
+
+        console.error("Failed to load token detail", err);
 
     }
 
@@ -858,11 +988,6 @@ if(closeDetailBtn){
 
             detailHistoryPushed = false;
 
-            // Pop the history entry we pushed when opening, so a
-            // later real Back press doesn't land on a stale
-            // "detail open" entry that no longer matches what's
-            // on screen.
-
             history.back();
 
         }
@@ -893,9 +1018,8 @@ function format(v){
 
 // ======================================
 // LIVE MONITORING TICKER
-// (UI countdown only - purely local, no
-// network call. Actual refresh cadence is
-// governed separately by SCAN_INTERVAL_MS.)
+// (UI countdown only - purely local, no network call. Actual
+// refresh cadence is governed separately by REFRESH_INTERVAL_MS.)
 // ======================================
 
 function formatDuration(ms){
@@ -938,7 +1062,7 @@ function updateLiveMonitoring(){
 
         0,
 
-        Math.ceil((lastScanAt+SCAN_INTERVAL_MS-Date.now())/1000)
+        Math.ceil((lastScanAt+REFRESH_INTERVAL_MS-Date.now())/1000)
 
     );
 
@@ -989,14 +1113,21 @@ else{
 
 // ======================================
 // TIMERS
+// STEP 5: auto refresh every 30s (CONFIG.BACKEND_REFRESH_INTERVAL).
 // ======================================
 
 setInterval(updateLiveMonitoring,1000);
 
 setInterval(()=>{
 
-    if(searchInput.value.trim().length>=2) return;
+    if(searchInput.value.trim().length>=2){
+
+        loadSearch();
+
+        return;
+
+    }
 
     loadTrending();
 
-},SCAN_INTERVAL_MS);
+},REFRESH_INTERVAL_MS);

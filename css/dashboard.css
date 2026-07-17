@@ -636,6 +636,282 @@ CARD
 
 }
 
+/* Condensed single-line Vol/Liq/MC - the mobile-first replacement
+   for the 3-column .coinInfo grid below. Hidden on desktop (where
+   .coinInfo's extra vertical space is fine); shown only at the
+   compact mobile breakpoint, where it fits in one line instead of
+   three padded cells. */
+.coinMicroStats{
+
+    display:none;
+
+    font-size:10px;
+
+    color:var(--muted);
+
+    white-space:nowrap;
+
+    overflow:hidden;
+
+    text-overflow:ellipsis;
+
+}
+
+.coinMicroStats strong{
+
+    color:var(--ink,#e7e6f5);
+
+    font-weight:700;
+
+}
+
+/* Favorite toggle - top-right corner of every card, independent of
+   rank/entry/lifecycle badges (top-left cluster). */
+.watchStar{
+
+    position:absolute;
+
+    top:8px;
+
+    right:8px;
+
+    width:26px;
+
+    height:26px;
+
+    border-radius:50%;
+
+    border:1px solid rgba(255,255,255,.12);
+
+    background:rgba(0,0,0,.25);
+
+    color:#f6b93b;
+
+    font-size:15px;
+
+    line-height:1;
+
+    cursor:pointer;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:center;
+
+    z-index:2;
+
+}
+
+.watchStar.active{
+
+    background:rgba(246,185,59,.18);
+
+    border-color:#f6b93b;
+
+}
+
+/* Mode tabs - Trending / Recently Viewed / Watch Later / Favorites */
+.modeTabs{
+
+    display:flex;
+
+    gap:8px;
+
+    padding:10px clamp(14px,3vw,28px) 0;
+
+    overflow-x:auto;
+
+    -webkit-overflow-scrolling:touch;
+
+}
+
+.modeTab{
+
+    flex:0 0 auto;
+
+    padding:7px 14px;
+
+    border-radius:999px;
+
+    border:1px solid rgba(255,255,255,.1);
+
+    background:rgba(255,255,255,.04);
+
+    color:var(--muted);
+
+    font-size:12.5px;
+
+    font-weight:600;
+
+    cursor:pointer;
+
+    white-space:nowrap;
+
+}
+
+.modeTab.active{
+
+    background:#7c3aed;
+
+    border-color:#7c3aed;
+
+    color:#fff;
+
+}
+
+/* Detail panel additions: watch button, smart recall, token status,
+   AI Trade Plan bands/timeline */
+.detailWatchBtn{
+
+    margin-left:auto;
+
+    align-self:flex-start;
+
+    padding:6px 12px;
+
+    border-radius:999px;
+
+    border:1px solid rgba(255,255,255,.15);
+
+    background:rgba(255,255,255,.05);
+
+    color:var(--muted);
+
+    font-size:11.5px;
+
+    font-weight:700;
+
+    cursor:pointer;
+
+    white-space:nowrap;
+
+}
+
+.detailWatchBtn.active{
+
+    background:rgba(24,214,123,.15);
+
+    border-color:#18d67b;
+
+    color:#18d67b;
+
+}
+
+.smartRecallBanner{
+
+    margin-top:10px;
+
+    padding:9px 12px;
+
+    border-radius:10px;
+
+    background:rgba(124,58,237,.12);
+
+    border:1px solid rgba(124,58,237,.35);
+
+    font-size:12px;
+
+    color:#c9b8ff;
+
+}
+
+.tokenStatusTag{
+
+    padding:6px 12px;
+
+    border-radius:999px;
+
+    font-size:11px;
+
+    font-weight:700;
+
+    background:rgba(255,255,255,.08);
+
+    color:var(--muted);
+
+}
+
+.tokenStatusTag.dumped{ background:rgba(255,77,77,.15); color:#ff8080; }
+.tokenStatusTag.dead{ background:rgba(255,255,255,.06); color:#6b6f85; }
+.tokenStatusTag.inactive{ background:rgba(246,185,59,.12); color:#f6b93b; }
+.tokenStatusTag.completed{ background:rgba(59,130,246,.15); color:#7cb0ff; }
+
+.tradePlanBands{
+
+    display:grid;
+
+    grid-template-columns:repeat(3,1fr);
+
+    gap:8px;
+
+    margin:14px 0;
+
+}
+
+.tradePlanBands div{
+
+    background:#1b1a2b;
+
+    border-radius:10px;
+
+    padding:10px 8px;
+
+    text-align:center;
+
+}
+
+.tradePlanBands span{
+
+    display:block;
+
+    font-size:10px;
+
+    color:var(--muted);
+
+    margin-bottom:4px;
+
+}
+
+.tradePlanBands strong{
+
+    font-size:12px;
+
+}
+
+.tradePlanBands strong.tpTarget{ color:#16c784; }
+.tradePlanBands strong.tpStop{ color:#ff4d4d; }
+
+.tradePlanTimeline .tradePlanStep{
+
+    display:flex;
+
+    flex-direction:column;
+
+    gap:2px;
+
+    padding:8px 0;
+
+    border-bottom:1px solid rgba(255,255,255,.06);
+
+}
+
+.tradePlanTimeline .tradePlanStep span{
+
+    font-size:10.5px;
+
+    color:var(--muted);
+
+}
+
+.tradePlanTimeline .tradePlanStep small{
+
+    font-size:11px;
+
+    color:#a8a6bd;
+
+}
+
 .coinHeader{
 
     display:flex;
@@ -1727,71 +2003,94 @@ RESPONSIVE
     }
 
     /* =======================
-    MOBILE CARD - dedicated compact
-    layout (Part 4/9). Desktop markup
-    is unchanged; only the layout of
-    the SAME elements is rearranged
-    here so 3-4 cards fit on screen
-    without opening the detail panel.
+    MOBILE-FIRST COMPACT CARD - not a squeezed-down
+    desktop card, a genuinely different, much denser
+    row layout. Target: 5-7 tokens visible in one
+    phone screen without opening the detail panel,
+    so a user can scan a whole page of recommendations
+    in seconds. Vol/Liq/MCap collapse into one
+    truncated micro-stats line (.coinMicroStats)
+    instead of a 3-cell grid; the big score number and
+    the redundant status-restates-the-pill badge are
+    dropped entirely on mobile (both are one tap away
+    in the detail panel) so every pixel of card height
+    is either the symbol, the action, or the score -
+    the three things a 2-second glance actually needs.
     ======================= */
 
     .coinCard{
 
         display:grid;
 
-        grid-template-columns:1fr 92px;
+        grid-template-columns:1fr auto;
 
         grid-template-areas:
 
-            "header score"
+            "header header"
 
-            "info   score";
+            "pill    micro";
 
-        column-gap:10px;
+        column-gap:8px;
 
-        row-gap:8px;
+        row-gap:4px;
 
-        padding:12px;
+        padding:8px 10px;
 
     }
 
     .rankBadge{
 
-        top:8px;
+        position:static;
 
-        left:8px;
+        min-width:18px;
 
-        min-width:22px;
+        height:18px;
 
-        height:19px;
+        font-size:9px;
 
-        font-size:10px;
+        margin-right:2px;
 
     }
 
     .entryBadge{
 
-        top:8px;
+        top:6px;
 
-        right:96px;
+        right:34px;
 
-        font-size:9px;
+        font-size:8px;
 
-        padding:2px 7px;
+        padding:1px 6px;
 
     }
 
     .lifecycleTag{
 
-        top:30px;
+        top:6px;
 
-        right:96px;
+        right:auto;
 
-        max-width:88px;
+        left:6px;
 
-        font-size:8px;
+        max-width:70px;
 
-        padding:2px 6px;
+        font-size:7px;
+
+        padding:1px 5px;
+
+    }
+
+    .watchStar{
+
+        top:6px;
+
+        right:6px;
+
+        width:20px;
+
+        height:20px;
+
+        font-size:12px;
 
     }
 
@@ -1799,110 +2098,121 @@ RESPONSIVE
 
         grid-area:header;
 
-        gap:8px;
-
-        padding-top:2px;
-
-    }
-
-    .coinLogo{
-
-        width:34px;
-
-        height:34px;
-
-        min-width:34px;
-
-        min-height:34px;
-
-    }
-
-    .coinHeader h3{
-
-        font-size:13.5px;
-
-    }
-
-    .coinHeader small{
-
-        font-size:9.5px;
-
-    }
-
-    .coinHeader span{
-
-        font-size:11px;
-
-    }
-
-    .coinInfo{
-
-        grid-area:info;
-
-        grid-template-columns:repeat(3,1fr);
-
-        gap:5px;
-
-    }
-
-    .coinInfo div{
-
-        padding:5px 2px;
-
-    }
-
-    .coinInfo small{
-
-        font-size:8.5px;
-
-    }
-
-    .coinInfo strong{
-
-        font-size:10.5px;
-
-    }
-
-    .signalBox{
-
-        grid-area:score;
-
-        padding:8px 6px;
-
-    }
-
-    .signalBox h2{
-
-        font-size:22px;
-
-    }
-
-    .signalPill{
-
-        font-size:10px;
-
-        padding:3px 8px;
-
-        margin-bottom:4px;
-
-    }
-
-    .signalMetaRow{
-
-        font-size:9.5px;
-
-        flex-direction:column;
-
-        gap:2px;
+        gap:6px;
 
         align-items:center;
 
     }
 
-    /* Target MC is already shown in the detail
-       panel and duplicates the MCap figure now
-       in .coinInfo - hidden on mobile to save
-       vertical space, not deleted from markup. */
+    .coinLogo{
+
+        width:22px;
+
+        height:22px;
+
+        min-width:22px;
+
+        min-height:22px;
+
+    }
+
+    .coinHeader h3{
+
+        font-size:12.5px;
+
+        line-height:1.2;
+
+    }
+
+    .coinHeader small{
+
+        display:none; /* full name - symbol + micro-stats already identify the token, one tap opens the rest */
+
+    }
+
+    .coinHeader span{
+
+        font-size:10.5px;
+
+        margin-left:auto;
+
+    }
+
+    .coinMicroStats{
+
+        display:block;
+
+        grid-area:micro;
+
+        text-align:right;
+
+        align-self:center;
+
+    }
+
+    .coinInfo{
+
+        display:none; /* replaced by .coinMicroStats above */
+
+    }
+
+    .signalBox{
+
+        grid-area:pill;
+
+        display:flex;
+
+        align-items:center;
+
+        gap:6px;
+
+        border-width:1px;
+
+        border-radius:8px;
+
+        padding:3px 6px;
+
+        background:none;
+
+    }
+
+    .scoreLabel{
+
+        display:none;
+
+    }
+
+    .signalBox h2{
+
+        font-size:13px;
+
+        order:2;
+
+    }
+
+    .signalPill{
+
+        font-size:9px;
+
+        padding:2px 7px;
+
+        margin-bottom:0;
+
+        order:1;
+
+    }
+
+    .signalMetaRow{
+
+        display:none; /* stage/confidence/risk - one tap away in the detail panel */
+
+    }
+
+    .riskConflictNote{
+
+        display:none;
+
+    }
 
     .signalTargetMC{
 
@@ -1912,11 +2222,7 @@ RESPONSIVE
 
     .statusBadge{
 
-        grid-column:1/3;
-
-        margin-top:0;
-
-        text-align:center;
+        display:none; /* redundant with .signalPill above - removed on mobile, not just hidden-but-taking-space */
 
     }
 
@@ -2563,20 +2869,6 @@ img{
     .detail-panel{ font-size:14px; }
 
     .targetGrid strong, .healthGrid strong{ font-size:14.5px; }
-
-    .lifecycleTag{
-
-        font-size:8px;
-
-        max-width:56%;
-
-        padding:2px 6px;
-
-        top:8px;
-
-        right:8px;
-
-    }
 
 }
 

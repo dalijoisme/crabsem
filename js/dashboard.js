@@ -44,6 +44,46 @@ const wallet=sessionStorage.getItem("walletAddress");
 let timer=null;
 
 // ======================================
+// WALLET INTELLIGENCE PLATFORM - user history
+// Recently Viewed / Watch Later / Favorites, persisted server-side
+// (server/src/services/userHistoryService.js) keyed by this same
+// connected+verified wallet - real cross-device history, not
+// sessionStorage. `favoriteAddresses` is read by js/ui.js's
+// isFavorited()/toggleFavoriteStar() at render/click time.
+// ======================================
+
+let favoriteAddresses = new Set();
+
+let watchlistAddresses = new Set();
+
+async function loadUserLists(){
+
+    if(!wallet) return;
+
+    try{
+
+        const [fav, watch] = await Promise.all([
+
+            BackendAPI.getFavorites(wallet),
+
+            BackendAPI.getWatchlist(wallet)
+
+        ]);
+
+        favoriteAddresses = new Set((fav.tokens||[]).map(t=>t.token_address));
+
+        watchlistAddresses = new Set((watch.tokens||[]).map(t=>t.token_address));
+
+    }
+    catch(err){
+
+        console.error("Failed to load favorites/watchlist", err);
+
+    }
+
+}
+
+// ======================================
 // LIVE MONITORING STATE
 // ======================================
 
@@ -351,6 +391,10 @@ let currentSearchQuery = "";
 
 searchInput.addEventListener("input",()=>{
 
+    activeCustomMode = null;
+
+    document.querySelectorAll(".modeTab").forEach(btn => btn.classList.toggle("active", btn.dataset.mode === "trending"));
+
     sessionStorage.setItem("crab_search_query", searchInput.value);
 
     clearTimeout(timer);
@@ -550,6 +594,97 @@ async function loadSearch(){
 
 
 // ======================================
+// USER HISTORY MODES (Recently Viewed / Watch Later / Favorites)
+// Real, server-persisted lists (see js/backendApi.js) - not part of
+// the 30s auto-refresh cycle (that's for the live trending/search
+// feed only); each has its own tab and loads on demand.
+// ======================================
+
+let activeCustomMode = null;
+
+async function loadCustomMode(customMode, fetcher){
+
+    activeCustomMode = customMode;
+
+    setMode(customMode);
+
+    if(coinGrid.childElementCount === 0) showSkeleton();
+
+    try{
+
+        const result = await fetcher();
+
+        renderTokens(result.tokens || []);
+
+    }
+    catch(err){
+
+        if(err.name === "AbortError") return;
+
+        console.error(`Failed to load ${customMode}`, err);
+
+        showLoadError();
+
+    }
+
+}
+
+function loadRecentlyViewed(){
+
+    return loadCustomMode("recently-viewed", () => BackendAPI.getRecentlyViewed(wallet));
+
+}
+
+function loadWatchlistMode(){
+
+    return loadCustomMode("watchlist", () => BackendAPI.getWatchlist(wallet));
+
+}
+
+function loadFavoritesMode(){
+
+    return loadCustomMode("favorites", () => BackendAPI.getFavorites(wallet));
+
+}
+
+function switchMode(nextMode){
+
+    document.querySelectorAll(".modeTab").forEach(btn => {
+
+        btn.classList.toggle("active", btn.dataset.mode === nextMode);
+
+    });
+
+    if(nextMode === "trending"){
+
+        activeCustomMode = null;
+
+        loadTrending();
+
+        return;
+
+    }
+
+    if(!wallet){
+
+        activeCustomMode = null;
+
+        coinGrid.innerHTML = "<h2>Connect a wallet to use Recently Viewed, Watch Later and Favorites.</h2>";
+
+        return;
+
+    }
+
+    if(nextMode === "recently-viewed") loadRecentlyViewed();
+
+    else if(nextMode === "watchlist") loadWatchlistMode();
+
+    else if(nextMode === "favorites") loadFavoritesMode();
+
+}
+
+
+// ======================================
 // RENDER - keyed reconciliation
 // STEP 5: only refresh changed data, avoid unnecessary re-render.
 // STEP 6: race conditions are already prevented at the network
@@ -584,6 +719,16 @@ function tokenFingerprint(t){
 
 }
 
+const EMPTY_STATE_COPY = {
+
+    "recently-viewed": "No tokens viewed yet - open a token and it'll show up here, kept even after it stops trending.",
+
+    "watchlist": "Nothing on your Watch Later list yet - use the button on any token's detail panel to add one.",
+
+    "favorites": "No favorites yet - tap the ☆ on any card to save it here."
+
+};
+
 function renderTokens(tokens){
 
     if(!tokens.length){
@@ -591,6 +736,7 @@ function renderTokens(tokens){
         hideSkeleton();
 
         coinGrid.innerHTML =
+            EMPTY_STATE_COPY[mode] ? `<h2>${EMPTY_STATE_COPY[mode]}</h2>` :
             mode.startsWith("search:")
             ? "<h2>No tokens matched your search</h2>"
             : "<h2>No data yet - waiting for the next collector run</h2>";
@@ -1018,6 +1164,27 @@ async function showDetail(token){
 
         UI.loadHolderConcentration(full);
 
+        // Real per-viewer history + Smart Recall - fire-and-forget,
+        // never blocks the render above (see userHistoryService.js).
+
+        if(wallet){
+
+            BackendAPI.recordTokenView(wallet, address)
+
+                .then(result => {
+
+                    if(sessionStorage.getItem("crab_selected_coin") === address && result?.smartRecall){
+
+                        UI.showSmartRecall(result.smartRecall);
+
+                    }
+
+                })
+
+                .catch(()=>{});
+
+        }
+
     }
     catch(err){
 
@@ -1175,6 +1342,8 @@ function updateLiveMonitoring(){
 // INIT
 // ======================================
 
+loadUserLists();
+
 const savedQuery = sessionStorage.getItem("crab_search_query");
 
 if(savedQuery && savedQuery.trim().length>=2){
@@ -1199,6 +1368,8 @@ else{
 setInterval(updateLiveMonitoring,1000);
 
 setInterval(()=>{
+
+    if(activeCustomMode) return; // Recently Viewed/Watchlist/Favorites aren't time-critical - manual refresh only (re-click the tab)
 
     if(searchInput.value.trim().length>=2){
 

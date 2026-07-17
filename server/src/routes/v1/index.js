@@ -10,6 +10,8 @@ const searchRoutes = require("./search");
 const marketIntelligenceRoutes = require("./marketIntelligence");
 const gmgnOndemandRoutes = require("./gmgnOndemand");
 const validationRoutes = require("./validation");
+const walletsRoutes = require("./wallets");
+const userHistoryRoutes = require("./userHistory");
 
 const router = express.Router();
 
@@ -20,5 +22,7 @@ router.use(searchRoutes);
 router.use(marketIntelligenceRoutes);
 router.use(gmgnOndemandRoutes);
 router.use(validationRoutes);
+router.use(walletsRoutes);
+router.use(userHistoryRoutes);
 
 module.exports = router;

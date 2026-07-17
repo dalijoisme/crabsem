@@ -76,6 +76,24 @@ function insertOutcomes(outcomes){
 
 }
 
+// Real decision history for one token - what CRAB actually
+// recommended, when, and why - the backbone of the AI Trade Plan
+// (see services/tradePlanService.js). Never a forecast; every row
+// here is something the engine already decided in the past.
+
+function findRecentByToken(tokenAddress, limit = 30){
+
+    return db.prepare(`
+        SELECT recorded_at, action, stage, participant_score, market_health,
+               confidence, risk, price_at_recommendation, reasons_json
+        FROM recommendation_log
+        WHERE token_address = ?
+        ORDER BY recorded_at DESC
+        LIMIT ?
+    `).all(tokenAddress, limit);
+
+}
+
 function countLogged(){
 
     return db.prepare("SELECT COUNT(*) as count FROM recommendation_log").get().count;
@@ -109,5 +127,6 @@ module.exports = {
     insertOutcomes,
     countLogged,
     countOutcomes,
-    findOutcomesForMetrics
+    findOutcomesForMetrics,
+    findRecentByToken
 };

@@ -13,6 +13,7 @@ const db = require("./database/connection");
 const { runMigrations } = require("./database/migrate");
 const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
 const validationScheduler = require("./scheduler/validationScheduler");
+const walletScheduler = require("./scheduler/walletScheduler");
 const app = require("./app");
 
 // Production safety net: one uncaught error anywhere (a bug in a
@@ -69,6 +70,8 @@ console.log(`[startup] Scheduler running - ${gmgnScheduler.COLLECTORS.length} co
 
 const validationSchedulerHandle = validationScheduler.start();
 
+const walletSchedulerHandle = walletScheduler.start();
+
 const server = app.listen(config.PORT, () => {
 
     console.log(`[startup] API ready - CRAB AGENT server listening on port ${config.PORT}`);
@@ -90,6 +93,8 @@ function shutdown(signal){
     schedulerHandle.stop();
 
     validationSchedulerHandle.stop();
+
+    walletSchedulerHandle.stop();
 
     // Previously never closed the shared better-sqlite3 connection,
     // relying on process exit to release the file handle - in WAL

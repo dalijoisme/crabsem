@@ -31,6 +31,8 @@ const gmgnActivityFeedRepository = require("../repositories/gmgnActivityFeedRepo
 const gmgnHotSearchesRepository = require("../repositories/gmgnHotSearchesRepository");
 const gmgnLaunchpadStatsRepository = require("../repositories/gmgnLaunchpadStatsRepository");
 const gmgnOndemandCacheRepository = require("../repositories/gmgnOndemandCacheRepository");
+const walletRepository = require("../repositories/walletRepository");
+const tokenStatusService = require("./tokenStatusService");
 
 const accumulation = require("./intelligence/participant/accumulation");
 const smartMoney = require("./intelligence/participant/smartMoney");
@@ -102,7 +104,34 @@ function buildSecurityFacts(trenchesEntry, cachedSecurity){
 
 }
 
-function gatherCachedWalletStats(addresses, cacheMap){
+// CRAB's own wallets table (built from real, already-collected trade
+// history - see walletLedgerService.js/walletIntelligenceService.js)
+// now covers thousands of wallets, versus the sparse on-demand GMGN
+// cache (only ever populated by an explicit per-wallet API call,
+// historically ~10 rows total - see the data-integrity audit).
+// Normalized into the EXACT shape a real GMGN wallet_stats response
+// already has ({common:{tags}, pnl_stat:{token_num, winrate}}) so
+// walletQuality.js/walletProfitability.js - already correct, already
+// tested - need no changes at all; only the data feeding them gets
+// real, broad coverage instead of near-empty.
+
+function toGmgnStatsShape(walletRow){
+
+    const tags = [];
+
+    if((walletRow.total_trades ?? 0) < 3) tags.push("fresh_wallet");
+
+    return {
+
+        common: { tags },
+
+        pnl_stat: { token_num: walletRow.total_trades, winrate: walletRow.win_rate }
+
+    };
+
+}
+
+function gatherCachedWalletStats(addresses, ctx){
 
     const results = [];
 
@@ -114,9 +143,21 @@ function gatherCachedWalletStats(addresses, cacheMap){
 
         seen.add(addr);
 
+        const ownWallet = ctx?.walletsByAddress
+            ? (ctx.walletsByAddress.get(addr) ?? null)
+            : walletRepository.findByAddress(addr);
+
+        if(ownWallet && ownWallet.total_trades > 0 && ownWallet.win_rate != null){
+
+            results.push(toGmgnStatsShape(ownWallet));
+
+            continue;
+
+        }
+
         const key = gmgnOndemandCacheRepository.buildCacheKey("wallet_stats", { chain: "sol", walletAddress: addr });
 
-        const cached = cacheMap ? (cacheMap.get(key) ?? null) : gmgnOndemandCacheRepository.getIgnoringExpiry(key);
+        const cached = ctx?.cacheMap ? (ctx.cacheMap.get(key) ?? null) : gmgnOndemandCacheRepository.getIgnoringExpiry(key);
 
         if(cached?.data) results.push(cached.data);
 
@@ -181,11 +222,13 @@ function preloadContext(tokens){
 
     const cacheMap = gmgnOndemandCacheRepository.getManyIgnoringExpiry(cacheKeys);
 
+    const walletsByAddress = walletRepository.findManyByAddresses([...walletAddresses]);
+
     const launchpadNames = [...new Set([...trenchesByAddress.values()].map(t => t.launchpad).filter(Boolean))];
 
     const launchpadStatsByName = new Map(launchpadNames.map(name => [name, gmgnLaunchpadStatsRepository.findByLaunchpad(name)]));
 
-    return { trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, launchpadStatsByName };
+    return { trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, walletsByAddress, launchpadStatsByName };
 
 }
 
@@ -452,7 +495,7 @@ function analyzeToken(token, ctx){
 
     ].filter(Boolean).slice(0, 8);
 
-    const walletStatsList = gatherCachedWalletStats(relevantWallets, ctx?.cacheMap);
+    const walletStatsList = gatherCachedWalletStats(relevantWallets, ctx);
 
     const securityFacts = buildSecurityFacts(trenchesEntry, cachedSecurity);
 
@@ -479,6 +522,8 @@ function analyzeToken(token, ctx){
     };
 
     const lifecycle = lifecycleForAge(marketAgeSeconds);
+
+    const tokenStatus = tokenStatusService.computeTokenStatus({ token, trenchesEntry, lifecycle, marketAgeSeconds });
 
     // ---- PARTICIPANT SCORE ----
 
@@ -585,6 +630,8 @@ function analyzeToken(token, ctx){
         risk,
 
         lifecycle,
+
+        tokenStatus,
 
         freshness,
 

@@ -148,6 +148,57 @@ function lifecycleTag(lifecycle){
 // otherwise only see the more prominent action pill.
 // =====================================
 
+// signal.tokenStatus - the richer Trending/Inactive/Dead/Dumped/
+// Completed label from server/src/services/tokenStatusService.js.
+
+// AI Trade Plan (server/src/services/tradePlanService.js) - a real
+// decision timeline (from recommendation_log, never invented) plus
+// transparent, formula-driven Entry Zone/Target/Stop bands. Replaces
+// the old sessionStorage-only "History" section, which lost
+// everything on refresh and only ever saw this one browser tab.
+
+function aiTradePlanHtml(tradePlan){
+
+    const rb = tradePlan.riskBands;
+
+    const bandsHtml = rb ? `
+        <div class="tradePlanBands">
+            <div><span>Entry Zone</span><strong>${formatPrice(rb.entryZone.low)} – ${formatPrice(rb.entryZone.high)}</strong></div>
+            <div><span>Target</span><strong class="tpTarget">${formatPrice(rb.target.price)} (+${rb.target.expectedMovePct.toFixed(0)}%)</strong></div>
+            <div><span>Stop Loss</span><strong class="tpStop">${formatPrice(rb.stopLoss.price)} (-${rb.stopLoss.distancePct.toFixed(0)}%)</strong></div>
+        </div>
+        <div class="disclaimerNote">${rb.disclaimer}</div>
+    ` : "";
+
+    const timelineHtml = tradePlan.timeline.length ? tradePlan.timeline.map(ev => `
+        <div class="tradePlanStep">
+            <strong style="color:${signalColor(ev.action)}">${ev.action}</strong>
+            <span>${new Date(parseBackendTimestamp(ev.at)).toLocaleString()}</span>
+            ${ev.topReason ? `<small>${ev.topReason}</small>` : ""}
+        </div>
+    `).join("") : `<div class="disclaimerNote">Just started watching this token - the timeline will fill in as CRAB logs real decisions over time.</div>`;
+
+    return `
+        <div class="sectionTitle">AI Trade Plan</div>
+        ${bandsHtml}
+        <div class="sectionTitle">Decision Timeline</div>
+        <div class="historyTimeline tradePlanTimeline">
+            ${timelineHtml}
+        </div>
+    `;
+
+}
+
+function tokenStatusTag(status){
+
+    if(!status || status === "Trending") return "";
+
+    const cls = status.toLowerCase();
+
+    return `<span class="tokenStatusTag ${cls}">${status}</span>`;
+
+}
+
 function lifecycleLabel(lifecycle){
 
     return {
@@ -485,7 +536,113 @@ function breakdownGroupHtml(labels, breakdown){
 
 }
 
+// `favoriteAddresses` is declared in dashboard.js (loaded after this
+// file) and populated once at startup from the real backend list -
+// safe to reference here because this is only ever called at render
+// time, never at parse time.
+
+function isFavorited(tokenAddress){
+
+    return typeof favoriteAddresses !== "undefined" && favoriteAddresses.has(tokenAddress);
+
+}
+
 const UI = {
+
+    // Favorites are persisted server-side, keyed by the viewer's own
+    // connected wallet (see dashboard.js's `wallet`/`favoriteAddresses`
+    // - loaded once at startup, updated optimistically here). `wallet`
+    // and `favoriteAddresses` are declared in dashboard.js, which
+    // loads after this file - safe because this only runs later, from
+    // a click handler, never at parse time (same convention already
+    // used for formatDuration()).
+
+    toggleFavoriteStar(el, tokenAddress){
+
+        if(!wallet) return;
+
+        const nowFavorited = !el.classList.contains("active");
+
+        el.classList.toggle("active", nowFavorited);
+
+        el.textContent = nowFavorited ? "★" : "☆";
+
+        if(nowFavorited){
+
+            favoriteAddresses.add(tokenAddress);
+
+            BackendAPI.addToFavorites(wallet, tokenAddress).catch(()=>{});
+
+        }
+        else{
+
+            favoriteAddresses.delete(tokenAddress);
+
+            BackendAPI.removeFromFavorites(wallet, tokenAddress).catch(()=>{});
+
+        }
+
+    },
+
+    toggleWatchlistBtn(el, tokenAddress){
+
+        if(!wallet) return;
+
+        const nowWatching = !el.classList.contains("active");
+
+        el.classList.toggle("active", nowWatching);
+
+        el.textContent = nowWatching ? "✓ Watching" : "+ Watch Later";
+
+        if(nowWatching){
+
+            watchlistAddresses.add(tokenAddress);
+
+            BackendAPI.addToWatchlist(wallet, tokenAddress).catch(()=>{});
+
+        }
+        else{
+
+            watchlistAddresses.delete(tokenAddress);
+
+            BackendAPI.removeFromWatchlist(wallet, tokenAddress).catch(()=>{});
+
+        }
+
+    },
+
+    // Smart Recall - "what changed since you last looked at this",
+    // computed server-side from a REAL previous view (see
+    // server/src/services/userHistoryService.js) - never shown if
+    // this is the viewer's first time opening the token.
+
+    showSmartRecall(recall){
+
+        const el = document.getElementById("smartRecallBanner");
+
+        if(!el || !recall) return;
+
+        const parts = [];
+
+        if(recall.priceChangePct != null){
+
+            const sign = recall.priceChangePct >= 0 ? "+" : "";
+
+            parts.push(`Price ${sign}${recall.priceChangePct.toFixed(1)}%`);
+
+        }
+
+        if(recall.actionChanged) parts.push(`${recall.previousAction} → ${recall.currentAction}`);
+
+        if(recall.participantScoreDelta) parts.push(`Participant Score ${recall.participantScoreDelta>0?"+":""}${recall.participantScoreDelta}`);
+
+        if(recall.confidenceDelta) parts.push(`Confidence ${recall.confidenceDelta>0?"+":""}${recall.confidenceDelta}%`);
+
+        if(!parts.length) return;
+
+        el.innerHTML = `<div class="smartRecallBanner">👁 Since your last view (${formatDuration(Date.now()-parseBackendTimestamp(recall.previousViewedAt))} ago): ${parts.join(" · ")}</div>`;
+
+    },
 
     // =====================================
     // CARD
@@ -531,6 +688,8 @@ const UI = {
 
         ${lifecycleTag(signal.lifecycle)}
 
+        <button class="watchStar${isFavorited(token.token_address)?" active":""}" data-address="${token.token_address}" title="Favorite" onclick="event.stopPropagation(); UI.toggleFavoriteStar(this, '${token.token_address}')">${isFavorited(token.token_address)?"★":"☆"}</button>
+
         <div class="coinHeader">
 
             <img src="${logo}" class="coinLogo">
@@ -548,6 +707,12 @@ const UI = {
                 ${changePct!=null ? changePct.toFixed(2) : "0.00"}%
 
             </span>
+
+        </div>
+
+        <div class="coinMicroStats">
+
+            Vol <strong>$${format(token.volume_1h)}</strong> · Liq <strong>$${format(token.liquidity)}</strong> · MC <strong>${marketCapLabelValue(token)}</strong>
 
         </div>
 
@@ -744,19 +909,28 @@ const UI = {
 
             </div>
 
+            <button class="detailWatchBtn${watchlistAddresses.has(token.token_address)?" active":""}" onclick="UI.toggleWatchlistBtn(this, '${token.token_address}')">${watchlistAddresses.has(token.token_address)?"✓ Watching":"+ Watch Later"}</button>
+
         </div>
 
-        <div style="
-            display:inline-block;
-            background:${color};
-            color:white;
-            padding:8px 18px;
-            border-radius:999px;
-            font-weight:700;
-            margin:14px 0 4px 0;
-        ">
+        <div id="smartRecallBanner"></div>
 
-            ${signal.action}
+        <div style="display:flex; align-items:center; gap:10px; margin:14px 0 4px 0; flex-wrap:wrap;">
+
+            <div style="
+                display:inline-block;
+                background:${color};
+                color:white;
+                padding:8px 18px;
+                border-radius:999px;
+                font-weight:700;
+            ">
+
+                ${signal.action}
+
+            </div>
+
+            ${tokenStatusTag(signal.tokenStatus)}
 
         </div>
 
@@ -1002,6 +1176,8 @@ const UI = {
 
         </div>
 
+        ${token.tradePlan ? aiTradePlanHtml(token.tradePlan) : `
+
         <div class="sectionTitle">History</div>
 
         ${justStartedWatching ? `<div class="disclaimerNote">Just started watching this token - the picture will get clearer as more data comes in.</div>` : ""}
@@ -1011,6 +1187,8 @@ const UI = {
             ${historyHtml}
 
         </div>
+
+        `}
 
         <div class="detailActions" style="
     display:flex;

@@ -5,6 +5,7 @@
 
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const intelligenceEngine = require("./intelligenceEngine");
+const tradePlanService = require("./tradePlanService");
 
 // Attaches a real, freshly-computed signal to a token row. Computed
 // at read time (not stored) so it never goes stale against an old
@@ -70,11 +71,20 @@ function listTokens({ page, limit, sort, direction, search }){
 
 }
 
+// Only the single-token detail view gets a trade plan (real decision
+// history + risk bands) - list/trending/search stay lean since
+// building the decision timeline is a per-token query not worth
+// paying for across 50+ rows at once.
+
 function getTokenByAddress(address){
 
     const token = gmgnTokenRepository.getTokenByAddress(address);
 
-    return token ? withSignal(token) : null;
+    if(!token) return null;
+
+    const withSig = withSignal(token);
+
+    return { ...withSig, tradePlan: tradePlanService.getTradePlan(token, withSig.signal) };
 
 }
 

@@ -116,6 +116,25 @@ const BackendAPI = (function(){
 
     }
 
+    // Fire-and-forget mutation (POST/DELETE) - not part of the
+    // channel/abort de-dup above, since a watchlist toggle or a view
+    // record shouldn't be cancelled by an unrelated GET reusing the
+    // same channel name. Failures are real errors (thrown), but
+    // callers that don't care about the exact response (recordView)
+    // can just ignore the rejection.
+
+    async function mutate(path, method){
+
+        const res = await fetch(`${BASE_URL}${path}`, { method });
+
+        const json = await res.json().catch(() => null);
+
+        if(!json || !json.success) throw new Error(json?.error || `Backend request failed (HTTP ${res.status})`);
+
+        return json.data;
+
+    }
+
     return {
 
         // GET /health - real backend/DB/scheduler status, used for
@@ -165,6 +184,83 @@ const BackendAPI = (function(){
         getToken(address){
 
             return request("detail", `/token/${encodeURIComponent(address)}`);
+
+        },
+
+        // ---- Wallet Intelligence ----
+
+        searchWallets(params = {}){
+
+            const qs = new URLSearchParams();
+
+            Object.entries(params).forEach(([k,v]) => { if(v !== undefined && v !== "") qs.set(k, v); });
+
+            return request("walletSearch", `/wallets/search?${qs.toString()}`);
+
+        },
+
+        getWalletLeaderboard(limit = 50){
+
+            return request("walletLeaderboard", `/wallets/leaderboard?limit=${encodeURIComponent(limit)}`);
+
+        },
+
+        getWalletProfile(address){
+
+            return request("walletProfile", `/wallets/${encodeURIComponent(address)}`);
+
+        },
+
+        // ---- User History (Recently Viewed / Watch Later / Favorites) ----
+        // `wallet` here is the CRAB dashboard user's own connected+
+        // verified wallet (sessionStorage walletAddress) - a different
+        // concept from a token's smart-money wallets above.
+
+        recordTokenView(wallet, tokenAddress){
+
+            return mutate(`/users/${encodeURIComponent(wallet)}/views/${encodeURIComponent(tokenAddress)}`, "POST");
+
+        },
+
+        getRecentlyViewed(wallet){
+
+            return request("recentlyViewed", `/users/${encodeURIComponent(wallet)}/recently-viewed`);
+
+        },
+
+        getWatchlist(wallet){
+
+            return request("watchlist", `/users/${encodeURIComponent(wallet)}/watchlist`);
+
+        },
+
+        addToWatchlist(wallet, tokenAddress){
+
+            return mutate(`/users/${encodeURIComponent(wallet)}/watchlist/${encodeURIComponent(tokenAddress)}`, "POST");
+
+        },
+
+        removeFromWatchlist(wallet, tokenAddress){
+
+            return mutate(`/users/${encodeURIComponent(wallet)}/watchlist/${encodeURIComponent(tokenAddress)}`, "DELETE");
+
+        },
+
+        getFavorites(wallet){
+
+            return request("favorites", `/users/${encodeURIComponent(wallet)}/favorites`);
+
+        },
+
+        addToFavorites(wallet, tokenAddress){
+
+            return mutate(`/users/${encodeURIComponent(wallet)}/favorites/${encodeURIComponent(tokenAddress)}`, "POST");
+
+        },
+
+        removeFromFavorites(wallet, tokenAddress){
+
+            return mutate(`/users/${encodeURIComponent(wallet)}/favorites/${encodeURIComponent(tokenAddress)}`, "DELETE");
 
         }
 

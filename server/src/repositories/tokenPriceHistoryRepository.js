@@ -63,4 +63,20 @@ function pruneOlderThan(maxAgeHours){
 
 }
 
-module.exports = { insertMany, findPriceAtOrAfter, countAll, pruneOlderThan };
+// Real historical peak price for this token, across whatever price
+// history has been collected so far (bounded by retentionConfig's
+// tokenPriceHistoryMaxAgeHours - see the token status service, which
+// uses this to detect a real price collapse from a real observed
+// high, not a guess).
+
+function findPeakPrice(tokenAddress){
+
+    const row = db.prepare(`
+        SELECT MAX(price) as peak FROM token_price_history WHERE token_address = ?
+    `).get(tokenAddress);
+
+    return row?.peak ?? null;
+
+}
+
+module.exports = { insertMany, findPriceAtOrAfter, countAll, pruneOlderThan, findPeakPrice };

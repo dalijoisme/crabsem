@@ -50,12 +50,15 @@ function safeParse(json){
 
 // =====================================
 // SUMMARY (Part 4/5 - overall headline metrics, optionally filtered
-// to one recommendation tier, e.g. STRONG BUY)
+// to one recommendation tier, e.g. STRONG BUY, AND/OR a real date
+// range - Admin Date Filter, UX sprint Part 2. `from`/`to` are real
+// "YYYY-MM-DD" strings compared against the immutable prediction_time
+// column; omitting both means "All Time", exactly as before.)
 // =====================================
 
-function buildSummary({ recommendation } = {}){
+function buildSummary({ recommendation, from, to } = {}){
 
-    const statusCounts = predictionHistoryRepository.countsByStatus({ recommendation });
+    const statusCounts = predictionHistoryRepository.countsByStatus({ recommendation, from, to });
 
     const countByStatus = Object.fromEntries(statusCounts.map(r => [r.status, r.count]));
 
@@ -71,7 +74,7 @@ function buildSummary({ recommendation } = {}){
 
     const closedCount = tpCount + slCount + expiredCount;
 
-    const closed = predictionHistoryRepository.findClosed({ recommendation });
+    const closed = predictionHistoryRepository.findClosed({ recommendation, from, to });
 
     const rois = closed.map(p => p.current_roi_pct).filter(v => v != null);
 
@@ -125,27 +128,27 @@ function buildSummary({ recommendation } = {}){
 
 }
 
-function getSummary(){
+function getSummary({ from, to } = {}){
 
-    return buildSummary({});
+    return buildSummary({ from, to });
 
 }
 
-function getStrongBuySummary(){
+function getStrongBuySummary({ from, to } = {}){
 
-    return buildSummary({ recommendation: "STRONG BUY" });
+    return buildSummary({ recommendation: "STRONG BUY", from, to });
 
 }
 
 // =====================================
-// HISTORY (Part 5 - raw evidence list)
+// HISTORY (Part 5 - raw evidence list, date-filterable)
 // =====================================
 
-function getHistory({ status, recommendation, limit = 50, offset = 0 } = {}){
+function getHistory({ status, recommendation, from, to, limit = 50, offset = 0 } = {}){
 
-    const rows = predictionHistoryRepository.findMany({ status, recommendation, limit, offset });
+    const rows = predictionHistoryRepository.findMany({ status, recommendation, from, to, limit, offset });
 
-    const total = predictionHistoryRepository.countMany({ status, recommendation });
+    const total = predictionHistoryRepository.countMany({ status, recommendation, from, to });
 
     return {
 
@@ -157,14 +160,65 @@ function getHistory({ status, recommendation, limit = 50, offset = 0 } = {}){
 
 }
 
+// Real per-recommendation-tier accuracy (Part 2's "Accuracy") - win
+// rate within each of the engine's 4 real action tiers. This engine
+// has no "SELL" tier; AVOID's own "win" is inverted (closing anywhere
+// but TP_HIT is the expected/correct outcome for a token the engine
+// said to avoid), so AVOID is reported as a distinct row, not folded
+// into the same TP-rate definition as the BUY-tier rows.
+
+function accuracyByTier(closed){
+
+    const tiers = ["STRONG BUY", "BUY", "HOLD", "AVOID"];
+
+    return tiers.map(tier => {
+
+        const rows = closed.filter(p => p.recommendation === tier);
+
+        if(!rows.length) return { recommendation: tier, sampleSize: 0, accuracy: null };
+
+        const correct = tier === "AVOID"
+
+            ? rows.filter(p => p.status !== "TP_HIT").length
+
+            : rows.filter(p => p.status === "TP_HIT").length;
+
+        return { recommendation: tier, sampleSize: rows.length, accuracy: correct / rows.length };
+
+    });
+
+}
+
+// Real False BUY / Missed BUY counts (Part 2) over the NEW
+// prediction_history framework - distinct from Sprint 2's
+// recommendation_log-based confusionCounts (a different table, a
+// different definition of "prediction"). False BUY: engine said
+// STRONG BUY/BUY and it closed anything but TP_HIT. Missed BUY: engine
+// said HOLD/AVOID and the token would have hit its own real target
+// anyway (a real recorded TP_HIT on a non-BUY-tier row - this only
+// happens because HOLD-tier tokens still get a real trade plan/
+// prediction when the readiness gate passes; AVOID tokens never do,
+// so AVOID can never appear here).
+
+function falseAndMissedBuy(closed){
+
+    const falseBuy = closed.filter(p => (p.recommendation === "STRONG BUY" || p.recommendation === "BUY") && p.status !== "TP_HIT").length;
+
+    const missedBuy = closed.filter(p => p.recommendation === "HOLD" && p.status === "TP_HIT").length;
+
+    return { falseBuyCount: falseBuy, missedBuyCount: missedBuy };
+
+}
+
 // =====================================
 // STATISTICS (Part 4 detail + Part 7 confidence calibration + Part 6
-// failure-reason breakdown)
+// failure-reason breakdown + Part 2's Accuracy/False BUY/Missed BUY -
+// all date-filterable)
 // =====================================
 
-function getStatistics(){
+function getStatistics({ from, to } = {}){
 
-    const closed = predictionHistoryRepository.findClosed({});
+    const closed = predictionHistoryRepository.findClosed({ from, to });
 
     const confidenceBuckets = config.confidenceBuckets.map(bucket => {
 
@@ -200,7 +254,11 @@ function getStatistics(){
 
         failureAnalysis: Object.entries(failureCounts).map(([reason, count]) => ({ reason, count })),
 
-        overall: buildSummary({})
+        accuracyByTier: accuracyByTier(closed),
+
+        ...falseAndMissedBuy(closed),
+
+        overall: buildSummary({ from, to })
 
     };
 

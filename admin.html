@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=3">
+<link rel="stylesheet" href="css/admin.css?v=4">
 
 </head>
 
@@ -211,9 +211,39 @@ Loading real data from the backend...
 
 <section class="adminSection" id="secPrediction">
 
-<h3>Prediction</h3>
+<h3>Prediction Validation</h3>
 
-<p class="adminNote">Real outcomes from recommendation_log / recommendation_outcomes, evaluated against actual observed price history. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier, so none is shown here.</p>
+<p class="adminNote">Real outcomes from prediction_history - the immutable, TP/SL/Expired-tracked "first recommendation" record per token. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier.</p>
+
+<div class="adminDateFilter">
+
+<div class="adminDateFilterRow">
+
+<label>Start Date <input type="date" id="predFilterFrom"></label>
+<label>End Date <input type="date" id="predFilterTo"></label>
+<button id="predFilterApplyBtn" class="adminActionBtn">Apply</button>
+
+</div>
+
+<div class="adminDateFilterQuick">
+
+<button class="adminActionBtn" data-quick="today">Today</button>
+<button class="adminActionBtn" data-quick="yesterday">Yesterday</button>
+<button class="adminActionBtn" data-quick="7d">Last 7 Days</button>
+<button class="adminActionBtn" data-quick="30d">Last 30 Days</button>
+<button class="adminActionBtn" data-quick="all">All Time</button>
+
+</div>
+
+<div id="predFilterActiveLabel" class="adminNote">Showing: All Time</div>
+
+</div>
+
+<div id="predValidationSummary"></div>
+
+<h4 style="margin-top:22px;">Legacy Recommendation Log Summary (Sprint 2, unfiltered)</h4>
+
+<p class="adminNote">Older, separate framework (recommendation_log/recommendation_outcomes) - logs every 5-minute tick rather than a single immutable first prediction. Kept for reference; does not respect the date filter above.</p>
 
 <div id="predictionSummary"></div>
 
@@ -225,6 +255,8 @@ Loading real data from the backend...
 
 <h3>Admin Analytics</h3>
 
+<p class="adminNote">Wallet Rankings/ROI below respect the same date filter (filtered on each wallet's own real last_seen field).</p>
+
 <div id="analyticsGroups"></div>
 
 </section>
@@ -234,7 +266,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=3"></script>
+<script src="js/admin.js?v=4"></script>
 
 </body>
 

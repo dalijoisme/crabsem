@@ -152,7 +152,16 @@ const SORTABLE_COLUMNS = [
     "total_trades", "last_seen", "best_roi_pct"
 ];
 
-function search({ minWinRate, minRoi, minTrades, label, limit = 50, sortColumn = "score", direction = "DESC" }){
+// `from`/`to` (Admin Date Filter, UX sprint Part 2) filter on the
+// wallet's own real last_seen field - the closest real, honest proxy
+// this table has for "was this wallet active in this date range".
+// This is NOT a true point-in-time historical ranking (that would
+// need wallet_score_history's own computed_at series, a bigger change
+// than this sprint scopes to) - it only includes wallets whose real
+// last observed activity falls in range, disclosed as an
+// approximation, not overclaimed as exact historical replay.
+
+function search({ minWinRate, minRoi, minTrades, label, from, to, limit = 50, sortColumn = "score", direction = "DESC" }){
 
     if(!SORTABLE_COLUMNS.includes(sortColumn)) sortColumn = "score";
 
@@ -169,6 +178,10 @@ function search({ minWinRate, minRoi, minTrades, label, limit = 50, sortColumn =
     if(minTrades != null){ clauses.push("total_trades >= @minTrades"); params.minTrades = minTrades; }
 
     if(label){ clauses.push("primary_label = @label"); params.label = label; }
+
+    if(from){ clauses.push("datetime(last_seen) >= datetime(@from)"); params.from = `${from} 00:00:00`; }
+
+    if(to){ clauses.push("datetime(last_seen) <= datetime(@to)"); params.to = `${to} 23:59:59`; }
 
     const sql = `
         SELECT * FROM wallets

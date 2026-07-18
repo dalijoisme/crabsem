@@ -248,6 +248,82 @@ function fmtDuration(seconds){
 
 }
 
+// =====================================
+// ADMIN DATE FILTER (UX sprint, Part 2) - applies to Prediction
+// Validation summary/strong-buy/statistics AND Wallet Rankings/ROI in
+// Analytics. `from`/`to` are real "YYYY-MM-DD" strings the backend
+// compares against real timestamps (prediction_time / last_seen) -
+// undefined means "All Time", never a fabricated default range.
+// =====================================
+
+let predictionDateFilter = { from: undefined, to: undefined };
+
+function toDateStr(d){
+
+    return d.toISOString().slice(0, 10);
+
+}
+
+function daysAgoUTC(n){
+
+    const d = new Date();
+
+    d.setUTCHours(0, 0, 0, 0);
+
+    d.setUTCDate(d.getUTCDate() - n);
+
+    return d;
+
+}
+
+function computeQuickRange(key){
+
+    const today = daysAgoUTC(0);
+
+    if(key === "today") return { from: toDateStr(today), to: toDateStr(today) };
+
+    if(key === "yesterday"){ const y = daysAgoUTC(1); return { from: toDateStr(y), to: toDateStr(y) }; }
+
+    if(key === "7d") return { from: toDateStr(daysAgoUTC(6)), to: toDateStr(today) };
+
+    if(key === "30d") return { from: toDateStr(daysAgoUTC(29)), to: toDateStr(today) };
+
+    return { from: undefined, to: undefined }; // "all"
+
+}
+
+// Builds a "?a=b&c=d" query string merging any endpoint-specific
+// params with the current date filter - the one place any admin.js
+// call site adds from/to, so no fetch can accidentally forget it.
+
+function buildFilterParams(extra = {}){
+
+    const params = new URLSearchParams(extra);
+
+    if(predictionDateFilter.from) params.set("from", predictionDateFilter.from);
+
+    if(predictionDateFilter.to) params.set("to", predictionDateFilter.to);
+
+    const qs = params.toString();
+
+    return qs ? `?${qs}` : "";
+
+}
+
+function updateActiveFilterLabel(){
+
+    const label = document.getElementById("predFilterActiveLabel");
+
+    if(!label) return;
+
+    label.textContent = (predictionDateFilter.from || predictionDateFilter.to)
+
+        ? `Showing: ${predictionDateFilter.from || "…"} to ${predictionDateFilter.to || "…"}`
+
+        : "Showing: All Time";
+
+}
+
 function dexscreenerLink(address){
 
     return `https://dexscreener.com/solana/${address}`;
@@ -266,11 +342,34 @@ function gmgnLink(address){
 // MAIN LOAD CYCLE
 // =====================================
 
+// ROOT CAUSE FIX (UX sprint): every previous call to loadAll() -
+// whether the manual "Refresh Now" click or (once Part 2's filter
+// controls exist) a filter change - hid the ENTIRE adminContent block
+// and showed the full-page loading message, every single time. That
+// collapses the page to a few lines of text and back, which is
+// exactly the kind of full-DOM-teardown that forces the browser to
+// reset scroll position - the admin.html half of this sprint's
+// reported bug. The loading screen now only appears on the very
+// first load (nothing to preserve yet); every refresh after that
+// updates the already-visible sections in place, with scrollY
+// captured/restored around it as a defensive safeguard, the same
+// pattern used in js/dashboard.js's reconcileTokens() fix.
+
+let adminFirstLoadDone = false;
+
 async function loadAll(){
 
-    adminLoading.classList.remove("hidden");
+    const isFirstLoad = !adminFirstLoadDone;
 
-    adminContent.classList.add("hidden");
+    if(isFirstLoad){
+
+        adminLoading.classList.remove("hidden");
+
+        adminContent.classList.add("hidden");
+
+    }
+
+    const scrollY = window.scrollY;
 
     try{
 
@@ -298,7 +397,7 @@ async function loadAll(){
 
         renderPredictions(predictions);
 
-        renderAnalytics(predictions);
+        await loadPredictionAndAnalytics();
 
         adminLiveDot.className = "live-dot " + (system.engineStatus === "ok" ? "ok" : "limited");
 
@@ -312,9 +411,13 @@ async function loadAll(){
     }
     finally{
 
+        adminFirstLoadDone = true;
+
         adminLoading.classList.add("hidden");
 
         adminContent.classList.remove("hidden");
+
+        if(window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 
     }
 
@@ -672,6 +775,170 @@ function renderEngineConfig(c){
 // PREDICTION
 // =====================================
 
+// =====================================
+// PREDICTION VALIDATION (prediction_history-based, date-filterable -
+// UX sprint Part 2)
+// =====================================
+
+function renderPredValidationSummary(summary, strongBuy, statistics){
+
+    const el = document.getElementById("predValidationSummary");
+
+    const summaryCards = `
+        <div class="adminGrid4">
+            <div class="adminStat"><span>Prediction Count</span><strong>${fmtNum(summary.predictionCount)}</strong></div>
+            <div class="adminStat"><span>Win Rate</span><strong>${summary.winRate!=null?fmtPct(summary.winRate):"n/a"}</strong></div>
+            <div class="adminStat"><span>Average ROI</span><strong>${summary.averageRoiPct!=null?summary.averageRoiPct.toFixed(2)+"%":"-"}</strong></div>
+            <div class="adminStat"><span>Median ROI</span><strong>${summary.medianRoiPct!=null?summary.medianRoiPct.toFixed(2)+"%":"-"}</strong></div>
+            <div class="adminStat"><span>TP Count</span><strong>${fmtNum(summary.tpCount)}</strong></div>
+            <div class="adminStat"><span>SL Count</span><strong>${fmtNum(summary.slCount)}</strong></div>
+            <div class="adminStat"><span>Expired Count</span><strong>${fmtNum(summary.expiredCount)}</strong></div>
+            <div class="adminStat"><span>Open Count</span><strong>${fmtNum(summary.openCount)}</strong></div>
+            <div class="adminStat"><span>Largest Winner</span><strong>${summary.largestWinnerPct!=null?summary.largestWinnerPct.toFixed(1)+"%":"-"}</strong></div>
+            <div class="adminStat"><span>Largest Loser</span><strong>${summary.largestLoserPct!=null?summary.largestLoserPct.toFixed(1)+"%":"-"}</strong></div>
+            <div class="adminStat"><span>Avg Time to TP</span><strong>${fmtDuration(summary.averageTimeToTpSeconds)}</strong></div>
+            <div class="adminStat"><span>Avg Time to SL</span><strong>${fmtDuration(summary.averageTimeToSlSeconds)}</strong></div>
+        </div>
+    `;
+
+    const strongBuyCards = `
+        <h4 style="margin-top:18px;">Strong Buy Only</h4>
+        <div class="adminGrid4">
+            <div class="adminStat"><span>Prediction Count</span><strong>${fmtNum(strongBuy.predictionCount)}</strong></div>
+            <div class="adminStat"><span>Win Rate</span><strong>${strongBuy.winRate!=null?fmtPct(strongBuy.winRate):"n/a"}</strong></div>
+            <div class="adminStat"><span>Average ROI</span><strong>${strongBuy.averageRoiPct!=null?strongBuy.averageRoiPct.toFixed(2)+"%":"-"}</strong></div>
+            <div class="adminStat"><span>TP / SL / Expired</span><strong>${fmtNum(strongBuy.tpCount)} / ${fmtNum(strongBuy.slCount)} / ${fmtNum(strongBuy.expiredCount)}</strong></div>
+        </div>
+    `;
+
+    const falseMissedCard = `
+        <h4 style="margin-top:18px;">False BUY / Missed BUY / Accuracy</h4>
+        <div class="adminGrid4">
+            <div class="adminStat"><span>False BUY</span><strong>${fmtNum(statistics.falseBuyCount)}</strong></div>
+            <div class="adminStat"><span>Missed BUY</span><strong>${fmtNum(statistics.missedBuyCount)}</strong></div>
+        </div>
+        <div class="adminTableWrap" style="margin-top:12px;">
+            <table class="adminTable">
+                <caption>Accuracy by Recommendation Tier</caption>
+                <thead><tr><th>Tier</th><th>Sample</th><th>Accuracy</th></tr></thead>
+                <tbody>
+                ${statistics.accuracyByTier.map(t=>`<tr><td>${t.recommendation}</td><td>${fmtNum(t.sampleSize)}</td><td>${t.accuracy!=null?fmtPct(t.accuracy):"n/a"}</td></tr>`).join("")}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    const confidenceTable = `
+        <div class="adminTableWrap" style="margin-top:12px;">
+            <table class="adminTable">
+                <caption>Confidence Calibration</caption>
+                <thead><tr><th>Confidence Band</th><th>Predictions</th><th>Win Rate</th><th>Avg ROI</th></tr></thead>
+                <tbody>
+                ${statistics.confidenceCalibration.map(b=>`<tr><td>${b.label}</td><td>${fmtNum(b.predictionCount)}</td><td>${b.winRate!=null?fmtPct(b.winRate):"n/a"}</td><td>${b.averageRoiPct!=null?b.averageRoiPct.toFixed(2)+"%":"-"}</td></tr>`).join("")}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    const failureTable = `
+        <div class="adminTableWrap" style="margin-top:12px;">
+            <table class="adminTable">
+                <caption>Failure Analysis (why TP was not reached)</caption>
+                <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+                <tbody>
+                ${statistics.failureAnalysis.length ? statistics.failureAnalysis.map(f=>`<tr><td>${f.reason}</td><td>${fmtNum(f.count)}</td></tr>`).join("") : '<tr><td colspan="2">No closed non-TP predictions in this range yet.</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    el.innerHTML = summaryCards + strongBuyCards + falseMissedCard + confidenceTable + failureTable;
+
+}
+
+// Re-fetches ONLY the Prediction Validation summary/strong-buy/
+// statistics and the Analytics wallet rankings - never the whole
+// page - with the current date filter applied to every one of them.
+// This is what both the Apply button and the Quick buttons call.
+
+async function loadPredictionAndAnalytics(){
+
+    updateActiveFilterLabel();
+
+    const scrollY = window.scrollY;
+
+    try{
+
+        const [summary, strongBuy, statistics] = await Promise.all([
+
+            publicFetch(`/validation/predictions/summary${buildFilterParams()}`),
+
+            publicFetch(`/validation/predictions/strong-buy${buildFilterParams()}`),
+
+            publicFetch(`/validation/predictions/statistics${buildFilterParams()}`)
+
+        ]);
+
+        renderPredValidationSummary(summary, strongBuy, statistics);
+
+    }
+    catch(e){
+
+        document.getElementById("predValidationSummary").innerHTML = `<p class="adminNote">Failed to load: ${e.message}</p>`;
+
+    }
+
+    const legacyPredictions = await adminFetch("/admin/predictions/summary").catch(() => ({ horizons: [] }));
+
+    await renderAnalytics(legacyPredictions);
+
+    if(window.scrollY !== scrollY) window.scrollTo(0, scrollY);
+
+}
+
+// Filter UI wiring - quick buttons compute a real UTC date range and
+// mirror it into the Start/End inputs; the Apply button reads
+// whatever is currently in those two inputs (so manually-typed dates
+// work too, not just the quick presets).
+
+document.getElementById("predFilterApplyBtn").onclick = () => {
+
+    predictionDateFilter = {
+
+        from: document.getElementById("predFilterFrom").value || undefined,
+
+        to: document.getElementById("predFilterTo").value || undefined
+
+    };
+
+    document.querySelectorAll(".adminDateFilterQuick .adminActionBtn").forEach(b => b.classList.remove("active"));
+
+    loadPredictionAndAnalytics();
+
+};
+
+document.querySelectorAll(".adminDateFilterQuick .adminActionBtn[data-quick]").forEach(btn => {
+
+    btn.onclick = () => {
+
+        const range = computeQuickRange(btn.dataset.quick);
+
+        predictionDateFilter = range;
+
+        document.getElementById("predFilterFrom").value = range.from || "";
+
+        document.getElementById("predFilterTo").value = range.to || "";
+
+        document.querySelectorAll(".adminDateFilterQuick .adminActionBtn").forEach(b => b.classList.remove("active"));
+
+        btn.classList.add("active");
+
+        loadPredictionAndAnalytics();
+
+    };
+
+});
+
 function renderPredictions(p){
 
     const summaryRows = `
@@ -728,11 +995,11 @@ function renderPredictions(p){
 // ADMIN ANALYTICS
 // =====================================
 
-async function walletTable(title, endpoint){
+async function walletTable(title, path, params = {}){
 
     try{
 
-        const data = await publicFetch(endpoint);
+        const data = await publicFetch(`${path}${buildFilterParams(params)}`);
 
         const wallets = data.wallets || [];
 
@@ -774,25 +1041,32 @@ async function renderAnalytics(predictions){
 
     const el = document.getElementById("analyticsGroups");
 
-    el.innerHTML = `<p class="adminNote">Loading leaderboards...</p>`;
+    // Only show the "loading" placeholder on the very first render -
+    // a filter change (or any later re-render) keeps the previous
+    // tables visible until the new ones are ready, then swaps once,
+    // instead of blanking the section on every date-filter click.
+
+    if(!el.dataset.loadedOnce) el.innerHTML = `<p class="adminNote">Loading leaderboards...</p>`;
 
     const [topWallet, topRoi, topWinRate, topTrader, topSmartMoney, topKol, topSniper] = await Promise.all([
 
-        walletTable("Top Wallet (by Score)", "/wallets/leaderboard?sort=score&limit=10"),
+        walletTable("Top Wallet (by Score)", "/wallets/leaderboard", { sort: "score", limit: 10 }),
 
-        walletTable("Top ROI", "/wallets/leaderboard?sort=avg_roi_pct&limit=10"),
+        walletTable("Top ROI", "/wallets/leaderboard", { sort: "avg_roi_pct", limit: 10 }),
 
-        walletTable("Top Win Rate", "/wallets/leaderboard?sort=win_rate&limit=10"),
+        walletTable("Top Win Rate", "/wallets/leaderboard", { sort: "win_rate", limit: 10 }),
 
-        walletTable("Top Trader", "/wallets/search?label=Trader&limit=10"),
+        walletTable("Top Trader", "/wallets/search", { label: "Trader", limit: 10 }),
 
-        walletTable("Top Smart Money", "/wallets/search?label=Smart%20Money&limit=10"),
+        walletTable("Top Smart Money", "/wallets/search", { label: "Smart Money", limit: 10 }),
 
-        walletTable("Top KOL", "/wallets/search?label=KOL%20Trader&limit=10"),
+        walletTable("Top KOL", "/wallets/search", { label: "KOL Trader", limit: 10 }),
 
-        walletTable("Top Sniper", "/wallets/search?label=Sniper&limit=10")
+        walletTable("Top Sniper", "/wallets/search", { label: "Sniper", limit: 10 })
 
     ]);
+
+    el.dataset.loadedOnce = "1";
 
     // "Top Prediction" - there is no separate leaderboard entity for
     // this (a recommendation is not a wallet); the honest, real

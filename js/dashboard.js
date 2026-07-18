@@ -726,12 +726,29 @@ function setMode(nextMode){
 
 }
 
+// ROOT CAUSE FIX (UX sprint): `updated_at` used to be part of this
+// fingerprint. The backend's 30s collector tick bumps updated_at on
+// EVERY tracked token on EVERY tick, whether or not any real value
+// on that token actually moved (see gmgnTokenRepository.js's upsert -
+// updated_at = CURRENT_TIMESTAMP unconditionally). That meant nearly
+// every card compared as "changed" on nearly every 30s refresh, so
+// reconcileTokens() below was replacing almost the entire grid with
+// brand-new DOM nodes (including brand-new <img> elements) every
+// cycle - the real mechanism behind the page visibly disturbing
+// itself every 30 seconds. Only fields that actually affect what
+// renderCard() draws belong here - real market data plus the signal
+// fields (action/score/confidence/risk/stage/lifecycle), which the
+// old fingerprint never even looked at (a real token could go from
+// HOLD to STRONG BUY with unchanged raw price and never re-render).
+
 function tokenFingerprint(t){
+
+    const s = t.signal || {};
 
     return [
         t.price, t.market_cap, t.liquidity, t.volume_1h,
-        t.holders, t.price_change_1h, t.price_change_5m, t.fdv,
-        t.updated_at
+        t.price_change_1h, t.price_change_5m, t.fdv,
+        s.action, s.participantScore, s.confidence, s.risk, s.stage, s.lifecycle
     ].join("|");
 
 }
@@ -786,13 +803,24 @@ function renderTokens(tokens){
 
         // First render for this mode - keep the original batched,
         // animated fill-in behaviour (unchanged animation/timing).
+        // Nothing is on screen to preserve scroll position against yet.
 
         renderTokensIncrementally(tokens);
 
     }
     else{
 
+        // Defensive safeguard (UX sprint) on top of the real fixes
+        // above: a background refresh must never move the viewport.
+        // reconcileTokens() is fully synchronous, so if anything about
+        // it (or a browser-specific layout quirk) still shifts
+        // scrollY, this puts it back before the user perceives it.
+
+        const scrollY = window.scrollY;
+
         reconcileTokens(tokens);
+
+        if(window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 
     }
 
@@ -871,9 +899,24 @@ function renderTokensIncrementally(tokens){
 // appended. Tokens no longer present are removed.
 // ======================================
 
+// ROOT CAUSE FIX (UX sprint), part 2: this used to always
+// coinGrid.appendChild() a brand-new token at the END regardless of
+// its real rank, and always replaceWith() a changed token AT ITS OLD
+// POSITION regardless of its new rank - so the DOM's visual order
+// could drift completely away from the real trending order over
+// time, without ever being corrected. This is the standard keyed-
+// list reconciliation walk: `cursor` tracks the next DOM node that's
+// expected to match the next item in the real, sorted `tokens` array;
+// a node already in the right place just advances the cursor (zero
+// DOM cost), anything else is moved there with one insertBefore (cheap
+// re-parent, not a new node) - so the grid's visual order always
+// matches real rank order, using the minimum number of DOM operations.
+
 function reconcileTokens(tokens){
 
     const seen = new Set();
+
+    let cursor = coinGrid.firstChild;
 
     tokens.forEach((token, i)=>{
 
@@ -885,29 +928,40 @@ function reconcileTokens(tokens){
 
         const existing = renderedTokens.get(address);
 
+        let el;
+
         if(!existing){
 
-            const card = UI.renderCard(token, rank);
+            el = UI.renderCard(token, rank);
 
-            coinGrid.appendChild(card);
+            renderedTokens.set(address, { token, el, rank });
 
-            renderedTokens.set(address, { token, el: card, rank });
+        }
+        else if(existing.rank !== rank || tokenFingerprint(existing.token) !== tokenFingerprint(token)){
 
-            return;
+            el = UI.renderCard(token, rank);
+
+            existing.el.replaceWith(el);
+
+            renderedTokens.set(address, { token, el, rank });
+
+        }
+        else{
+
+            el = existing.el;
 
         }
 
-        const changed =
-            existing.rank !== rank ||
-            tokenFingerprint(existing.token) !== tokenFingerprint(token);
+        if(el === cursor){
 
-        if(!changed) return;
+            cursor = cursor.nextSibling;
 
-        const card = UI.renderCard(token, rank);
+        }
+        else{
 
-        existing.el.replaceWith(card);
+            coinGrid.insertBefore(el, cursor);
 
-        renderedTokens.set(address, { token, el: card, rank });
+        }
 
     });
 

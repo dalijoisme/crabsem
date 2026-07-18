@@ -98,28 +98,15 @@ function findById(id){
 
 }
 
-function findMany({ status, recommendation, limit = 50, offset = 0 } = {}){
+// Shared WHERE-clause builder (UX sprint's Admin Date Filter, Part 2) -
+// every read function below accepts the same optional { status,
+// recommendation, from, to } filter, `from`/`to` being real
+// "YYYY-MM-DD" boundary dates compared against the real, immutable
+// prediction_time column (never a guessed/derived date). Both bounds
+// are inclusive; `to` is extended to the end of that calendar day so
+// "today" actually includes all of today, not just 00:00:00.
 
-    const clauses = [];
-
-    const params = { limit, offset };
-
-    if(status){ clauses.push("status = @status"); params.status = status; }
-
-    if(recommendation){ clauses.push("recommendation = @recommendation"); params.recommendation = recommendation; }
-
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-
-    return db.prepare(`
-        SELECT * FROM prediction_history
-        ${where}
-        ORDER BY prediction_time DESC
-        LIMIT @limit OFFSET @offset
-    `).all(params);
-
-}
-
-function countMany({ status, recommendation } = {}){
+function buildWhereClause({ status, recommendation, from, to } = {}){
 
     const clauses = [];
 
@@ -129,7 +116,30 @@ function countMany({ status, recommendation } = {}){
 
     if(recommendation){ clauses.push("recommendation = @recommendation"); params.recommendation = recommendation; }
 
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    if(from){ clauses.push("datetime(prediction_time) >= datetime(@from)"); params.from = `${from} 00:00:00`; }
+
+    if(to){ clauses.push("datetime(prediction_time) <= datetime(@to)"); params.to = `${to} 23:59:59`; }
+
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+
+}
+
+function findMany({ status, recommendation, from, to, limit = 50, offset = 0 } = {}){
+
+    const { where, params } = buildWhereClause({ status, recommendation, from, to });
+
+    return db.prepare(`
+        SELECT * FROM prediction_history
+        ${where}
+        ORDER BY prediction_time DESC
+        LIMIT @limit OFFSET @offset
+    `).all({ ...params, limit, offset });
+
+}
+
+function countMany({ status, recommendation, from, to } = {}){
+
+    const { where, params } = buildWhereClause({ status, recommendation, from, to });
 
     return db.prepare(`SELECT COUNT(*) as count FROM prediction_history ${where}`).get(params).count;
 
@@ -137,30 +147,31 @@ function countMany({ status, recommendation } = {}){
 
 // Real aggregate counts by status - Part 4/5's headline numbers.
 
-function countsByStatus({ recommendation } = {}){
+function countsByStatus({ recommendation, from, to } = {}){
 
-    const where = recommendation ? "WHERE recommendation = @recommendation" : "";
+    const { where, params } = buildWhereClause({ recommendation, from, to });
 
     return db.prepare(`
         SELECT status, COUNT(*) as count FROM prediction_history
         ${where}
         GROUP BY status
-    `).all(recommendation ? { recommendation } : {});
+    `).all(params);
 
 }
 
 // Closed predictions (a real resolved outcome exists) - the only rows
 // win-rate/ROI/timing statistics are computed from.
 
-function findClosed({ recommendation } = {}){
+function findClosed({ recommendation, from, to } = {}){
 
-    const where = recommendation
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, from, to });
 
-        ? "WHERE status != 'OPEN' AND recommendation = @recommendation"
+    // findClosed always means "not OPEN" - folded in here rather than
+    // via buildWhereClause's single-value `status` param, since this
+    // is a negative/multi-value condition, not an equality filter.
+    const clauses = [where.replace(/^WHERE /, "") || null, "status != 'OPEN'"].filter(Boolean);
 
-        : "WHERE status != 'OPEN'";
-
-    return db.prepare(`SELECT * FROM prediction_history ${where}`).all(recommendation ? { recommendation } : {});
+    return db.prepare(`SELECT * FROM prediction_history WHERE ${clauses.join(" AND ")}`).all(params);
 
 }
 

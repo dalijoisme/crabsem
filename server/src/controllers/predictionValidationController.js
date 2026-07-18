@@ -10,16 +10,54 @@ const predictionMetricsService = require("../services/predictionMetricsService")
 const predictionHistoryRepository = require("../repositories/predictionHistoryRepository");
 const { sendSuccess, sendError } = require("../utils/apiResponse");
 
+// Admin Date Filter (UX sprint, Part 2) - `from`/`to` are real
+// "YYYY-MM-DD" calendar dates, validated here once so every endpoint
+// below shares the exact same real-vs-malformed check. Omitting
+// either means "All Time" on that side of the range - never guessed,
+// never defaulted to a fabricated date.
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseDateRange(query){
+
+    const from = query.from;
+
+    const to = query.to;
+
+    if(from !== undefined && !DATE_RE.test(from)) return { valid: false, error: "from must be YYYY-MM-DD" };
+
+    if(to !== undefined && !DATE_RE.test(to)) return { valid: false, error: "to must be YYYY-MM-DD" };
+
+    return { valid: true, from: from || undefined, to: to || undefined };
+
+}
+
 async function getSummary(req, res, next){
 
-    try{ sendSuccess(res, predictionMetricsService.getSummary()); }
+    try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
+
+        sendSuccess(res, predictionMetricsService.getSummary(range));
+
+    }
     catch(err){ next(err); }
 
 }
 
 async function getStrongBuy(req, res, next){
 
-    try{ sendSuccess(res, predictionMetricsService.getStrongBuySummary()); }
+    try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
+
+        sendSuccess(res, predictionMetricsService.getStrongBuySummary(range));
+
+    }
     catch(err){ next(err); }
 
 }
@@ -27,6 +65,10 @@ async function getStrongBuy(req, res, next){
 async function getHistory(req, res, next){
 
     try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
 
         const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
 
@@ -37,6 +79,10 @@ async function getHistory(req, res, next){
             status: req.query.status || undefined,
 
             recommendation: req.query.recommendation || undefined,
+
+            from: range.from,
+
+            to: range.to,
 
             limit,
 
@@ -51,7 +97,15 @@ async function getHistory(req, res, next){
 
 async function getStatistics(req, res, next){
 
-    try{ sendSuccess(res, predictionMetricsService.getStatistics()); }
+    try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
+
+        sendSuccess(res, predictionMetricsService.getStatistics(range));
+
+    }
     catch(err){ next(err); }
 
 }

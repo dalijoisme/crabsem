@@ -45,22 +45,22 @@ const CONFIG = {
     ANALYTICS_ENDPOINT: null,
 
     // ADMIN
-    // Temporary client-side password gate for admin.html, as
-    // explicitly requested ("nanti akan saya pindahkan ke
-    // backend"). Nothing sensitive is actually protected by
-    // this - only aggregate, already-public market analytics.
-    // Replace this with a real server-side check before this
-    // is treated as an actual access control.
-    ADMIN_PASSWORD: "crabadmin2026",
+    // The client-side ADMIN_PASSWORD that used to live here is gone -
+    // admin.html/js/admin.js now do a real server-side login
+    // (POST /api/v1/admin/login, checked against process.env.
+    // ADMIN_PASSWORD on the backend - see server/src/services/
+    // adminAuthService.js). Leaving a fake password constant in a
+    // publicly downloadable JS file would be actively misleading about
+    // where the real access control lives.
 
-    // BACKEND API (dashboard.html only)
+    // BACKEND API (dashboard.html/admin.html)
     // Our own Node/SQLite backend (see /server) - GMGN data
     // flows GMGN -> Collector -> SQLite -> this REST API ->
-    // dashboard.js/backendApi.js. dashboard.html no longer
+    // dashboard.js/backendApi.js/admin.js. dashboard.html no longer
     // calls DexScreener directly (js/api.js + js/discovery.js
-    // stay loaded on index.html/admin.html only, unrelated to
-    // this). Local dev default - point this at a real deployed
-    // URL before shipping.
+    // stay loaded on index.html only, unrelated to this).
+    // PRODUCTION URL - do not point this at localhost; the deployed
+    // frontend has no local backend to reach.
     BACKEND_API_URL: "https://api.crabsem.online/api/v1",
 
     // How often the dashboard polls the backend for fresh

@@ -38,9 +38,9 @@ function getProfile(address){
 
 }
 
-function leaderboard({ limit = 50, sortColumn = "score" } = {}){
+function leaderboard({ limit = 50, sortColumn = "score", from, to } = {}){
 
-    return walletRepository.search({ minTrades: 3, limit, sortColumn, direction: "DESC" });
+    return walletRepository.search({ minTrades: 3, limit, sortColumn, direction: "DESC", from, to });
 
 }
 

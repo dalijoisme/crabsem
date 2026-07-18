@@ -11,6 +11,7 @@
 
 const express = require("express");
 const controller = require("../../controllers/adminController");
+const ceoController = require("../../controllers/ceoDashboardController");
 const adminAuth = require("../../middleware/adminAuth");
 
 const router = express.Router();
@@ -33,5 +34,19 @@ router.get("/admin/predictions/summary", controller.getPredictionSummary);
 router.post("/admin/tokens/:address/refresh", controller.refreshToken);
 router.post("/admin/tokens/:address/reanalyze", controller.reanalyzeToken);
 router.delete("/admin/tokens/:address/cache", controller.deleteTokenCache);
+
+// CEO Dashboard (Admin Dashboard V2) - business-facing, separate from
+// the engineering routes above. See services/ceoDashboardService.js.
+
+router.get("/admin/ceo/engine-status", ceoController.getEngineStatus);
+router.get("/admin/ceo/signal-summary", ceoController.getSignalSummary);
+router.get("/admin/ceo/result-summary", ceoController.getResultSummary);
+router.get("/admin/ceo/strong-buy", ceoController.getStrongBuyAnalysis);
+router.get("/admin/ceo/failure-analysis", ceoController.getFailureAnalysis);
+router.get("/admin/ceo/wallet-performance", ceoController.getWalletPerformance);
+router.get("/admin/ceo/wallet-categories", ceoController.getWalletCategories);
+router.get("/admin/ceo/recommendations", ceoController.getRecommendations);
+router.get("/admin/ceo/engine-history", ceoController.getEngineHistory);
+router.get("/admin/ceo/export", ceoController.exportTable);
 
 module.exports = router;

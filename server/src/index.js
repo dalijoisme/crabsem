@@ -58,7 +58,21 @@ const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
 const validationScheduler = require("./scheduler/validationScheduler");
 const walletScheduler = require("./scheduler/walletScheduler");
 const predictionValidationScheduler = require("./scheduler/predictionValidationScheduler");
+const engineVersionService = require("./services/engineVersionService");
 const app = require("./app");
+
+// CEO Dashboard (Section 9, Engine Improvement History) - records a
+// real snapshot the first time this process starts up running a
+// version it hasn't seen before. A no-op on every subsequent restart
+// with the same, already-recorded version.
+
+const versionResult = engineVersionService.ensureCurrentVersionRecorded();
+
+if(versionResult.recorded){
+
+    console.log(`[startup] Engine version recorded for the first time: see config/engineVersion.js`);
+
+}
 
 // Startup secret validation: previously a missing GMGN_API_KEY/
 // GMGN_PRIVATE_KEY was only discovered lazily, at the first

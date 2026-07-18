@@ -8,6 +8,52 @@
 const config = require("../config/predictionValidationConfig");
 const predictionHistoryRepository = require("../repositories/predictionHistoryRepository");
 const predictionTimelineRepository = require("../repositories/predictionTimelineRepository");
+const dateRange = require("../utils/dateRange");
+
+// Real market-cap bands (CEO Dashboard Section 7 - "token patterns
+// causing losses") - the same bucket boundaries walletIntelligence
+// Config.js already uses for a wallet's favorite_market_cap_band, so
+// "micro/small/mid/large" means the same real thing everywhere in
+// this codebase, not a second, inconsistent definition.
+
+const MARKET_CAP_BANDS = [
+    { max: 100000, label: "Micro (<$100K)" },
+    { max: 1000000, label: "Small ($100K-$1M)" },
+    { max: 10000000, label: "Mid ($1M-$10M)" },
+    { max: Infinity, label: "Large (>$10M)" }
+];
+
+function marketCapBandFor(marketCap){
+
+    if(marketCap == null) return "Unknown";
+
+    const band = MARKET_CAP_BANDS.find(b => marketCap <= b.max);
+
+    return band ? band.label : "Unknown";
+
+}
+
+// Real, derived-from-stored-data wallet category for a prediction
+// (CEO Dashboard Section 7 - "wallet category causing losses") - uses
+// the same wallet_summary_json every prediction already carries
+// (smartMoneyWalletCount/kolWalletCount/devWalletIdentified), never a
+// second lookup.
+
+function walletCategoryFor(prediction){
+
+    const summary = safeParse(prediction.wallet_summary_json);
+
+    if(!summary) return "No Wallet Data";
+
+    if(summary.smartMoneyWalletCount > 0 && summary.smartMoneyWalletCount >= (summary.kolWalletCount || 0)) return "Smart Money";
+
+    if(summary.kolWalletCount > 0) return "KOL";
+
+    if(summary.devWalletIdentified) return "Developer";
+
+    return "No Wallet Signal";
+
+}
 
 function mean(nums){ return nums.length ? nums.reduce((a,b)=>a+b,0) / nums.length : null; }
 
@@ -242,23 +288,116 @@ function getStatistics({ from, to } = {}){
 
     });
 
-    const failureRows = closed.filter(p => p.status !== "TP_HIT" && p.close_reason);
+    const losses = closed.filter(p => p.status !== "TP_HIT");
+
+    const wins = closed.filter(p => p.status === "TP_HIT");
+
+    const failureRows = losses.filter(p => p.close_reason);
 
     const failureCounts = {};
 
     failureRows.forEach(p => { failureCounts[p.close_reason] = (failureCounts[p.close_reason] || 0) + 1; });
 
+    const winReasonRows = wins.filter(p => p.close_reason);
+
+    const winReasonCounts = {};
+
+    winReasonRows.forEach(p => { winReasonCounts[p.close_reason] = (winReasonCounts[p.close_reason] || 0) + 1; });
+
+    const walletCategoryLossCounts = {};
+
+    losses.forEach(p => { const c = walletCategoryFor(p); walletCategoryLossCounts[c] = (walletCategoryLossCounts[c] || 0) + 1; });
+
+    const tokenPatternLossCounts = {};
+
+    losses.forEach(p => { const band = marketCapBandFor(p.entry_market_cap); tokenPatternLossCounts[band] = (tokenPatternLossCounts[band] || 0) + 1; });
+
+    const failureAnalysis = Object.entries(failureCounts).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
+
+    const winAnalysis = Object.entries(winReasonCounts).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
+
     return {
 
         confidenceCalibration: confidenceBuckets,
 
-        failureAnalysis: Object.entries(failureCounts).map(([reason, count]) => ({ reason, count })),
+        failureAnalysis,
+
+        winAnalysis,
+
+        mostCommonLosingReason: failureAnalysis[0] || null,
+
+        mostCommonWinningReason: winAnalysis[0] || null,
+
+        walletCategoryLosses: Object.entries(walletCategoryLossCounts).map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count),
+
+        tokenPatternLosses: Object.entries(tokenPatternLossCounts).map(([pattern, count]) => ({ pattern, count })).sort((a, b) => b.count - a.count),
 
         accuracyByTier: accuracyByTier(closed),
 
         ...falseAndMissedBuy(closed),
 
         overall: buildSummary({ from, to })
+
+    };
+
+}
+
+// =====================================
+// SIGNAL SUMMARY (CEO Dashboard Section 3) - count + percentage per
+// recommendation tier for the selected period, plus a real trend
+// against the immediately preceding period of the same length (see
+// utils/dateRange.js). Trend is null (never a fabricated 0) whenever
+// there's no comparable previous period (All Time, or an open-ended
+// range with only one of from/to set).
+// =====================================
+
+function getSignalSummary({ from, to } = {}){
+
+    const counts = predictionHistoryRepository.countsByRecommendation({ from, to });
+
+    const countByTier = Object.fromEntries(counts.map(r => [r.recommendation, r.count]));
+
+    const total = Object.values(countByTier).reduce((a, b) => a + b, 0);
+
+    const previousRange = dateRange.computePreviousPeriod({ from, to });
+
+    const prevCountByTier = previousRange
+
+        ? Object.fromEntries(predictionHistoryRepository.countsByRecommendation(previousRange).map(r => [r.recommendation, r.count]))
+
+        : null;
+
+    const tiers = ["STRONG BUY", "BUY", "HOLD", "AVOID"];
+
+    return {
+
+        total,
+
+        previousPeriod: previousRange,
+
+        tiers: tiers.map(tier => {
+
+            const count = countByTier[tier] || 0;
+
+            const previousCount = prevCountByTier ? (prevCountByTier[tier] || 0) : null;
+
+            return {
+
+                recommendation: tier,
+
+                count,
+
+                percentage: total > 0 ? count / total : null,
+
+                previousCount,
+
+                trendCount: previousCount != null ? count - previousCount : null,
+
+                trendPct: (previousCount != null && previousCount > 0) ? ((count - previousCount) / previousCount) : null
+
+            };
+
+        })
 
     };
 
@@ -275,4 +414,4 @@ function getTimeline(predictionId){
 
 }
 
-module.exports = { getSummary, getStrongBuySummary, getHistory, getStatistics, getTimeline };
+module.exports = { getSummary, getStrongBuySummary, getHistory, getStatistics, getTimeline, getSignalSummary };

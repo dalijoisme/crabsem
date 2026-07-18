@@ -116,9 +116,18 @@ function buildWhereClause({ status, recommendation, from, to } = {}){
 
     if(recommendation){ clauses.push("recommendation = @recommendation"); params.recommendation = recommendation; }
 
-    if(from){ clauses.push("datetime(prediction_time) >= datetime(@from)"); params.from = `${from} 00:00:00`; }
+    // Plain string comparison, not datetime(prediction_time) - both
+    // sides are already the exact same real "YYYY-MM-DD HH:MM:SS" text
+    // SQLite's CURRENT_TIMESTAMP produces, so this is both correct AND
+    // sargable (verified via EXPLAIN QUERY PLAN - wrapping the column
+    // in datetime() made SQLite unable to use
+    // idx_prediction_history_recommendation_time/_status_time at all,
+    // silently falling back to the single-column index and scanning
+    // every row in that name/status instead of range-seeking by date).
 
-    if(to){ clauses.push("datetime(prediction_time) <= datetime(@to)"); params.to = `${to} 23:59:59`; }
+    if(from){ clauses.push("prediction_time >= @from"); params.from = `${from} 00:00:00`; }
+
+    if(to){ clauses.push("prediction_time <= @to"); params.to = `${to} 23:59:59`; }
 
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 
@@ -159,6 +168,21 @@ function countsByStatus({ recommendation, from, to } = {}){
 
 }
 
+// Real aggregate counts by recommendation tier - CEO Dashboard
+// Section 3 (Signal Summary).
+
+function countsByRecommendation({ from, to } = {}){
+
+    const { where, params } = buildWhereClause({ from, to });
+
+    return db.prepare(`
+        SELECT recommendation, COUNT(*) as count FROM prediction_history
+        ${where}
+        GROUP BY recommendation
+    `).all(params);
+
+}
+
 // Closed predictions (a real resolved outcome exists) - the only rows
 // win-rate/ROI/timing statistics are computed from.
 
@@ -194,6 +218,8 @@ module.exports = {
     countMany,
 
     countsByStatus,
+
+    countsByRecommendation,
 
     findClosed
 

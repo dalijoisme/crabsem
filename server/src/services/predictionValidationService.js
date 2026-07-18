@@ -216,6 +216,43 @@ function computeFailureReason(prediction, closeSnapshot){
 
 }
 
+// Real, evidence-based WINNING category (CEO Dashboard Section 7 -
+// "Most common winning reason") - the positive-signal mirror of
+// computeFailureReason above, checked against the same real fields.
+// Same disclosed limitation: these are CURRENT-state checks at close
+// time, not a replay of what was true throughout the trade.
+
+function computeWinReason(prediction){
+
+    const trenchesEntry = gmgnTrenchesRepository.findByTokenAddress(prediction.token_address);
+
+    if(trenchesEntry?.net_buy_24h != null && Number(trenchesEntry.net_buy_24h) >= 500){
+
+        if(trenchesEntry.smart_degen_count != null && Number(trenchesEntry.smart_degen_count) >= 3){
+
+            return "Whale Accumulation";
+
+        }
+
+        return "Net Accumulation";
+
+    }
+
+    let walletSummary = null;
+
+    try{ walletSummary = prediction.wallet_summary_json ? JSON.parse(prediction.wallet_summary_json) : null; }
+    catch(e){ /* real field parse failed - fall through, never guessed */ }
+
+    if(walletSummary?.smartMoneyWalletCount > 0) return "Smart Money Involvement";
+
+    if(walletSummary?.kolWalletCount > 0) return "KOL Involvement";
+
+    if(prediction.confidence != null && prediction.confidence >= 60) return "High Confidence Entry";
+
+    return "Unknown";
+
+}
+
 function evaluatePrediction(prediction){
 
     const rows = tokenPriceHistoryRepository.findRangeForToken(prediction.token_address, prediction.prediction_time);
@@ -312,7 +349,11 @@ function evaluatePrediction(prediction){
 
         closedAt: closeStatus ? toSqliteTimestamp(new Date()) : null,
 
-        closeReason: (closeStatus && closeStatus !== "TP_HIT") ? computeFailureReason(prediction, closeSnapshot) : null
+        closeReason: closeStatus === "TP_HIT"
+
+            ? computeWinReason(prediction)
+
+            : (closeStatus ? computeFailureReason(prediction, closeSnapshot) : null)
 
     };
 

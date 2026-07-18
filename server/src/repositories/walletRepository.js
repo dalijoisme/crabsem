@@ -161,7 +161,7 @@ const SORTABLE_COLUMNS = [
 // last observed activity falls in range, disclosed as an
 // approximation, not overclaimed as exact historical replay.
 
-function search({ minWinRate, minRoi, minTrades, label, from, to, limit = 50, sortColumn = "score", direction = "DESC" }){
+function search({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, limit = 50, sortColumn = "score", direction = "DESC" }){
 
     if(!SORTABLE_COLUMNS.includes(sortColumn)) sortColumn = "score";
 
@@ -177,11 +177,22 @@ function search({ minWinRate, minRoi, minTrades, label, from, to, limit = 50, so
 
     if(minTrades != null){ clauses.push("total_trades >= @minTrades"); params.minTrades = minTrades; }
 
+    // "Fresh Wallet" (CEO Dashboard Section 5) - a real, computable
+    // filter (total_trades still small), not a stored primary_label -
+    // this schema has no distinct "Fresh Wallet"/"Accumulation"/
+    // "Retail" identity, see ceoDashboardService.js's doc comment.
+    if(maxTrades != null){ clauses.push("total_trades <= @maxTrades"); params.maxTrades = maxTrades; }
+
     if(label){ clauses.push("primary_label = @label"); params.label = label; }
 
-    if(from){ clauses.push("datetime(last_seen) >= datetime(@from)"); params.from = `${from} 00:00:00`; }
+    // Plain string comparison, not datetime(last_seen) - see
+    // predictionHistoryRepository.js's identical fix/comment: both
+    // sides are the same real "YYYY-MM-DD HH:MM:SS" text, and wrapping
+    // the column in datetime() made idx_wallets_last_seen unusable.
 
-    if(to){ clauses.push("datetime(last_seen) <= datetime(@to)"); params.to = `${to} 23:59:59`; }
+    if(from){ clauses.push("last_seen >= @from"); params.from = `${from} 00:00:00`; }
+
+    if(to){ clauses.push("last_seen <= @to"); params.to = `${to} 23:59:59`; }
 
     const sql = `
         SELECT * FROM wallets

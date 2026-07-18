@@ -144,10 +144,25 @@ module.exports = {
     // upgrade a weak participant score into a BUY).
     // =====================================
 
+    // Evidence-based adjustment (usability-testing sprint): the
+    // validation framework's real recommendation_outcomes data (4,149
+    // resolved outcomes across 15m/30m/1h/4h at the time of this
+    // change) showed BUY-tier accuracy consistently at 40-49% -
+    // worse than a coin flip - at every horizon, while HOLD (81-84%)
+    // and AVOID (59-71%) were reliable. Raising the BUY floor from 50
+    // to 55 moves the weakest, most error-prone participant scores
+    // (which were disproportionately wrong) into HOLD instead, where
+    // the real track record is far better. STRONG BUY (70) and HOLD
+    // (30) are untouched - their measured accuracy didn't show the
+    // same problem. This is a conservative, single-parameter, real-
+    // evidence-driven correction, not a re-weighting of the scoring
+    // modules themselves - a larger change should wait for more
+    // accumulated outcome data to avoid tuning on noise.
+
     actionTiers: {
 
         strongBuy: 70,
-        buy: 50,
+        buy: 55,
         hold: 30
         // below hold => AVOID
 

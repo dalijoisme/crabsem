@@ -153,34 +153,74 @@ function lifecycleTag(lifecycle){
 
 // AI Trade Plan (server/src/services/tradePlanService.js) - a real
 // decision timeline (from recommendation_log, never invented) plus
-// transparent, formula-driven Entry Zone/Target/Stop bands. Replaces
-// the old sessionStorage-only "History" section, which lost
-// everything on refresh and only ever saw this one browser tab.
+// transparent, formula-driven Entry/Target/Stop bands. Market Cap is
+// the primary unit (fix: this used to show Price, which is the wrong
+// frame for meme coins - two tokens at the same price can have wildly
+// different valuations) - price is kept as smaller secondary text.
+// Split into two functions so they can be placed as two distinct
+// sections (AI Trade Plan, then Decision Timeline) per the requested
+// detail-panel order, right after Recommendation.
 
-function aiTradePlanHtml(tradePlan){
+function aiTradePlanBandsHtml(tradePlan){
 
     const rb = tradePlan.riskBands;
 
-    const bandsHtml = rb ? `
+    if(!rb) return `<div class="sectionTitle">AI Trade Plan</div><div class="disclaimerNote">No market cap data yet for this token - the plan will appear once it's collected.</div>`;
+
+    // Defensive shape check: catches a stale cached copy of this file
+    // talking to a newer/older API (or vice versa) - the real root
+    // cause behind values silently rendering as "N/A" while the
+    // section title still appeared. Fails loudly and clearly instead
+    // of a wall of confusing N/As, and self-heals on the very next
+    // background refresh instead of staying stuck.
+
+    const hasCompleteShape =
+        rb.entryZone?.lowMc != null && rb.entryZone?.highMc != null &&
+        rb.target?.marketCap != null && rb.stopLoss?.marketCap != null;
+
+    if(!hasCompleteShape){
+
+        console.error("AI Trade Plan: riskBands is missing expected market-cap fields - likely a stale cached copy of ui.js. Forcing a reload.", rb);
+
+        return `<div class="sectionTitle">AI Trade Plan</div><div class="disclaimerNote">Trade plan data is out of date - <a href="javascript:location.reload(true)">tap to refresh</a>.</div>`;
+
+    }
+
+    return `
+        <div class="sectionTitle">AI Trade Plan</div>
         <div class="tradePlanBands">
-            <div><span>Entry Zone</span><strong>${formatPrice(rb.entryZone.low)} – ${formatPrice(rb.entryZone.high)}</strong></div>
-            <div><span>Target</span><strong class="tpTarget">${formatPrice(rb.target.price)} (+${rb.target.expectedMovePct.toFixed(0)}%)</strong></div>
-            <div><span>Stop Loss</span><strong class="tpStop">${formatPrice(rb.stopLoss.price)} (-${rb.stopLoss.distancePct.toFixed(0)}%)</strong></div>
+            <div>
+                <span>Entry MC</span>
+                <strong>${marketCapLabelValue({market_cap:rb.entryZone.lowMc})} – ${marketCapLabelValue({market_cap:rb.entryZone.highMc})}</strong>
+                <small>${formatPrice(rb.entryZone.lowPrice)} – ${formatPrice(rb.entryZone.highPrice)}</small>
+            </div>
+            <div>
+                <span>Target MC</span>
+                <strong class="tpTarget">${marketCapLabelValue({market_cap:rb.target.marketCap})} (+${rb.target.expectedMovePct.toFixed(0)}%)</strong>
+                <small>${formatPrice(rb.target.price)}</small>
+            </div>
+            <div>
+                <span>Stop MC</span>
+                <strong class="tpStop">${marketCapLabelValue({market_cap:rb.stopLoss.marketCap})} (-${rb.stopLoss.distancePct.toFixed(0)}%)</strong>
+                <small>${formatPrice(rb.stopLoss.price)}</small>
+            </div>
         </div>
         <div class="disclaimerNote">${rb.disclaimer}</div>
-    ` : "";
+    `;
+
+}
+
+function decisionTimelineHtml(tradePlan){
 
     const timelineHtml = tradePlan.timeline.length ? tradePlan.timeline.map(ev => `
-        <div class="tradePlanStep">
-            <strong style="color:${signalColor(ev.action)}">${ev.action}</strong>
-            <span>${new Date(parseBackendTimestamp(ev.at)).toLocaleString()}</span>
+        <div class="tradePlanStep${ev.isLive?" isLive":""}">
+            <strong style="color:${signalColor(ev.action)}">${ev.action}${ev.isLive?" · LIVE NOW":""}</strong>
+            <span>${ev.isLive ? "Just now" : new Date(parseBackendTimestamp(ev.at)).toLocaleString()}</span>
             ${ev.topReason ? `<small>${ev.topReason}</small>` : ""}
         </div>
     `).join("") : `<div class="disclaimerNote">Just started watching this token - the timeline will fill in as CRAB logs real decisions over time.</div>`;
 
     return `
-        <div class="sectionTitle">AI Trade Plan</div>
-        ${bandsHtml}
         <div class="sectionTitle">Decision Timeline</div>
         <div class="historyTimeline tradePlanTimeline">
             ${timelineHtml}
@@ -217,7 +257,7 @@ function lifecycleLabel(lifecycle){
 
 function freshnessAgeLabel(block){
 
-    if(!block || !block.hasData || block.ageSeconds == null) return "No data collected yet";
+    if(!block || !block.hasData || block.ageSeconds == null) return "Not collected yet";
 
     return formatDuration(block.ageSeconds * 1000);
 
@@ -290,9 +330,18 @@ function gmgnLink(token){
 
 // =====================================
 // INTELLIGENCE SECTION HELPERS
-// Every section below either shows real data or an honest "No data"
-// row - never a guess, never silently omitted. Reuses the existing
-// sectionTitle/monitorBox/monitorRow CSS classes, no new styling.
+// Every section below either shows real data or an honest "not
+// available yet" row - never a guess, never silently omitted.
+// Reuses the existing sectionTitle/monitorBox/monitorRow CSS
+// classes, no new styling.
+//
+// Hotfix #4: "No data" read as broken/unfinished rather than as an
+// honest, expected state - a whole class of tokens simply hasn't
+// been through the specific real-data source a section depends on
+// yet (e.g. GMGN's trenches feed only covers new launches; the
+// on-demand wallet-stats cache is only populated reactively). Each
+// section now explains WHY in its own terms instead of one generic
+// phrase everywhere.
 // =====================================
 
 function monitorRow(label, value, cls){
@@ -301,9 +350,35 @@ function monitorRow(label, value, cls){
 
 }
 
-function noDataRow(){
+// Keyed by the exact section title each call site already passes in
+// (see intelSection() call sites below) - one honest, specific
+// reason per data source, not a single blanket phrase.
 
-    return monitorRow("Status", "No data", "changedNo");
+const SECTION_NO_DATA_REASON = {
+
+    "Security": "Security check not yet run for this token",
+
+    "Holder Distribution": "Holder breakdown not yet available",
+
+    "Smart Money Activity": "No smart-money activity observed yet",
+
+    "KOL Activity": "No KOL activity observed yet",
+
+    "Trenches (Launch Status)": "Not in the new-launch feed - likely aged past that window",
+
+    "Hot Searches": "Not currently trending in search",
+
+    "Launchpad": "No launchpad record for this token",
+
+    "Dev Wallet Activity": "Developer wallet not yet identified"
+
+};
+
+function noDataRow(title){
+
+    const reason = SECTION_NO_DATA_REASON[title] || "Data collection in progress";
+
+    return monitorRow("Status", reason, "changedNo");
 
 }
 
@@ -315,7 +390,7 @@ function intelSection(title, hasData, bodyHtml){
 
     <div class="monitorBox">
 
-        ${hasData ? bodyHtml : noDataRow()}
+        ${hasData ? bodyHtml : noDataRow(title)}
 
     </div>
 
@@ -367,7 +442,7 @@ function renderHolderDistributionSection(holders){
 
             ? monitorRow("Top 10 Concentration", (holders.top10HolderRate*100).toFixed(1)+"%")
 
-            : monitorRow("Top 10 Concentration", "No data"),
+            : monitorRow("Top 10 Concentration", "Not collected yet"),
 
         holders.topHoldersListCached
 
@@ -443,7 +518,7 @@ function renderLaunchpadSection(lp){
 
             ? monitorRow("Total Tokens Created", format(lp.totalTokensOnPlatform))
 
-            : monitorRow("Total Tokens Created", "No data")
+            : monitorRow("Total Tokens Created", "Not collected yet")
 
     ].join("");
 
@@ -470,7 +545,7 @@ function renderDevWalletSection(devWallet, walletActivity){
     }
     else{
 
-        rows += monitorRow("Recent Activity", "No data");
+        rows += monitorRow("Recent Activity", "No recent activity observed");
 
     }
 
@@ -522,15 +597,41 @@ const MARKET_LABELS = {
 
 };
 
+// Hotfix #4: one honest, source-specific reason per signal instead of
+// a blanket "(No data)" everywhere - each of these genuinely comes
+// from a different real collection path (see server/src/services/
+// intelligenceEngine.js), so the explanation should match why THAT
+// one is missing, not read as a generic error.
+
+const NO_DATA_REASON_BY_KEY = {
+
+    accumulation: "Not collected for this token",
+    whale: "Not collected for this token",
+    developer: "Not collected for this token",
+    sniperQuality: "Not collected for this token",
+    bundleQuality: "Not collected for this token",
+    insiderQuality: "Not collected for this token",
+
+    smartMoney: "Waiting for trade activity",
+    kol: "Waiting for trade activity",
+
+    walletQuality: "Insufficient wallet history",
+    walletProfitability: "Insufficient wallet history",
+
+    security: "Security check not yet run",
+    holderDistribution: "Holder breakdown not yet available"
+
+};
+
 function breakdownGroupHtml(labels, breakdown){
 
     return Object.keys(labels).map(key=>{
 
         const cat = breakdown[key];
 
-        const label = labels[key] + (cat.hasData ? "" : " (No data)");
+        const label = cat.hasData ? labels[key] : `${labels[key]} — ${NO_DATA_REASON_BY_KEY[key] || "Data collection in progress"}`;
 
-        return scoreBar(label, cat.score, cat.max);
+        return scoreBar(label, cat.score, cat.max, cat.hasData);
 
     }).join("");
 
@@ -655,6 +756,19 @@ const UI = {
     // contributes a neutral score, never a guessed reason.
     // =====================================
 
+    // =====================================
+    // CARD - total redesign (usability-testing sprint).
+    //
+    // Fixed structure, fixed height, every element always in the same
+    // place: Header (rank, logo, name, timing badge, favorite) ->
+    // Market Info (Vol/Liq/MCap) -> AI (Participant Score/Confidence/
+    // Risk) -> Footer (the action recommendation - the single most
+    // visually dominant element on the card, per the hierarchy rule:
+    // Recommendation > Participant Score > Market Metrics > Badges).
+    // Grid/Flex only - no absolute positioning anywhere in this
+    // template, so nothing can overlap regardless of content length.
+    // =====================================
+
     renderCard(token, rank){
 
         const signal = token.signal;
@@ -674,7 +788,28 @@ const UI = {
 
         const changeColor = (changePct||0) >= 0 ? "#16c784" : "#ff4d4d";
 
+        const changeLabel = (changePct!=null ? changePct.toFixed(1) : "0.0") + "%";
+
         const color = signalColor(signal.action);
+
+        const symbol = token.symbol || "-";
+
+        const name = token.name || "-";
+
+        const fav = isFavorited(token.token_address);
+
+        const riskClass = signal.risk === "HIGH" ? "riskHigh" : signal.risk === "MEDIUM" ? "riskMed" : "riskLow";
+
+        // Action tier and risk tier are computed on independent paths
+        // (see intelligenceEngine.js) - a BUY can legitimately carry
+        // HIGH risk. Folded into the action button itself (rather than
+        // a separate note) so the warning survives without needing
+        // variable card height.
+        const isBuyTier = signal.action === "STRONG BUY" || signal.action === "BUY";
+
+        const riskConflict = isBuyTier && signal.risk === "HIGH";
+
+        const actionLabel = riskConflict ? `⚠ ${signal.action} · HIGH RISK` : signalBadgeText(signal.action);
 
         const card=document.createElement("div");
 
@@ -682,105 +817,69 @@ const UI = {
 
         card.innerHTML=`
 
-        ${rankLabel ? `<div class="rankBadge${medal?" medal":""}">${rankLabel}</div>` : ""}
+        <div class="ccHeader">
 
-        ${entryBadge(signal.stage)}
+            ${rankLabel ? `<span class="ccRank${medal?" medal":""}">${rankLabel}</span>` : ""}
 
-        ${lifecycleTag(signal.lifecycle)}
+            <img src="${logo}" class="ccLogo" alt="" onerror="this.onerror=null;this.src='images/body.png';">
 
-        <button class="watchStar${isFavorited(token.token_address)?" active":""}" data-address="${token.token_address}" title="Favorite" onclick="event.stopPropagation(); UI.toggleFavoriteStar(this, '${token.token_address}')">${isFavorited(token.token_address)?"★":"☆"}</button>
+            <div class="ccTitle">
 
-        <div class="coinHeader">
+                <h3 title="${symbol}">${symbol}</h3>
 
-            <img src="${logo}" class="coinLogo">
-
-            <div>
-
-                <h3>${token.symbol || "-"}</h3>
-
-                <small>${token.name || "-"}</small>
+                <small title="${name}">${name}</small>
 
             </div>
 
-            <span style="color:${changeColor}">
+            <span class="ccChange" style="color:${changeColor}">${changeLabel}</span>
 
-                ${changePct!=null ? changePct.toFixed(2) : "0.00"}%
-
-            </span>
+            <button class="watchStar${fav?" active":""}" data-address="${token.token_address}" title="Favorite" onclick="event.stopPropagation(); UI.toggleFavoriteStar(this, '${token.token_address}')">${fav?"★":"☆"}</button>
 
         </div>
 
-        <div class="coinMicroStats">
+        <div class="ccBadgeRow">
 
-            Vol <strong>$${format(token.volume_1h)}</strong> · Liq <strong>$${format(token.liquidity)}</strong> · MC <strong>${marketCapLabelValue(token)}</strong>
+            ${entryBadge(signal.stage)}
+
+            ${lifecycleTag(signal.lifecycle)}
 
         </div>
 
-        <div class="coinInfo">
+        <div class="ccMarketInfo">
 
-            <div>
+            <div><span>Vol</span><strong>$${format(token.volume_1h)}</strong></div>
 
-                Vol 1h
+            <div><span>Liq</span><strong>$${format(token.liquidity)}</strong></div>
 
-                <br>
+            <div><span>MCap</span><strong>${marketCapLabelValue(token)}</strong></div>
 
-                <strong>$${format(token.volume_1h)}</strong>
+        </div>
 
-            </div>
+        <div class="ccAiInfo">
 
-            <div>
+            <div class="ccScore">
 
-                Liq
+                <span class="ccScoreLabel">SCORE</span>
 
-                <br>
-
-                <strong>$${format(token.liquidity)}</strong>
+                <strong class="ccScoreValue" style="color:${color}">${signal.participantScore}</strong>
 
             </div>
 
-            <div>
+            <div class="ccAiMeta">
 
-                MCap
+                <span>Conf <strong>${signal.confidence}%</strong></span>
 
-                <br>
-
-                <strong>${marketCapLabelValue(token)}</strong>
+                <span class="${riskClass}">Risk <strong>${signal.risk}</strong></span>
 
             </div>
 
         </div>
 
-        <div class="signalBox" style="border-color:${color}">
+        <div class="ccFooter">
 
-            <small class="scoreLabel">PARTICIPANT SCORE</small>
+            <div class="ccAction${riskConflict?" ccActionWarn":""}" style="background:${color}" title="${actionLabel}">${actionLabel}</div>
 
-            <h2 class="scoreValue" style="color:${color}">${signal.participantScore}</h2>
-
-            <div class="signalPill" style="background:${color}">${signal.action}</div>
-
-            <div class="signalMetaRow">
-
-                <span>${signal.stage}</span>
-
-                <span>Confidence ${signal.confidence}%</span>
-
-                <span>Risk ${signal.risk}</span>
-
-            </div>
-
-            ${riskConflictNote(signal)}
-
-        </div>
-
-        <div class="statusBadge ${signalBadgeClass(signal.action)}">
-
-            ${signalBadgeText(signal.action)}
-
-        </div>
-
-        <div class="dexBadge">
-
-            ${(token.chain||"chain").toUpperCase()}
+            <span class="ccChain">${(token.chain||"-").toUpperCase()}</span>
 
         </div>
 
@@ -895,25 +994,14 @@ const UI = {
 
         const intel = signal.intelligence;
 
-        return `
+        // ---- Section order (usability-testing redesign): Header ->
+        // Recommendation -> AI Trade Plan -> Decision Timeline ->
+        // Participant Score -> Market Health -> Security -> Wallet ->
+        // Raw Metrics. AI Trade Plan and Decision Timeline are the
+        // primary information and sit right after Recommendation,
+        // not buried at the bottom.
 
-        <div class="detailHeader">
-
-            <img src="${logo}" width="64" style="border-radius:50%">
-
-            <div class="detailHeaderInfo">
-
-                <h2>${token.name || "-"}</h2>
-
-                <span>${token.symbol || "-"}</span>
-
-            </div>
-
-            <button class="detailWatchBtn${watchlistAddresses.has(token.token_address)?" active":""}" onclick="UI.toggleWatchlistBtn(this, '${token.token_address}')">${watchlistAddresses.has(token.token_address)?"✓ Watching":"+ Watch Later"}</button>
-
-        </div>
-
-        <div id="smartRecallBanner"></div>
+        const recommendationHtml = `
 
         <div style="display:flex; align-items:center; gap:10px; margin:14px 0 4px 0; flex-wrap:wrap;">
 
@@ -936,7 +1024,7 @@ const UI = {
 
         <div class="disclaimerNote">
 
-            Algorithmic signal, not financial advice. CRAB is participant-first: Participant Score drives BUY/HOLD/AVOID, Market Health only confirms or adjusts confidence/risk. Computed only from real data already collected - a category with nothing collected yet is shown as "No data", never guessed.
+            Algorithmic signal, not financial advice. CRAB is participant-first: Participant Score drives BUY/HOLD/AVOID, Market Health only confirms or adjusts confidence/risk. Computed only from real data already collected - a category with nothing collected yet says so honestly, never guessed.
 
         </div>
 
@@ -992,15 +1080,63 @@ const UI = {
 
         </div>
 
-        <div class="sectionTitle">Participant Score Breakdown (primary)</div>
+        `;
+
+        const tradePlanSectionHtml = token.tradePlan
+
+            ? aiTradePlanBandsHtml(token.tradePlan) + decisionTimelineHtml(token.tradePlan)
+
+            : `
+
+            <div class="sectionTitle">AI Trade Plan</div>
+
+            <div class="disclaimerNote">Loading real trade plan...</div>
+
+            <div class="sectionTitle">Decision Timeline</div>
+
+            ${justStartedWatching ? `<div class="disclaimerNote">Just started watching this token - the picture will get clearer as more data comes in.</div>` : ""}
+
+            <div class="historyTimeline">
+
+                ${historyHtml}
+
+            </div>
+
+            `;
+
+        const participantScoreHtml = `
+
+        <div class="sectionTitle">Participant Score</div>
 
         ${breakdownGroupHtml(PARTICIPANT_LABELS, signal.breakdown.participant)}
 
-        <div class="sectionTitle">Market Health Breakdown (confirmation only)</div>
+        `;
+
+        const marketHealthHtml = `
+
+        <div class="sectionTitle">Market Health (confirmation only)</div>
 
         ${breakdownGroupHtml(MARKET_LABELS, signal.breakdown.market)}
 
-        <div class="sectionTitle">Market Data</div>
+        `;
+
+        const securitySectionHtml = renderSecuritySection(intel.security);
+
+        const walletSectionHtml = `
+
+        <div class="sectionTitle">Wallet</div>
+
+        ${renderActivitySection("Smart Money Activity", intel.smartMoney)}
+
+        ${renderActivitySection("KOL Activity", intel.kol)}
+
+        ${renderDevWalletSection(intel.devWallet, intel.walletActivity)}
+
+        `;
+
+        const rawMetricsHtml = `
+
+        <div class="sectionTitle">Raw Metrics</div>
 
         <div class="healthGrid">
 
@@ -1070,21 +1206,13 @@ const UI = {
 
         </div>
 
-        ${renderSecuritySection(intel.security)}
-
         ${renderHolderDistributionSection(intel.holders)}
-
-        ${renderActivitySection("Smart Money Activity", intel.smartMoney)}
-
-        ${renderActivitySection("KOL Activity", intel.kol)}
 
         ${renderTrenchesSection(intel.trenches)}
 
         ${renderHotSearchesSection(intel.hotSearches)}
 
         ${renderLaunchpadSection(intel.launchpad)}
-
-        ${renderDevWalletSection(intel.devWallet, intel.walletActivity)}
 
         <div class="sectionTitle">Holder Concentration (Live)</div>
 
@@ -1176,19 +1304,41 @@ const UI = {
 
         </div>
 
-        ${token.tradePlan ? aiTradePlanHtml(token.tradePlan) : `
+        `;
 
-        <div class="sectionTitle">History</div>
+        return `
 
-        ${justStartedWatching ? `<div class="disclaimerNote">Just started watching this token - the picture will get clearer as more data comes in.</div>` : ""}
+        <div class="detailHeader">
 
-        <div class="historyTimeline">
+            <img src="${logo}" alt="" onerror="this.onerror=null;this.src='images/body.png';">
 
-            ${historyHtml}
+            <div class="detailHeaderInfo">
+
+                <h2>${token.name || "-"}</h2>
+
+                <span>${token.symbol || "-"}</span>
+
+            </div>
+
+            <button class="detailWatchBtn${watchlistAddresses.has(token.token_address)?" active":""}" onclick="UI.toggleWatchlistBtn(this, '${token.token_address}')">${watchlistAddresses.has(token.token_address)?"✓ Watching":"+ Watch Later"}</button>
 
         </div>
 
-        `}
+        <div id="smartRecallBanner"></div>
+
+        ${recommendationHtml}
+
+        ${tradePlanSectionHtml}
+
+        ${participantScoreHtml}
+
+        ${marketHealthHtml}
+
+        ${securitySectionHtml}
+
+        ${walletSectionHtml}
+
+        ${rawMetricsHtml}
 
         <div class="detailActions" style="
     display:flex;
@@ -1263,25 +1413,26 @@ ${(typeof WalletDetect !== "undefined" && WalletDetect.isInWalletBrowser && Wall
 // SCORE BAR
 // =====================================
 
-function scoreBar(name,value,max){
+// hasData defaults to true for any caller that doesn't pass it
+// (score bars used outside the participant/market breakdown, which
+// always have real data by construction). When hasData is explicitly
+// false, the track MUST read as empty - showing the neutral-floor
+// score as a filled bar next to a "No data" label was a real, fixed
+// bug: the two statements directly contradicted each other.
 
-    const percent = Math.min(
+function scoreBar(name,value,max,hasData=true){
 
-        (value / max) * 100,
-
-        100
-
-    );
+    const percent = hasData ? Math.min((value / max) * 100, 100) : 0;
 
     return `
 
-    <div class="scoreBarRow">
+    <div class="scoreBarRow${hasData ? "" : " noData"}">
 
         <div class="scoreBarHead">
 
             <span>${name}</span>
 
-            <strong>${value}/${max}</strong>
+            <strong>${hasData ? `${value}/${max}` : "—"}</strong>
 
         </div>
 

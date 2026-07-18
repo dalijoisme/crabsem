@@ -13,7 +13,16 @@
 
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
-<link rel="stylesheet" href="css/dashboard.css">
+<!-- Cache-busting query string (bump on every deploy that touches
+     css/dashboard.css or any js/ file below): mobile browsers and
+     wallet in-app WebViews cache static assets far more aggressively
+     and persistently than a desktop dev environment, which is
+     usually hard-refreshed constantly during development - without
+     this, a phone that already visited the site once can keep
+     running JS/CSS from before the latest fix indefinitely, with no
+     visible sign anything is stale. This was the real root cause
+     behind fixes that tested correctly on desktop but not on mobile. -->
+<link rel="stylesheet" href="css/dashboard.css?v=4">
 
 </head>
 
@@ -231,13 +240,13 @@ Select a coin to see AI analysis.
 
 </div>
 
-<script src="js/config.js"></script>
-<script src="js/analytics.js"></script>
-<script src="js/detect.js"></script>
-<script src="js/engine.js"></script>
-<script src="js/backendApi.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/dashboard.js"></script>
+<script src="js/config.js?v=4"></script>
+<script src="js/analytics.js?v=4"></script>
+<script src="js/detect.js?v=4"></script>
+<script src="js/engine.js?v=4"></script>
+<script src="js/backendApi.js?v=4"></script>
+<script src="js/ui.js?v=4"></script>
+<script src="js/dashboard.js?v=4"></script>
 
 </body>
 

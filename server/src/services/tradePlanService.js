@@ -78,10 +78,27 @@ function safeFirstReason(reasonsJson){
 // Transparent, formula-driven guidance - not a forecast. Every input
 // is a real number the engine already computed for this token right
 // now; the OUTPUT is a documented heuristic band, framed as such.
+//
+// Market Cap is the primary unit (fix: this used to be Price-based,
+// which is the wrong frame for meme coins - two tokens at the same
+// price can have wildly different supply/valuation). Price is still
+// computed and returned as secondary info, derived from the same
+// price/marketCap ratio the token already has right now - not a
+// second independent estimate.
 
-function buildRiskBands(currentPrice, signal, token){
+function buildRiskBands(token, signal){
 
-    if(currentPrice == null || currentPrice <= 0) return null;
+    const currentMc = Number(token.market_cap) || null;
+
+    const currentPrice = Number(token.price) || null;
+
+    if(currentMc == null || currentMc <= 0) return null;
+
+    // price-per-unit-of-marketcap - lets every MC band also report a
+    // real equivalent price without a second calculation basis.
+    const priceRatio = (currentPrice != null && currentPrice > 0) ? currentPrice / currentMc : null;
+
+    const toPrice = mc => priceRatio != null ? mc * priceRatio : null;
 
     const momentum = Math.abs(Number(token.price_change_1h) || 0);
 
@@ -93,39 +110,86 @@ function buildRiskBands(currentPrice, signal, token){
 
     );
 
-    const entryLow = currentPrice * (1 - bandPct / 100);
+    const entryLowMc = currentMc * (1 - bandPct / 100);
 
-    const entryHigh = currentPrice * (1 + bandPct / 100);
+    const entryHighMc = currentMc * (1 + bandPct / 100);
 
     const targetPct = (signal.participantScore / 100) * config.target.maxTargetPct;
 
-    const target = currentPrice * (1 + targetPct / 100);
+    const targetMc = currentMc * (1 + targetPct / 100);
 
     let stopPct = signal.risk === "HIGH" ? config.stopLoss.highRiskStopPct : config.stopLoss.baseStopPct;
 
     if(signal.confidence < config.stopLoss.lowConfidenceThreshold) stopPct += config.stopLoss.lowConfidenceWidenPct;
 
-    const stopLoss = currentPrice * (1 - stopPct / 100);
+    const stopMc = currentMc * (1 - stopPct / 100);
 
     return {
 
-        entryZone: { low: entryLow, high: entryHigh, bandPct },
+        entryZone: {
 
-        target: { price: target, expectedMovePct: targetPct },
+            lowMc: entryLowMc, highMc: entryHighMc,
+            lowPrice: toPrice(entryLowMc), highPrice: toPrice(entryHighMc),
+            bandPct
 
-        stopLoss: { price: stopLoss, distancePct: stopPct },
+        },
 
-        disclaimer: "Heuristic guidance derived from this token's own current price, momentum, confidence and risk - not a price prediction or a guarantee."
+        target: { marketCap: targetMc, price: toPrice(targetMc), expectedMovePct: targetPct },
+
+        stopLoss: { marketCap: stopMc, price: toPrice(stopMc), distancePct: stopPct },
+
+        disclaimer: "Heuristic guidance derived from this token's own current market cap, momentum, confidence and risk - not a price prediction or a guarantee."
 
     };
 
 }
 
+function nowAsSqliteTimestamp(){
+
+    return new Date().toISOString().slice(0, 19).replace("T", " ");
+
+}
+
 function getTradePlan(token, signal){
 
-    const timeline = buildDecisionTimeline(token.token_address);
+    const historyTimeline = buildDecisionTimeline(token.token_address);
 
-    const riskBands = buildRiskBands(token.price, signal, token);
+    // Bug fix: the historical timeline only reflects what the 5-
+    // minute recommendationLoggerService batch has already written -
+    // and when an action hasn't changed recently, buildDecisionTimeline
+    // collapses repeats down to the single row from whenever it FIRST
+    // became that action, which can read as hours old even though the
+    // recommendation is still current right now. The live signal
+    // (computed fresh for this exact request) is always added as the
+    // newest timeline entry, stamped with the real current time, so
+    // opening the app always shows an up-to-date decision on top -
+    // never a stale one waiting on the next batch tick.
+
+    const liveEntry = {
+
+        at: nowAsSqliteTimestamp(),
+
+        action: signal.action,
+
+        stage: signal.stage,
+
+        participantScore: signal.participantScore,
+
+        confidence: signal.confidence,
+
+        risk: signal.risk,
+
+        priceAtDecision: token.price,
+
+        topReason: signal.reasons?.[0] || null,
+
+        isLive: true
+
+    };
+
+    const timeline = [liveEntry, ...historyTimeline];
+
+    const riskBands = buildRiskBands(token, signal);
 
     return {
 

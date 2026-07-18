@@ -590,7 +590,7 @@ LAYOUT
 
     display:grid;
 
-    grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+    grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
 
     gap:14px;
 
@@ -599,10 +599,27 @@ LAYOUT
 }
 
 /* =======================
-CARD
+CARD - total redesign.
+Grid-based, fixed row heights, every
+element always in the same place
+regardless of content length. No
+absolute positioning anywhere - badges,
+the favorite star, everything lives in
+normal flow so nothing can overlap.
+Hierarchy (largest -> smallest visual
+weight): Recommendation (.ccAction) >
+Participant Score (.ccScoreValue) >
+Market Info (.ccMarketInfo) > Badges
+(.ccBadgeRow).
 ======================= */
 
 .coinCard{
+
+    display:grid;
+
+    grid-template-rows:36px 22px 46px 48px 34px;
+
+    gap:8px;
 
     background:#151421;
 
@@ -610,19 +627,13 @@ CARD
 
     border-radius:16px;
 
-    padding:10px;
+    padding:12px;
 
     cursor:pointer;
 
     transition:.25s;
 
-    display:flex;
-
-    flex-direction:column;
-
-    gap:6px;
-
-    position:relative;
+    overflow:hidden;
 
 }
 
@@ -636,48 +647,150 @@ CARD
 
 }
 
-/* Condensed single-line Vol/Liq/MC - the mobile-first replacement
-   for the 3-column .coinInfo grid below. Hidden on desktop (where
-   .coinInfo's extra vertical space is fine); shown only at the
-   compact mobile breakpoint, where it fits in one line instead of
-   three padded cells. */
-.coinMicroStats{
+/* ---- Header: rank, logo, name, price change, favorite ---- */
 
-    display:none;
+.ccHeader{
 
-    font-size:10px;
+    display:flex;
+
+    align-items:center;
+
+    gap:8px;
+
+    min-width:0;
+
+}
+
+.ccRank{
+
+    flex:0 0 auto;
+
+    min-width:20px;
+
+    height:20px;
+
+    padding:0 5px;
+
+    border-radius:999px;
+
+    background:rgba(255,255,255,.08);
 
     color:var(--muted);
 
-    white-space:nowrap;
+    font-size:10px;
+
+    font-weight:800;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:center;
+
+}
+
+.ccRank.medal{
+
+    background:rgba(246,185,59,.18);
+
+    font-size:13px;
+
+}
+
+.ccLogo{
+
+    width:28px;
+    height:28px;
+    min-width:28px;
+    min-height:28px;
+    aspect-ratio:1/1;
+    flex-shrink:0;
+
+    border-radius:50%;
+
+    object-fit:cover;
+
+    background:#1b1a2b;
+
+}
+
+.ccTitle{
+
+    flex:1 1 auto;
+
+    min-width:0;
+
+    display:flex;
+
+    flex-direction:column;
+
+    justify-content:center;
+
+}
+
+.ccTitle h3{
+
+    margin:0;
+
+    font-size:14px;
+
+    font-weight:700;
 
     overflow:hidden;
 
     text-overflow:ellipsis;
 
+    white-space:nowrap;
+
 }
 
-.coinMicroStats strong{
+.ccTitle small{
 
-    color:var(--ink,#e7e6f5);
+    display:block;
+
+    margin-top:1px;
+
+    color:var(--muted);
+
+    font-size:10px;
+
+    overflow:hidden;
+
+    text-overflow:ellipsis;
+
+    white-space:nowrap;
+
+}
+
+.ccChange{
+
+    flex:0 0 auto;
+
+    font-size:11.5px;
 
     font-weight:700;
 
 }
 
-/* Favorite toggle - top-right corner of every card, independent of
-   rank/entry/lifecycle badges (top-left cluster). */
+/* Favorite toggle - a real circle: box-sizing is border-box globally,
+   so an explicit min-height/min-width equal to the actual size is
+   required to override the global `button{ min-height:38px }` reset
+   below, which was previously stretching this into an oval. Lives in
+   normal flex flow now, not an absolute overlay, so it can never
+   collide with the badges below it. */
 .watchStar{
 
-    position:absolute;
+    flex:0 0 auto;
 
-    top:8px;
+    width:24px;
 
-    right:8px;
+    height:24px;
 
-    width:26px;
+    min-width:24px;
 
-    height:26px;
+    min-height:24px;
+
+    padding:0;
 
     border-radius:50%;
 
@@ -687,7 +800,7 @@ CARD
 
     color:#f6b93b;
 
-    font-size:15px;
+    font-size:13px;
 
     line-height:1;
 
@@ -699,8 +812,6 @@ CARD
 
     justify-content:center;
 
-    z-index:2;
-
 }
 
 .watchStar.active{
@@ -711,14 +822,305 @@ CARD
 
 }
 
-/* Mode tabs - Trending / Recently Viewed / Watch Later / Favorites */
+/* ---- Badge row: EARLY/MID/LATE + data-freshness tag. Always
+   reserves its own row (grid-template-rows above) so its presence or
+   absence never changes card height - empty is just quiet, not
+   collapsed. ---- */
+
+.ccBadgeRow{
+
+    display:flex;
+
+    align-items:center;
+
+    gap:6px;
+
+    min-width:0;
+
+    overflow:hidden;
+
+}
+
+.entryBadge{
+
+    flex:0 0 auto;
+
+    padding:2px 8px;
+
+    border-radius:999px;
+
+    font-size:9px;
+
+    font-weight:800;
+
+    letter-spacing:.4px;
+
+    white-space:nowrap;
+
+}
+
+.entryBadge.early{ background:rgba(24,214,123,.18); color:#4ee79b; }
+.entryBadge.mid{ background:rgba(246,185,59,.18); color:#f6b93b; }
+.entryBadge.late{ background:rgba(255,90,90,.18); color:#ff8080; }
+
+.lifecycleTag{
+
+    flex:0 1 auto;
+
+    min-width:0;
+
+    padding:2px 7px;
+
+    border-radius:999px;
+
+    font-size:8.5px;
+
+    font-weight:800;
+
+    letter-spacing:.02em;
+
+    white-space:nowrap;
+
+    overflow:hidden;
+
+    text-overflow:ellipsis;
+
+}
+
+.lifecycleTag.watchlist{ background:rgba(246,185,59,.16); color:#f6b93b; }
+.lifecycleTag.archived{ background:rgba(255,77,77,.16); color:#ff4d4d; }
+
+.lifecycleLabel.active{ color:#16c784; }
+.lifecycleLabel.watchlist{ color:#f6b93b; }
+.lifecycleLabel.archived{ color:#ff4d4d; }
+
+/* ---- Market Info: Vol / Liq / MCap ---- */
+
+.ccMarketInfo{
+
+    display:grid;
+
+    grid-template-columns:repeat(3,1fr);
+
+    gap:6px;
+
+}
+
+.ccMarketInfo div{
+
+    min-width:0;
+
+    background:#1b1a2b;
+
+    padding:4px 2px;
+
+    border-radius:8px;
+
+    text-align:center;
+
+}
+
+.ccMarketInfo span{
+
+    display:block;
+
+    color:var(--muted);
+
+    font-size:9px;
+
+}
+
+.ccMarketInfo strong{
+
+    display:block;
+
+    margin-top:2px;
+
+    font-size:11px;
+
+    overflow:hidden;
+
+    text-overflow:ellipsis;
+
+    white-space:nowrap;
+
+}
+
+/* ---- AI: Participant Score (dominant number) + Confidence/Risk ---- */
+
+.ccAiInfo{
+
+    display:flex;
+
+    align-items:center;
+
+    gap:8px;
+
+    background:#1b1a2b;
+
+    border-radius:10px;
+
+    padding:5px 10px;
+
+    min-width:0;
+
+}
+
+.ccScore{
+
+    flex:0 0 auto;
+
+    display:flex;
+
+    flex-direction:column;
+
+    align-items:flex-start;
+
+    line-height:1.15;
+
+}
+
+.ccScoreLabel{
+
+    font-size:8.5px;
+
+    color:var(--muted);
+
+    letter-spacing:.4px;
+
+}
+
+.ccScoreValue{
+
+    font-size:23px;
+
+    font-weight:800;
+
+}
+
+.ccAiMeta{
+
+    flex:1 1 auto;
+
+    min-width:0;
+
+    margin-left:auto;
+
+    display:flex;
+
+    flex-direction:column;
+
+    align-items:flex-end;
+
+    gap:2px;
+
+    font-size:10px;
+
+    color:var(--muted);
+
+    text-align:right;
+
+}
+
+.ccAiMeta strong{ color:#fff; }
+.ccAiMeta .riskHigh strong{ color:#ff5a5a; }
+.ccAiMeta .riskMed strong{ color:#f6b93b; }
+.ccAiMeta .riskLow strong{ color:#18d67b; }
+
+/* ---- Footer: the Recommendation - highest visual weight on the
+   card (full-width, saturated color, bold) ---- */
+
+.ccFooter{
+
+    display:flex;
+
+    align-items:stretch;
+
+    gap:8px;
+
+    min-width:0;
+
+}
+
+.ccAction{
+
+    flex:1 1 auto;
+
+    min-width:0;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:center;
+
+    border-radius:9px;
+
+    color:#fff;
+
+    font-size:11.5px;
+
+    font-weight:800;
+
+    letter-spacing:.2px;
+
+    overflow:hidden;
+
+    text-overflow:ellipsis;
+
+    white-space:nowrap;
+
+    padding:0 8px;
+
+}
+
+.ccActionWarn{
+
+    box-shadow:inset 0 0 0 2px rgba(255,90,90,.55);
+
+}
+
+.ccChain{
+
+    flex:0 0 auto;
+
+    display:flex;
+
+    align-items:center;
+
+    justify-content:center;
+
+    background:#292641;
+
+    padding:0 9px;
+
+    border-radius:9px;
+
+    font-size:9.5px;
+
+    font-weight:700;
+
+    color:var(--muted);
+
+}
+
+/* =======================
+AI TRADE PLAN / TOKEN STATUS / MODE TABS / DETAIL WATCH BUTTON
+======================= */
+
+/* Mode tabs - Trending / Recently Viewed / Watch Later / Favorites.
+   Same 16px rhythm as .statsCompact's own margin above it, and the
+   same again below before the card grid starts - previously 0
+   bottom spacing here left the tabs touching the first row of cards. */
 .modeTabs{
 
     display:flex;
 
     gap:8px;
 
-    padding:10px clamp(14px,3vw,28px) 0;
+    margin:0 20px 16px;
+
+    padding:0;
 
     overflow-x:auto;
 
@@ -760,15 +1162,16 @@ CARD
 
 }
 
-/* Detail panel additions: watch button, smart recall, token status,
-   AI Trade Plan bands/timeline */
+/* Detail panel: watch-later toggle - deliberately a small, secondary
+   chip (roughly 40% smaller than the main Recommendation pill) so it
+   never competes with it for attention. */
 .detailWatchBtn{
+
+    flex:0 0 auto;
 
     margin-left:auto;
 
-    align-self:flex-start;
-
-    padding:6px 12px;
+    padding:4px 10px;
 
     border-radius:999px;
 
@@ -778,13 +1181,15 @@ CARD
 
     color:var(--muted);
 
-    font-size:11.5px;
+    font-size:10px;
 
     font-weight:700;
 
     cursor:pointer;
 
     white-space:nowrap;
+
+    min-height:0;
 
 }
 
@@ -875,7 +1280,23 @@ CARD
 
 .tradePlanBands strong{
 
-    font-size:12px;
+    font-size:13px;
+
+    display:block;
+
+}
+
+.tradePlanBands small{
+
+    display:block;
+
+    margin-top:2px;
+
+    font-size:9.5px;
+
+    color:var(--muted);
+
+    font-weight:400;
 
 }
 
@@ -896,6 +1317,36 @@ CARD
 
 }
 
+.tradePlanTimeline .tradePlanStep.isLive{
+
+    position:relative;
+
+    padding-left:10px;
+
+}
+
+.tradePlanTimeline .tradePlanStep.isLive:before{
+
+    content:"";
+
+    position:absolute;
+
+    left:0;
+
+    top:8px;
+
+    width:6px;
+
+    height:6px;
+
+    border-radius:50%;
+
+    background:#18d67b;
+
+    box-shadow:0 0 0 3px rgba(24,214,123,.2);
+
+}
+
 .tradePlanTimeline .tradePlanStep span{
 
     font-size:10.5px;
@@ -909,412 +1360,6 @@ CARD
     font-size:11px;
 
     color:#a8a6bd;
-
-}
-
-.coinHeader{
-
-    display:flex;
-
-    align-items:center;
-
-    gap:10px;
-
-}
-
-.coinLogo{
-
-    width:36px;
-    height:36px;
-    min-width:36px;
-    min-height:36px;
-    aspect-ratio:1/1;
-    flex-shrink:0;
-
-    border-radius:50%;
-
-    object-fit:cover;
-
-}
-
-.coinHeader h3{
-
-    margin:0;
-
-    font-size:17px;
-
-}
-
-.coinHeader small{
-
-    display:block;
-
-    margin-top:2px;
-
-    color:var(--muted);
-
-    font-size:11px;
-
-}
-
-.coinHeader span{
-
-    margin-left:auto;
-
-    font-size:15px;
-
-    font-weight:700;
-
-}
-
-/* =======================
-ENTRY BADGE (EARLY/MID/LATE)
-======================= */
-
-.entryBadge{
-
-    position:absolute;
-
-    top:10px;
-
-    right:10px;
-
-    padding:3px 9px;
-
-    border-radius:999px;
-
-    font-size:10px;
-    font-weight:800;
-
-    letter-spacing:.5px;
-
-}
-
-.entryBadge.early{
-
-    background:rgba(24,214,123,.18);
-
-    color:#4ee79b;
-
-}
-
-.entryBadge.mid{
-
-    background:rgba(246,185,59,.18);
-
-    color:#f6b93b;
-
-}
-
-.entryBadge.late{
-
-    background:rgba(255,90,90,.18);
-
-    color:#ff8080;
-
-}
-
-/* =======================
-RANK BADGE
-======================= */
-
-.rankBadge{
-
-    position:absolute;
-
-    top:10px;
-
-    left:10px;
-
-    min-width:26px;
-
-    height:22px;
-
-    padding:0 7px;
-
-    border-radius:999px;
-
-    background:rgba(255,255,255,.08);
-
-    color:var(--muted);
-
-    font-size:11px;
-
-    font-weight:800;
-
-    display:flex;
-
-    align-items:center;
-
-    justify-content:center;
-
-}
-
-.rankBadge.medal{
-
-    background:rgba(246,185,59,.18);
-
-    font-size:14px;
-
-}
-
-/* Data-integrity: only rendered for WATCHLIST/ARCHIVED tokens (see
-   js/ui.js lifecycleTag) - ACTIVE tokens show nothing here at all. */
-.lifecycleTag{
-
-    position:absolute;
-
-    top:38px;
-
-    right:10px;
-
-    max-width:62%;
-
-    padding:3px 8px;
-
-    border-radius:999px;
-
-    font-size:9.5px;
-
-    font-weight:800;
-
-    letter-spacing:.02em;
-
-    text-align:center;
-
-    line-height:1.3;
-
-}
-
-.lifecycleTag.watchlist{
-
-    background:rgba(246,185,59,.16);
-
-    color:#f6b93b;
-
-}
-
-.lifecycleTag.archived{
-
-    background:rgba(255,77,77,.16);
-
-    color:#ff4d4d;
-
-}
-
-.riskConflictNote{
-
-    margin-top:8px;
-
-    padding:6px 8px;
-
-    border-radius:8px;
-
-    background:rgba(255,77,77,.12);
-
-    color:#ff8080;
-
-    font-size:10.5px;
-
-    font-weight:600;
-
-    line-height:1.35;
-
-    text-align:center;
-
-}
-
-.lifecycleLabel.active{ color:#16c784; }
-
-.lifecycleLabel.watchlist{ color:#f6b93b; }
-
-.lifecycleLabel.archived{ color:#ff4d4d; }
-
-/* =======================
-INFO BOX
-======================= */
-
-.coinInfo{
-
-    display:grid;
-
-    grid-template-columns:repeat(3,1fr);
-
-    gap:8px;
-
-}
-
-.coinInfo div{
-
-    background:#1b1a2b;
-
-    padding:6px 4px;
-
-    border-radius:10px;
-
-    text-align:center;
-
-}
-
-.coinInfo small{
-
-    color:var(--muted);
-
-    font-size:10px;
-
-}
-
-.coinInfo strong{
-
-    display:block;
-
-    margin-top:3px;
-
-    font-size:12px;
-
-}
-
-/* =======================
-AI BOX
-======================= */
-
-.signalBox{
-
-    background:#1b1a2b;
-
-    border-radius:12px;
-
-    padding:8px;
-
-    text-align:center;
-
-    border:1px solid transparent;
-
-}
-
-.signalBox small{
-
-    color:#aeb4c8;
-
-    font-size:11px;
-
-}
-
-.signalBox h2{
-
-    margin:3px 0;
-
-    font-size:28px;
-
-    line-height:1;
-
-}
-
-.signalPill{
-
-    display:inline-block;
-
-    padding:4px 12px;
-
-    border-radius:20px;
-
-    color:#fff;
-
-    font-size:12px;
-
-    font-weight:700;
-
-    margin-bottom:5px;
-
-}
-
-.signalMetaRow{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    font-size:11.5px;
-
-    margin-top:5px;
-
-}
-
-.signalTargetMC{
-
-    margin-top:4px;
-
-    font-size:11.5px;
-
-    opacity:.75;
-
-}
-
-.signalBox .status{
-
-    display:inline-block;
-
-    padding:5px 14px;
-
-    border-radius:20px;
-
-    color:white;
-
-    font-size:12px;
-
-    font-weight:700;
-
-    margin:6px 0;
-
-}
-
-.signalRow{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    margin-top:8px;
-
-    font-size:11px;
-
-}
-
-.signalMC{
-
-    margin-top:6px;
-
-    font-size:11px;
-
-    color:var(--muted);
-
-}
-
-/* =======================
-DEX
-======================= */
-
-.dexBadge{
-
-    display:inline-flex;
-
-    align-items:center;
-
-    justify-content:center;
-
-    margin-top:auto;
-
-    background:#292641;
-
-    padding:6px 10px;
-
-    border-radius:8px;
-
-    font-size:11px;
-
-    font-weight:600;
-
-    width:max-content;
 
 }
 
@@ -1357,7 +1402,7 @@ independent vertical scroll)
 
 #detailContent{
 
-    padding:24px;
+    padding:18px 20px;
 
     overflow-y:auto;
 
@@ -1395,7 +1440,13 @@ independent vertical scroll)
 
 }
 
-.detail-panel button:not(.closeDetailBtn){
+/* Root cause of "Watch Later too big" (fix #6): this generic
+   full-width/purple/14px-padded rule has higher specificity
+   (class + :not(class)) than .detailWatchBtn's own rule (one class),
+   so it was silently winning regardless of source order - excluding
+   it here is what actually makes the small secondary-chip styling
+   take effect. */
+.detail-panel button:not(.closeDetailBtn):not(.detailWatchBtn){
 
     width:100%;
 
@@ -1441,7 +1492,7 @@ ul{
 
 li{
 
-    margin-bottom:8px;
+    margin-bottom:6px;
 
     color:#d8dbea;
 
@@ -1529,16 +1580,22 @@ DETAIL SECTIONS
 
 .sectionTitle{
 
-    font-size:12px;
+    font-size:11.5px;
     font-weight:800;
 
     letter-spacing:.6px;
 
     color:var(--muted);
 
-    margin:22px 0 10px;
+    margin:16px 0 8px;
 
     text-transform:uppercase;
+
+}
+
+.sectionTitle:first-child{
+
+    margin-top:0;
 
 }
 
@@ -1564,7 +1621,7 @@ DETAIL SECTIONS
 
     color:#d8dbea;
 
-    margin-bottom:8px;
+    margin-bottom:6px;
 
 }
 
@@ -1641,7 +1698,7 @@ DETAIL SECTIONS
 
     border-radius:12px;
 
-    padding:14px;
+    padding:11px 14px;
 
 }
 
@@ -1655,7 +1712,7 @@ DETAIL SECTIONS
 
     color:var(--muted);
 
-    margin-bottom:8px;
+    margin-bottom:6px;
 
 }
 
@@ -1868,6 +1925,36 @@ RESPONSIVE
 
 }
 
+/* =======================
+TABLET - a genuinely distinct tier, not desktop-minus-a-column or
+mobile-plus-a-column: a fixed 2-up card grid (predictable rhythm on a
+tablet's wider-but-still-narrow viewport) at a slightly tighter
+density than desktop. The detail panel is already a full-screen
+overlay below 1100px (see that breakpoint), which is the correct
+tablet behavior - a permanently docked 380px sidebar doesn't fit a
+tablet's proportions the way it does a wide desktop monitor.
+======================= */
+
+@media(min-width:601px) and (max-width:1100px){
+
+    .coin-grid{
+
+        grid-template-columns:repeat(2,1fr);
+
+        gap:12px;
+
+    }
+
+    .coinCard{
+
+        grid-template-rows:34px 20px 44px 46px 32px;
+
+        padding:11px;
+
+    }
+
+}
+
 @media(max-width:850px){
 
     .topbar{
@@ -2003,234 +2090,190 @@ RESPONSIVE
     }
 
     /* =======================
-    MOBILE-FIRST COMPACT CARD - not a squeezed-down
-    desktop card, a genuinely different, much denser
-    row layout. Target: 5-7 tokens visible in one
-    phone screen without opening the detail panel,
-    so a user can scan a whole page of recommendations
-    in seconds. Vol/Liq/MCap collapse into one
-    truncated micro-stats line (.coinMicroStats)
-    instead of a 3-cell grid; the big score number and
-    the redundant status-restates-the-pill badge are
-    dropped entirely on mobile (both are one tap away
-    in the detail panel) so every pixel of card height
-    is either the symbol, the action, or the score -
-    the three things a 2-second glance actually needs.
+    MOBILE CARD - HOTFIX #3 REDESIGN.
+    Real mobile-first layout, not the previous sprint's
+    shrunk-desktop-row: a genuine two-column split.
+    LEFT = token branding (bigger logo, bigger name,
+    bigger EARLY/WATCHLIST badges, clear signal action) -
+    RIGHT = Volume/Liquidity/Market Cap, stacked and
+    sized for one-second readability. Same 5 semantic
+    blocks as desktop (header/badges/market/ai/footer),
+    just remapped into a 2-column grid instead of 5
+    stacked rows - no HTML change, only CSS. Desktop is
+    completely untouched (all of this is inside this one
+    max-width:600px query). Fixed row heights again, so
+    every mobile card is still the same height regardless
+    of content - deliberately taller than the previous
+    sprint's ultra-compact version, since "much bigger,
+    much more readable" and "5-7 rows visible" pull in
+    opposite directions and this hotfix explicitly asks
+    for readability.
     ======================= */
+
+    .coin-grid{
+
+        grid-template-columns:1fr;
+
+        gap:10px;
+
+    }
 
     .coinCard{
 
-        display:grid;
+        grid-template-columns:1.15fr 1fr;
 
-        grid-template-columns:1fr auto;
+        grid-template-rows:56px 24px 36px;
 
         grid-template-areas:
 
-            "header header"
+            "header market"
 
-            "pill    micro";
+            "badges market"
 
-        column-gap:8px;
+            "footer ai";
+
+        column-gap:10px;
+
+        row-gap:6px;
+
+        padding:10px 12px;
+
+        border-radius:14px;
+
+    }
+
+    .ccHeader{ grid-area:header; }
+
+    .ccRank{
+
+        min-width:16px;
+
+        height:16px;
+
+        font-size:8px;
+
+    }
+
+    .ccRank.medal{ font-size:11px; }
+
+    /* "Logo jauh lebih besar" - more than doubled from the previous
+       20px compact-row version, real branding presence. */
+    .ccLogo{
+
+        width:44px;
+        height:44px;
+        min-width:44px;
+        min-height:44px;
+
+    }
+
+    /* "Token Name lebih besar" - both the symbol and the full name
+       are shown now (the full name was hidden entirely in the old
+       compact-row layout to save space that this redesign no longer
+       needs to save). */
+    .ccTitle h3{ font-size:15px; }
+
+    .ccTitle small{ display:block; font-size:10.5px; }
+
+    /* Price change % moves out of the mobile card - the right column
+       is reserved for exactly Volume/Liquidity/Market Cap per this
+       hotfix's spec; still one tap away in the detail panel. */
+    .ccChange{ display:none; }
+
+    .watchStar{
+
+        width:22px;
+        height:22px;
+        min-width:22px;
+        min-height:22px;
+        font-size:12px;
+
+    }
+
+    .ccBadgeRow{
+
+        grid-area:badges;
+
+        flex-wrap:wrap;
 
         row-gap:4px;
+
+    }
+
+    /* "EARLY badge lebih besar" / "WATCHLIST badge lebih besar" */
+    .entryBadge{ font-size:10px; padding:3px 9px; }
+
+    .lifecycleTag{ font-size:9px; padding:3px 8px; max-width:120px; }
+
+    /* Right column: Volume / Liquidity / Market Cap, stacked and
+       sized to actually read at a glance instead of one truncated
+       inline row. Spans the header+badges row height (grid area
+       "market" repeats across both), so it's vertically roomy. */
+    .ccMarketInfo{
+
+        grid-area:market;
+
+        display:flex;
+
+        flex-direction:column;
+
+        justify-content:center;
+
+        gap:6px;
+
+        background:rgba(255,255,255,.04);
+
+        border-radius:10px;
 
         padding:8px 10px;
 
     }
 
-    .rankBadge{
-
-        position:static;
-
-        min-width:18px;
-
-        height:18px;
-
-        font-size:9px;
-
-        margin-right:2px;
-
-    }
-
-    .entryBadge{
-
-        top:6px;
-
-        right:34px;
-
-        font-size:8px;
-
-        padding:1px 6px;
-
-    }
-
-    .lifecycleTag{
-
-        top:6px;
-
-        right:auto;
-
-        left:6px;
-
-        max-width:70px;
-
-        font-size:7px;
-
-        padding:1px 5px;
-
-    }
-
-    .watchStar{
-
-        top:6px;
-
-        right:6px;
-
-        width:20px;
-
-        height:20px;
-
-        font-size:12px;
-
-    }
-
-    .coinHeader{
-
-        grid-area:header;
-
-        gap:6px;
-
-        align-items:center;
-
-    }
-
-    .coinLogo{
-
-        width:22px;
-
-        height:22px;
-
-        min-width:22px;
-
-        min-height:22px;
-
-    }
-
-    .coinHeader h3{
-
-        font-size:12.5px;
-
-        line-height:1.2;
-
-    }
-
-    .coinHeader small{
-
-        display:none; /* full name - symbol + micro-stats already identify the token, one tap opens the rest */
-
-    }
-
-    .coinHeader span{
-
-        font-size:10.5px;
-
-        margin-left:auto;
-
-    }
-
-    .coinMicroStats{
-
-        display:block;
-
-        grid-area:micro;
-
-        text-align:right;
-
-        align-self:center;
-
-    }
-
-    .coinInfo{
-
-        display:none; /* replaced by .coinMicroStats above */
-
-    }
-
-    .signalBox{
-
-        grid-area:pill;
-
-        display:flex;
-
-        align-items:center;
-
-        gap:6px;
-
-        border-width:1px;
-
-        border-radius:8px;
-
-        padding:3px 6px;
+    .ccMarketInfo div{
 
         background:none;
 
-    }
+        padding:0;
 
-    .scoreLabel{
+        text-align:right;
 
-        display:none;
+        display:flex;
 
-    }
+        justify-content:space-between;
 
-    .signalBox h2{
+        align-items:baseline;
 
-        font-size:13px;
-
-        order:2;
+        gap:8px;
 
     }
 
-    .signalPill{
+    .ccMarketInfo span{ font-size:10.5px; }
 
-        font-size:9px;
+    .ccMarketInfo strong{ margin-top:0; font-size:13px; }
 
-        padding:2px 7px;
+    /* Score/Confidence/Risk - kept (nothing removed), but secondary
+       to the signal action button, sitting quietly bottom-right. */
+    .ccAiInfo{
 
-        margin-bottom:0;
+        grid-area:ai;
 
-        order:1;
-
-    }
-
-    .signalMetaRow{
-
-        display:none; /* stage/confidence/risk - one tap away in the detail panel */
+        padding:3px 8px;
 
     }
 
-    .riskConflictNote{
+    .ccScoreLabel{ display:none; }
 
-        display:none;
+    .ccScoreValue{ font-size:15px; }
 
-    }
+    .ccAiMeta{ flex-direction:row; gap:6px; font-size:8.5px; }
 
-    .signalTargetMC{
+    /* "Signal badge jelas" - the clearest, boldest element on the
+       left column. */
+    .ccFooter{ grid-area:footer; height:auto; }
 
-        display:none;
+    .ccAction{ font-size:11.5px; padding:7px 8px; min-height:32px; }
 
-    }
-
-    .statusBadge{
-
-        display:none; /* redundant with .signalPill above - removed on mobile, not just hidden-but-taking-space */
-
-    }
-
-    .dexBadge{
-
-        display:none;
-
-    }
+    .ccChain{ display:none; } /* every token on this platform is SOL today - low information value at this density */
 
 }
 
@@ -2276,53 +2319,6 @@ RESPONSIVE
         font-size:8px;
 
     }
-
-}
-.statusBadge{
-
-display:inline-block;
-
-margin-top:0;
-
-padding:4px 12px;
-
-border-radius:999px;
-
-font-size:11px;
-
-font-weight:700;
-
-}
-
-.strong-buy{
-
-background:#16c784;
-
-color:white;
-
-}
-
-.buy{
-
-background:#8b5cf6;
-
-color:white;
-
-}
-
-.hold{
-
-background:#f5a623;
-
-color:white;
-
-}
-
-.avoid{
-
-background:#ef4444;
-
-color:white;
 
 }
 /* ===========================
@@ -2606,7 +2602,9 @@ indicator) + touch target polish
 .walletLogoutBtn,
 .closeDetailBtn,
 .coinCard,
-.statusBadge{
+.watchStar,
+.modeTab,
+.detailWatchBtn{
 
     -webkit-tap-highlight-color:transparent;
 
@@ -2779,9 +2777,13 @@ img{
     }
 
     /* Action buttons: full-width, tall,
-       thumb-reach friendly */
+       thumb-reach friendly - excludes .detailWatchBtn, which is
+       deliberately a small secondary chip (see fix #6: Watch Later
+       must never be as prominent as the Recommendation) and would
+       otherwise get stretched to the same size as Copy Contract/
+       DexScreener/GMGN by this same generic selector. */
 
-    .detail-panel button,
+    .detail-panel button:not(.detailWatchBtn),
     .detailActions button{
 
         width:100%;
@@ -2794,17 +2796,6 @@ img{
 
     }
 
-    /* Badges proportional, never squashed */
-
-    .tag, .signalPill, .entryBadge{
-
-        font-size:11px;
-
-        padding:4px 10px;
-
-        white-space:nowrap;
-
-    }
 
     /* History timeline breathing room */
 
@@ -2877,7 +2868,7 @@ img{
 
 .scoreBarRow{
 
-    margin-bottom:14px;
+    margin-bottom:10px;
 
 }
 
@@ -2887,13 +2878,36 @@ img{
 
     justify-content:space-between;
 
-    align-items:center;
+    align-items:baseline;
 
-    gap:12px;
+    flex-wrap:wrap;
+
+    gap:4px 12px;
 
     margin-bottom:6px;
 
     font-size:13px;
+
+}
+
+/* Hotfix #4: the "No data" label grew into a real, contextual reason
+   ("Security — Security check not yet run") - noticeably longer than
+   the old "(No data)" suffix. Lets it wrap onto its own line in the
+   narrow detail panel instead of overflowing, while the score value
+   on the right never wraps. */
+.scoreBarHead span{
+
+    flex:1 1 160px;
+
+    min-width:0;
+
+}
+
+.scoreBarHead strong{
+
+    flex:0 0 auto;
+
+    white-space:nowrap;
 
 }
 
@@ -2906,6 +2920,21 @@ img{
     border-radius:999px;
 
     overflow:hidden;
+
+}
+
+/* No real data - the track stays visibly empty (not the neutral-floor
+   score rendered as if it were a real fill) and the row dims slightly
+   so "no data" reads as absence, not as a low-but-real score. */
+.scoreBarRow.noData .scoreBarHead{
+
+    opacity:.55;
+
+}
+
+.scoreBarRow.noData .scoreBarTrack{
+
+    background:#1c1b2c;
 
 }
 

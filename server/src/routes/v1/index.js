@@ -13,6 +13,7 @@ const validationRoutes = require("./validation");
 const walletsRoutes = require("./wallets");
 const userHistoryRoutes = require("./userHistory");
 const adminRoutes = require("./admin");
+const predictionValidationRoutes = require("./predictionValidation");
 
 const router = express.Router();
 
@@ -26,5 +27,6 @@ router.use(validationRoutes);
 router.use(walletsRoutes);
 router.use(userHistoryRoutes);
 router.use(adminRoutes);
+router.use(predictionValidationRoutes);
 
 module.exports = router;

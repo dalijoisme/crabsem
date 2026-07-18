@@ -79,4 +79,23 @@ function findPeakPrice(tokenAddress){
 
 }
 
-module.exports = { insertMany, findPriceAtOrAfter, countAll, pruneOlderThan, findPeakPrice };
+// Real, ordered price/market-cap time series for one token since a
+// given timestamp (chronological, oldest first) - used by
+// predictionValidationService.js to determine which of TP/SL was
+// touched FIRST (a token can pump then dump within the same check
+// window; checking only the latest snapshot would silently miss
+// whichever happened first) and to compute a real MFE/MAE across the
+// full observed range, not just "whatever the price is right now".
+
+function findRangeForToken(tokenAddress, fromTimestamp){
+
+    return db.prepare(`
+        SELECT price, market_cap, liquidity, recorded_at
+        FROM token_price_history
+        WHERE token_address = ? AND datetime(recorded_at) >= datetime(?)
+        ORDER BY recorded_at ASC
+    `).all(tokenAddress, fromTimestamp);
+
+}
+
+module.exports = { insertMany, findPriceAtOrAfter, countAll, pruneOlderThan, findPeakPrice, findRangeForToken };

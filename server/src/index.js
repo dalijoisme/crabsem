@@ -57,6 +57,7 @@ console.log(`[startup] Database connected and migrated: ${config.DB_PATH}`);
 const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
 const validationScheduler = require("./scheduler/validationScheduler");
 const walletScheduler = require("./scheduler/walletScheduler");
+const predictionValidationScheduler = require("./scheduler/predictionValidationScheduler");
 const app = require("./app");
 
 // Startup secret validation: previously a missing GMGN_API_KEY/
@@ -88,6 +89,8 @@ const validationSchedulerHandle = validationScheduler.start();
 
 const walletSchedulerHandle = walletScheduler.start();
 
+const predictionValidationSchedulerHandle = predictionValidationScheduler.start();
+
 const server = app.listen(config.PORT, () => {
 
     console.log(`[startup] API ready - CRAB AGENT server listening on port ${config.PORT}`);
@@ -111,6 +114,8 @@ function shutdown(signal){
     validationSchedulerHandle.stop();
 
     walletSchedulerHandle.stop();
+
+    predictionValidationSchedulerHandle.stop();
 
     // Previously never closed the shared better-sqlite3 connection,
     // relying on process exit to release the file handle - in WAL

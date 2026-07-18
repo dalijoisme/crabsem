@@ -22,7 +22,7 @@ async function search(req, res, next){
 
         }
 
-        const result = tokenQueryService.search(q, limitCheck.limit);
+        const result = await tokenQueryService.search(q, limitCheck.limit);
 
         sendSuccess(res, result);
 

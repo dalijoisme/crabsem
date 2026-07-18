@@ -33,6 +33,7 @@ const gmgnLaunchpadStatsRepository = require("../repositories/gmgnLaunchpadStats
 const gmgnOndemandCacheRepository = require("../repositories/gmgnOndemandCacheRepository");
 const walletRepository = require("../repositories/walletRepository");
 const tokenStatusService = require("./tokenStatusService");
+const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
 
 const accumulation = require("./intelligence/participant/accumulation");
 const smartMoney = require("./intelligence/participant/smartMoney");
@@ -261,6 +262,120 @@ function scoreToAction(participantScore){
     if(participantScore >= config.actionTiers.hold) return "HOLD";
 
     return "AVOID";
+
+}
+
+// =====================================
+// STRUCTURAL SELF-VALIDATION (see config/scoringConfig.js for the
+// full reasoning) - counts real, already-available evidence that
+// directly contradicts a BUY-tier action, then downgrades the action
+// by one or two tiers accordingly. Runs AFTER the participant-score-
+// driven base action and BEFORE the hard safety veto: this is a
+// graduated "does real trend/flow evidence agree with this?" check,
+// not the absolute safety net that veto is.
+// =====================================
+
+const ACTION_ORDER = ["STRONG BUY", "BUY", "HOLD", "AVOID"];
+
+function downgradeActionTo(action, target){
+
+    // Never upgrades, and never moves an action past AVOID - only
+    // ever steps DOWN the fixed tier order toward target.
+    if(ACTION_ORDER.indexOf(target) <= ACTION_ORDER.indexOf(action)) return action;
+
+    return target;
+
+}
+
+function computeStructuralRedFlags(token, trenchesEntry, participantModules){
+
+    const s = config.structuralValidation;
+
+    const flags = [];
+
+    const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
+
+    const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
+
+    if(change1h != null && change1h <= s.downtrend1hPct){
+
+        flags.push(`Real downtrend: price down ${Math.abs(change1h).toFixed(1)}% in the last hour`);
+
+    }
+
+    if(change5m != null && change5m <= s.recentDump5mPct){
+
+        flags.push(`Recent dump detected: price down ${Math.abs(change5m).toFixed(1)}% in the last 5 minutes`);
+
+    }
+
+    const peak = tokenPriceHistoryRepository.findPeakPrice(token.token_address);
+
+    if(peak != null && peak > 0 && token.price != null){
+
+        const drawdown = (peak - Number(token.price)) / peak;
+
+        if(drawdown >= s.structuralBreakdownDrawdown){
+
+            flags.push(`Structural breakdown: price is ${(drawdown*100).toFixed(0)}% below its real observed peak on this platform`);
+
+        }
+
+    }
+
+    if(trenchesEntry?.net_buy_24h != null && Number(trenchesEntry.net_buy_24h) <= s.netDistributionUsd){
+
+        flags.push(`Net distribution confirmed: $${Math.abs(Math.round(trenchesEntry.net_buy_24h)).toLocaleString()} net sold (24h)`);
+
+    }
+
+    if(participantModules.smartMoney.hasData && participantModules.smartMoney.score <= participantModules.smartMoney.max * s.distributingSubScoreFraction){
+
+        flags.push("Smart money is net exiting this token, not accumulating");
+
+    }
+
+    if(participantModules.kol.hasData && participantModules.kol.score <= participantModules.kol.max * s.distributingSubScoreFraction){
+
+        flags.push("KOL wallets are net exiting this token, not accumulating");
+
+    }
+
+    return flags;
+
+}
+
+function applyStructuralDowngrade(action, redFlags){
+
+    const s = config.structuralValidation.downgradeAfter;
+
+    const count = redFlags.length;
+
+    let finalAction = action;
+
+    if(action === "STRONG BUY"){
+
+        if(count >= s.strongBuyToHold) finalAction = downgradeActionTo(action, "HOLD");
+        else if(count >= s.strongBuyToBuy) finalAction = downgradeActionTo(action, "BUY");
+
+    }
+    else if(action === "BUY"){
+
+        if(count >= s.buyToHold) finalAction = downgradeActionTo(action, "HOLD");
+
+    }
+
+    return {
+
+        action: finalAction,
+
+        downgraded: finalAction !== action,
+
+        redFlags,
+
+        originalAction: action
+
+    };
 
 }
 
@@ -581,11 +696,22 @@ function analyzeToken(token, ctx){
 
     const riskReasons = [...participantRiskReasons, ...marketRiskReasons];
 
-    // ---- ACTION (participant-driven, market can only veto down) ----
+    // ---- ACTION (participant-driven; structural evidence and market
+    // safety facts can only ever move it down, never up) ----
 
     const baseAction = scoreToAction(participantScore);
 
-    const veto = applySafetyVeto(baseAction, securityFacts, marketModules.liquidity.facts, token.holders != null ? Number(token.holders) : null);
+    const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules);
+
+    const selfValidation = applyStructuralDowngrade(baseAction, structuralRedFlags);
+
+    if(selfValidation.downgraded){
+
+        riskReasons.unshift(`Self-validation downgraded ${selfValidation.originalAction} -> ${selfValidation.action}: ${structuralRedFlags.join("; ")}`);
+
+    }
+
+    const veto = applySafetyVeto(selfValidation.action, securityFacts, marketModules.liquidity.facts, token.holders != null ? Number(token.holders) : null);
 
     const action = veto.action;
 
@@ -634,6 +760,18 @@ function analyzeToken(token, ctx){
         tokenStatus,
 
         freshness,
+
+        selfValidation: {
+
+            checked: true,
+
+            downgraded: selfValidation.downgraded,
+
+            redFlags: selfValidation.redFlags,
+
+            originalAction: selfValidation.originalAction
+
+        },
 
         reasons,
 

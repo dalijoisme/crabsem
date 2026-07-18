@@ -96,7 +96,10 @@ function score(activities, change1h){
 
     }
 
-    const earlinessFactor = lookupFactor(config.participant.earlinessCurve, change1h ?? 0, "maxChange1h");
+    // BUGFIX (engine-quality sprint) - see accumulation.js's identical
+    // comment: magnitude, not signed value, or a crashing token was
+    // wrongly scored as "early" and kept full participant credit.
+    const earlinessFactor = lookupFactor(config.participant.earlinessCurve, Math.abs(change1h ?? 0), "maxChange1h");
 
     const finalScore = Math.round(raw * earlinessFactor);
 

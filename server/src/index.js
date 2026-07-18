@@ -11,10 +11,6 @@
 const config = require("./config/env");
 const db = require("./database/connection");
 const { runMigrations } = require("./database/migrate");
-const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
-const validationScheduler = require("./scheduler/validationScheduler");
-const walletScheduler = require("./scheduler/walletScheduler");
-const app = require("./app");
 
 // Production safety net: one uncaught error anywhere (a bug in a
 // future collector, a bad promise chain, etc.) must never be allowed
@@ -42,6 +38,26 @@ console.log("[startup] Connecting to database...");
 runMigrations();
 
 console.log(`[startup] Database connected and migrated: ${config.DB_PATH}`);
+
+// DEPLOY-SAFETY FIX (engine-quality sprint): these requires used to
+// sit at the top of the file, above runMigrations(). require() runs
+// a module's top-level code immediately, and several repositories
+// (e.g. gmgnTokenRepository.js) call db.prepare() for their SQL
+// statements at module load time, not inside a function - so on the
+// very first boot after ANY migration adds/renames a column, loading
+// those modules before runMigrations() had a chance to run crashed
+// the process with "SQLITE_ERROR: no such column" (reproduced
+// locally with migration 008's new gmgn_tokens.logo column). It only
+// ever worked before because every previous migration had already
+// been applied by the time of most restarts - this is a real,
+// latent crash-on-deploy bug, not a hypothetical one. Requiring
+// these AFTER runMigrations() guarantees the schema is always
+// current before any statement gets prepared against it.
+
+const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
+const validationScheduler = require("./scheduler/validationScheduler");
+const walletScheduler = require("./scheduler/walletScheduler");
+const app = require("./app");
 
 // Startup secret validation: previously a missing GMGN_API_KEY/
 // GMGN_PRIVATE_KEY was only discovered lazily, at the first

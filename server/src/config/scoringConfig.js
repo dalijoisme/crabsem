@@ -150,21 +150,100 @@ module.exports = {
     // change) showed BUY-tier accuracy consistently at 40-49% -
     // worse than a coin flip - at every horizon, while HOLD (81-84%)
     // and AVOID (59-71%) were reliable. Raising the BUY floor from 50
-    // to 55 moves the weakest, most error-prone participant scores
-    // (which were disproportionately wrong) into HOLD instead, where
-    // the real track record is far better. STRONG BUY (70) and HOLD
-    // (30) are untouched - their measured accuracy didn't show the
-    // same problem. This is a conservative, single-parameter, real-
-    // evidence-driven correction, not a re-weighting of the scoring
-    // modules themselves - a larger change should wait for more
-    // accumulated outcome data to avoid tuning on noise.
+    // to 55 moved the weakest, most error-prone participant scores
+    // into HOLD instead, where the real track record is far better.
+    //
+    // FURTHER RAISED (engine-quality sprint): user-reported cases of
+    // STRONG BUY at participant score ~90 on tokens that were visibly
+    // dumping exposed a real bug (see accumulation/smartMoney/kol.js -
+    // the earliness curve was keyed on signed change1h, not magnitude,
+    // so a crashing token wrongly kept full "early" credit) plus a
+    // real architectural gap (market structure - real price trend -
+    // could weaken confidence but never block a BUY-tier action; see
+    // structuralValidation below, which now closes that gap). With
+    // both of those fixed, thresholds are raised again as a deliberate
+    // policy tightening, not a new data-validated number - STRONG BUY
+    // must be rare and require genuinely exceptional evidence, BUY
+    // must require a real, meaningfully-above-average score, and HOLD
+    // is the honest default when evidence is merely "fine". This
+    // should be re-checked against fresh recommendation_outcomes data
+    // once enough volume accumulates at the new tiers.
 
     actionTiers: {
 
-        strongBuy: 70,
-        buy: 55,
-        hold: 30
+        strongBuy: 80,
+        buy: 62,
+        hold: 35
         // below hold => AVOID
+
+    },
+
+    // =====================================
+    // STRUCTURAL SELF-VALIDATION (engine-quality sprint) - the
+    // "market structure contradicts the recommendation -> downgrade"
+    // gate. Participant Score stays the primary driver of action (see
+    // philosophy note at the top of this file), but a STRONG BUY/BUY
+    // that real, already-collected price-trend/flow evidence directly
+    // contradicts must never reach the user un-downgraded - that is
+    // exactly the "score 90, chart clearly falling" failure mode this
+    // sprint exists to close. This is deliberately separate from
+    // safetyVeto below: safetyVeto is a hard, absolute override to
+    // AVOID on a handful of binary safety facts; this is a graduated,
+    // evidence-counted downgrade (by one or two tiers) that only ever
+    // fires on BUY-tier actions and is always reported back
+    // (signal.selfValidation) so a downgrade is auditable, never a
+    // silent guess.
+    //
+    // Every flag below reads a real field the engine already has for
+    // this exact call (price_change_1h/5m, gmgn_trenches.net_buy_24h,
+    // the already-computed smartMoney/kol participant sub-scores, and
+    // a real historical peak price from token_price_history) - nothing
+    // here is estimated or fabricated, and every flag is skipped
+    // (never counted for or against) when its underlying data isn't
+    // real for this token.
+
+    structuralValidation: {
+
+        // A "real" downtrend over the last hour worth counting as a
+        // red flag.
+        downtrend1hPct: -10,
+
+        // A sharp move in just the last 5 minutes - "a recent dump in
+        // progress" - counted regardless of the 1h figure, since a
+        // token can be flat-to-up over 1h and still be actively
+        // dumping right now.
+        recentDump5mPct: -8,
+
+        // Real drawdown from the highest price this platform has ever
+        // actually observed for this token (token_price_history) -
+        // this is a genuine "the structure has broken down" signal,
+        // not a guess about swing highs/lows we don't have candle
+        // data to compute.
+        structuralBreakdownDrawdown: 0.5,
+
+        // Net-flow confirmation: gmgn_trenches.net_buy_24h already
+        // real and already used by accumulation.js - re-used here as
+        // corroborating structural evidence when clearly negative.
+        netDistributionUsd: -500,
+
+        // A participant sub-score is only counted as "distributing"
+        // corroboration when it has real data AND sits at/below this
+        // fraction of its own max (matches the <=0.15-ish floor
+        // smartMoney.js/kol.js already assign to real distribution).
+        distributingSubScoreFraction: 0.25,
+
+        // Tier downgrade steps applied once redFlags reaches these
+        // counts - STRONG BUY needs only one real red flag to lose its
+        // "strong" status (it is meant to be rare and clean); BUY
+        // tolerates one, but two real contradicting signals means the
+        // evidence genuinely disagrees with a buy-tier action.
+        downgradeAfter: {
+
+            strongBuyToBuy: 1,
+            strongBuyToHold: 2,
+            buyToHold: 2
+
+        }
 
     },
 

@@ -90,7 +90,18 @@ function score(trenchesEntry, change1h){
 
     }
 
-    const earlinessFactor = lookupFactor(config.participant.earlinessCurve, change1h ?? 0, "maxChange1h");
+    // BUGFIX (engine-quality sprint): this curve must be keyed on
+    // magnitude, not signed value - lookupFactor walks buckets
+    // low-to-high and returns the first whose maxChange1h the value
+    // is <= to, so an unsigned negative change1h (e.g. a token down
+    // -80%) satisfied the very first bucket (<=10) and was scored as
+    // if it hadn't moved at all yet - the exact mechanism that let a
+    // crashing token still earn full "early" credit toward a high
+    // participant score. Magnitude is the correct question here
+    // ("how far past the early stage is this token, either way") -
+    // direction is handled separately, by market/priceStability.js's
+    // reversal check and intelligenceEngine's structural downgrade.
+    const earlinessFactor = lookupFactor(config.participant.earlinessCurve, Math.abs(change1h ?? 0), "maxChange1h");
 
     const finalScore = Math.round(raw * earlinessFactor);
 

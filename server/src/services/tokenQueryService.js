@@ -6,6 +6,7 @@
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const intelligenceEngine = require("./intelligenceEngine");
 const tradePlanService = require("./tradePlanService");
+const globalSearchService = require("./globalSearchService");
 
 // Attaches a real, freshly-computed signal to a token row. Computed
 // at read time (not stored) so it never goes stale against an old
@@ -148,23 +149,16 @@ function getTrending(limit){
 
 }
 
-function search(query, limit){
+// GLOBAL SEARCH (Critical Issue #1 - engine-quality sprint): local
+// gmgn_tokens cache first, then a real live DexScreener lookup for
+// any Solana token that isn't already monitored - see
+// globalSearchService.js for the full fallback chain. Async now
+// (the local-only path used to be synchronous) since the fallback is
+// a real network call - see searchController.js's await.
 
-    const tokens = gmgnTokenRepository.findMany({
+async function search(query, limit){
 
-        limit,
-
-        offset: 0,
-
-        sortColumn: "market_cap",
-
-        direction: "DESC",
-
-        search: query
-
-    });
-
-    return { query, tokens: attachSignals(tokens) };
+    return globalSearchService.search(query, limit);
 
 }
 

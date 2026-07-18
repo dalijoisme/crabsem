@@ -12,7 +12,7 @@ const { SORTABLE_COLUMNS } = require("../utils/validators");
 // single-token detail endpoint needs, so list/trending/search
 // queries never pay for it (see the "no SELECT *" performance rule).
 const LIST_COLUMNS = `
-    id, token_address, symbol, name, chain,
+    id, token_address, symbol, name, chain, logo,
     market_cap, liquidity, price,
     price_change_5m, price_change_1h, price_change_24h,
     volume_5m, volume_1h, volume_24h,
@@ -22,7 +22,7 @@ const LIST_COLUMNS = `
 
 const upsertStmt = db.prepare(`
     INSERT INTO gmgn_tokens (
-        token_address, symbol, name, chain,
+        token_address, symbol, name, chain, logo,
         market_cap, liquidity, price,
         price_change_5m, price_change_1h, price_change_24h,
         volume_5m, volume_1h, volume_24h,
@@ -30,7 +30,7 @@ const upsertStmt = db.prepare(`
         holders, fdv,
         launch_time, last_seen, updated_at, raw_json
     ) VALUES (
-        @tokenAddress, @symbol, @name, @chain,
+        @tokenAddress, @symbol, @name, @chain, @logo,
         @marketCap, @liquidity, @price,
         @priceChange5m, @priceChange1h, @priceChange24h,
         @volume5m, @volume1h, @volume24h,
@@ -42,6 +42,7 @@ const upsertStmt = db.prepare(`
         symbol = excluded.symbol,
         name = excluded.name,
         chain = excluded.chain,
+        logo = excluded.logo,
         market_cap = excluded.market_cap,
         liquidity = excluded.liquidity,
         price = excluded.price,

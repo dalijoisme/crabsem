@@ -5,7 +5,7 @@
 //
 // Field provenance (verified against a real stored response, not
 // guessed):
-// - Directly mapped fields (symbol, name, chain, market_cap,
+// - Directly mapped fields (symbol, name, chain, logo, market_cap,
 //   liquidity, price, price_change_percent5m/1h, volume, holder_count,
 //   open_timestamp) are real GMGN fields.
 // - price_change_24h, volume_5m, volume_24h, buys_5m, sells_5m are
@@ -37,6 +37,8 @@ function transformToken(token){
         name: token.name ?? null,
 
         chain: token.chain ?? null,
+
+        logo: token.logo ?? null,
 
         marketCap: numberOrNull(token.market_cap),
 

@@ -1,0 +1,15 @@
+-- Root-cause fix for the card-level token logo bug (engine-quality
+-- sprint): GMGN's own trending response always includes a real
+-- `logo` URL per token, but it was only ever being kept inside the
+-- large `raw_json` blob - which gmgnTokenRepository.LIST_COLUMNS
+-- deliberately excludes from list/trending/search queries for
+-- performance. That meant every card (desktop AND mobile - they
+-- share the exact same renderCard() template and the exact same list
+-- API response) never had a logo URL to render at all, and silently
+-- fell back to the app's own placeholder icon. Only the single-token
+-- detail endpoint (which does return raw_json) could ever show a
+-- real logo. Promoting logo to its own flat column makes it part of
+-- LIST_COLUMNS too, so cards on every breakpoint get the same real
+-- logo source as the detail panel - one column, one source, used by
+-- one shared frontend helper (see js/ui.js resolveLogo()).
+ALTER TABLE gmgn_tokens ADD COLUMN logo TEXT;

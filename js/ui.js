@@ -26,6 +26,46 @@ function formatPrice(v){
 }
 
 // =====================================
+// LOGO (engine-quality sprint - root-cause fix)
+//
+// Real root cause of "logos fail" reports: renderCard() never had a
+// real per-token logo URL to render in the first place - the backend
+// list/trending/search query deliberately excludes the large
+// raw_json blob for performance, and logo used to live nowhere else,
+// so the card always fell back to the placeholder regardless of
+// device. Only renderDetail() (which fetches the full row separately)
+// could ever show a real logo - so "desktop works" really meant "the
+// detail panel works", not "the desktop card works". The backend now
+// promotes `logo` to its own flat column included in every response
+// (list AND detail - see gmgnTokenRepository.js), so this ONE
+// function is the single logo-loading implementation both renderCard
+// and renderDetail call - same field, same fallback chain, same
+// onerror handling, on every breakpoint.
+// =====================================
+
+const FALLBACK_LOGO = "images/body.png";
+
+function resolveLogo(token){
+
+    if(token.logo) return token.logo;
+
+    // Backward-compatible fallback for any cached/older API response
+    // that still only carries raw_json (e.g. a stale service worker
+    // or CDN cache mid-rollout) - never a regression during deploy.
+    try{
+
+        const raw = token.raw_json ? JSON.parse(token.raw_json) : null;
+
+        if(raw?.logo) return raw.logo;
+
+    }
+    catch(e){}
+
+    return FALLBACK_LOGO;
+
+}
+
+// =====================================
 // MARKET CAP DISPLAY
 // If a real market cap isn't available,
 // show N/A explicitly - never a guess.
@@ -773,7 +813,7 @@ const UI = {
 
         const signal = token.signal;
 
-        const logo = "images/body.png";
+        const logo = resolveLogo(token);
 
         const medal =
             rank===1 ? "🥇" :
@@ -901,16 +941,7 @@ const UI = {
 
         const color = signalColor(signal.action);
 
-        let logo = "images/body.png";
-
-        try{
-
-            const raw = token.raw_json ? JSON.parse(token.raw_json) : null;
-
-            if(raw?.logo) logo = raw.logo;
-
-        }
-        catch(e){}
+        const logo = resolveLogo(token);
 
         const dexUrl = dexscreenerLink(token);
 

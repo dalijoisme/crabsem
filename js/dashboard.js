@@ -539,7 +539,16 @@ async function loadTrending(){
 
 // ======================================
 // SEARCH - GET /api/v1/search
+// CRITICAL ISSUE #6 (engine-quality sprint): pasting a full contract
+// address is the one search case where there is only ever one
+// possible right answer - opening it immediately (rather than
+// requiring an extra click on a single-result grid) is a functional
+// behavior fix, not a layout/design change: no DOM structure, CSS, or
+// card markup changes, showDetail() is the exact same function a
+// manual click already calls.
 // ======================================
+
+const SOLANA_ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 async function loadSearch(){
 
@@ -575,7 +584,15 @@ async function loadSearch(){
 
         applyStatus();
 
-        renderTokens(result.tokens || []);
+        const tokens = result.tokens || [];
+
+        renderTokens(tokens);
+
+        if(SOLANA_ADDRESS_RE.test(q) && tokens.length === 1 && tokens[0].token_address === q){
+
+            showDetail(tokens[0]);
+
+        }
 
     }
     catch(err){

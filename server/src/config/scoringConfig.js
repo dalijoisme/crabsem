@@ -179,19 +179,21 @@ module.exports = {
     },
 
     // =====================================
-    // STRUCTURAL SELF-VALIDATION (engine-quality sprint) - the
-    // "market structure contradicts the recommendation -> downgrade"
-    // gate. Participant Score stays the primary driver of action (see
-    // philosophy note at the top of this file), but a STRONG BUY/BUY
-    // that real, already-collected price-trend/flow evidence directly
-    // contradicts must never reach the user un-downgraded - that is
-    // exactly the "score 90, chart clearly falling" failure mode this
-    // sprint exists to close. This is deliberately separate from
-    // safetyVeto below: safetyVeto is a hard, absolute override to
-    // AVOID on a handful of binary safety facts; this is a graduated,
-    // evidence-counted downgrade (by one or two tiers) that only ever
-    // fires on BUY-tier actions and is always reported back
-    // (signal.selfValidation) so a downgrade is auditable, never a
+    // STRUCTURAL SELF-VALIDATION (engine-quality sprint) - "if real
+    // evidence contradicts the recommendation, the PARTICIPANT SCORE
+    // ITSELF must come down" (not just a cosmetic action-label swap
+    // layered on an unchanged number). Participant Score stays the
+    // primary driver of action (see philosophy note at the top of
+    // this file), but real, already-collected price-trend/flow
+    // evidence that directly contradicts it now subtracts real points
+    // from the score before scoreToAction() ever runs - closing the
+    // "score 90, chart clearly falling" failure mode at the source,
+    // so the corrected number naturally flows into the action tier,
+    // the trade plan, and the timeline together. Deliberately separate
+    // from safetyVeto below: safetyVeto is a hard, absolute override
+    // to AVOID on a handful of binary safety facts; this is a
+    // graduated, evidence-counted point penalty, always reported back
+    // (signal.selfValidation) so any reduction is auditable, never a
     // silent guess.
     //
     // Every flag below reads a real field the engine already has for
@@ -232,18 +234,15 @@ module.exports = {
         // smartMoney.js/kol.js already assign to real distribution).
         distributingSubScoreFraction: 0.25,
 
-        // Tier downgrade steps applied once redFlags reaches these
-        // counts - STRONG BUY needs only one real red flag to lose its
-        // "strong" status (it is meant to be rare and clean); BUY
-        // tolerates one, but two real contradicting signals means the
-        // evidence genuinely disagrees with a buy-tier action.
-        downgradeAfter: {
-
-            strongBuyToBuy: 1,
-            strongBuyToHold: 2,
-            buyToHold: 2
-
-        }
+        // Real points subtracted from participantScore ITSELF per red
+        // flag (capped at maxPenalty) - not a cosmetic action-label
+        // downgrade layered on an unchanged number. One real flag
+        // knocks a 93 down to ~78 (drops out of STRONG BUY, still a
+        // real BUY); three real flags (capped) knocks it to ~48
+        // (solidly HOLD) - calibrated so scoreToAction() below reacts
+        // naturally, with no separate tier-jump table to keep in sync.
+        penaltyPerFlag: 15,
+        maxPenalty: 45
 
     },
 

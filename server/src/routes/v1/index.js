@@ -12,6 +12,7 @@ const gmgnOndemandRoutes = require("./gmgnOndemand");
 const validationRoutes = require("./validation");
 const walletsRoutes = require("./wallets");
 const userHistoryRoutes = require("./userHistory");
+const adminRoutes = require("./admin");
 
 const router = express.Router();
 
@@ -24,5 +25,6 @@ router.use(gmgnOndemandRoutes);
 router.use(validationRoutes);
 router.use(walletsRoutes);
 router.use(userHistoryRoutes);
+router.use(adminRoutes);
 
 module.exports = router;

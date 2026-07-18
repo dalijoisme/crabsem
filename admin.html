@@ -14,22 +14,25 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css">
+<link rel="stylesheet" href="css/admin.css?v=2">
 
 </head>
 
 <body>
 
-<!-- Simple client-side password gate. This is intentionally
-     temporary (per explicit instruction) - the actual check
-     will move server-side later. Nothing sensitive is gated
-     behind this beyond aggregate, already-public market data. -->
+<!-- Real server-side password check (engine-quality sprint): the
+     entered value is sent as the X-Admin-Key header on a real
+     backend call and only proceeds on a real 200 - see js/admin.js.
+     The previous version of this gate compared against
+     CONFIG.ADMIN_PASSWORD_HASH, a key that was never actually defined
+     in config.js (only ADMIN_PASSWORD, unhashed) - the gate was
+     already permanently broken before this rewrite. -->
 
 <div id="adminGate" class="adminGate">
 
 <div class="adminGateCard">
 
-<h2>🦀 CRAB AGENT Admin</h2>
+<h2>CRAB AGENT Admin</h2>
 
 <p>This page is for administrators only.</p>
 
@@ -55,7 +58,7 @@
 
 <h2>CRAB AGENT</h2>
 
-<span>Admin Analytics</span>
+<span>Admin Panel</span>
 
 </div>
 
@@ -71,138 +74,128 @@
 
 </div>
 
-<button id="adminRefreshBtn" class="adminRefreshBtn">↻ Refresh Now</button>
+<button id="adminRefreshBtn" class="adminRefreshBtn">Refresh Now</button>
+
+<button id="adminLogoutBtn" class="adminRefreshBtn">Log Out</button>
 
 </div>
 
 </header>
 
+<nav class="adminNav" id="adminNav">
+
+<a href="#secSystem">System</a>
+<a href="#secWallet">Wallet</a>
+<a href="#secToken">Token</a>
+<a href="#secEngine">Engine</a>
+<a href="#secPrediction">Prediction</a>
+<a href="#secAnalytics">Analytics</a>
+
+</nav>
+
 <div id="adminLoading" class="adminLoading">
 
-Running a live discovery + scoring cycle to compute real analytics...
+Loading real data from the backend...
 
 </div>
 
 <div id="adminContent" class="adminContent hidden">
 
-<!-- SYSTEM STATUS -->
+<!-- SYSTEM -->
 
-<section class="adminSection">
+<section class="adminSection" id="secSystem">
 
-<h3>System Status</h3>
-
-<div class="adminGrid5">
-
-<div class="adminStat"><span>Engine Status</span><strong id="statEngine">-</strong></div>
-<div class="adminStat"><span>Wallet Status</span><strong id="statWallet">-</strong></div>
-<div class="adminStat"><span>API Status</span><strong id="statApi">-</strong></div>
-<div class="adminStat"><span>Last Refresh</span><strong id="statLastRefresh">-</strong></div>
-<div class="adminStat"><span>Avg Response Time</span><strong id="statAvgResponse">-</strong></div>
-
-</div>
-
-</section>
-
-<!-- DISCOVERY -->
-
-<section class="adminSection">
-
-<h3>Discovery</h3>
+<h3>System</h3>
 
 <div class="adminGrid5">
 
-<div class="adminStat"><span>Observed</span><strong id="discObserved">-</strong></div>
-<div class="adminStat"><span>Qualified</span><strong id="discQualified">-</strong></div>
-<div class="adminStat"><span>Displayed</span><strong id="discDisplayed">-</strong></div>
-<div class="adminStat"><span>Filtered</span><strong id="discFiltered">-</strong></div>
-<div class="adminStat"><span>Discovery Duration</span><strong id="discDuration">-</strong></div>
+<div class="adminStat"><span>Engine Status</span><strong id="sysEngineStatus">-</strong></div>
+<div class="adminStat"><span>Scheduler</span><strong id="sysScheduler">-</strong></div>
+<div class="adminStat"><span>API Uptime</span><strong id="sysUptime">-</strong></div>
+<div class="adminStat"><span>Database</span><strong id="sysDb">-</strong></div>
+<div class="adminStat"><span>SQLite Size</span><strong id="sysDbSize">-</strong></div>
+<div class="adminStat"><span>Migration Version</span><strong id="sysMigration">-</strong></div>
+<div class="adminStat"><span>Tokens Tracked</span><strong id="sysTokenCount">-</strong></div>
+<div class="adminStat"><span>Last Scan</span><strong id="sysLastScan">-</strong></div>
+<div class="adminStat"><span>Next Scan</span><strong id="sysNextScan">-</strong></div>
 
 </div>
 
 </section>
 
-<!-- DISCOVERY SOURCE -->
+<!-- WALLET -->
 
-<section class="adminSection">
+<section class="adminSection" id="secWallet">
 
-<h3>Discovery Source</h3>
-
-<div id="sourceBreakdownBars" class="adminBarList"></div>
-
-</section>
-
-<!-- SIGNAL DISTRIBUTION -->
-
-<section class="adminSection">
-
-<h3>Signal Distribution</h3>
-
-<div id="signalDistributionBars" class="adminBarList"></div>
-
-</section>
-
-<!-- SCORE ANALYTICS -->
-
-<section class="adminSection">
-
-<h3>Score Analytics</h3>
+<h3>Wallet</h3>
 
 <div class="adminGrid4">
 
-<div class="adminStat"><span>Average Score</span><strong id="scoreAvg">-</strong></div>
-<div class="adminStat"><span>Average Strength</span><strong id="scoreStrengthAvg">-</strong></div>
-<div class="adminStat"><span>Highest Score</span><strong id="scoreHigh">-</strong></div>
-<div class="adminStat"><span>Lowest Score</span><strong id="scoreLow">-</strong></div>
+<div class="adminStat"><span>Total Wallets</span><strong id="walTotal">-</strong></div>
 
 </div>
 
-</section>
+<div id="walletLabelBars" class="adminBarList" style="margin-top:16px;"></div>
 
-<!-- MARKET ANALYTICS -->
+<div class="adminSearchRow">
 
-<section class="adminSection">
-
-<h3>Market Analytics</h3>
-
-<div class="adminGrid4">
-
-<div class="adminStat"><span>Average Liquidity</span><strong id="mktLiquidity">-</strong></div>
-<div class="adminStat"><span>Average Volume</span><strong id="mktVolume">-</strong></div>
-<div class="adminStat"><span>Average Market Cap</span><strong id="mktMcap">-</strong></div>
-<div class="adminStat"><span>Average FDV</span><strong id="mktFdv">-</strong></div>
+<input type="text" id="walletSearchInput" placeholder="Search wallet by address...">
+<button id="walletSearchBtn" class="primaryBtnAdmin">Search</button>
 
 </div>
 
-</section>
-
-<!-- TOP NARRATIVES -->
-
-<section class="adminSection">
-
-<h3>Top Narratives</h3>
-
-<p class="adminNote">Live from DexScreener's trending-metas feed - independent of the discovery pipeline, read-only, display purposes only.</p>
-
-<div id="narrativeList" class="adminBarList"></div>
+<div id="walletSearchResult"></div>
 
 </section>
 
-<!-- LOG -->
+<!-- TOKEN -->
 
-<section class="adminSection">
+<section class="adminSection" id="secToken">
 
-<h3>Log</h3>
+<h3>Token</h3>
 
-<div class="adminGrid4">
+<div class="adminSearchRow">
 
-<div class="adminStat"><span>Refreshes This Session</span><strong id="logRefreshCount">0</strong></div>
-<div class="adminStat"><span>Last Scan Token Count</span><strong id="logLastCount">-</strong></div>
-<div class="adminStat"><span>Error Count</span><strong id="logErrorCount">0</strong></div>
-<div class="adminStat"><span>Warning Count</span><strong id="logWarningCount">0</strong></div>
+<input type="text" id="tokenSearchInput" placeholder="Search token name, symbol, or contract address...">
+<button id="tokenSearchBtn" class="primaryBtnAdmin">Search</button>
 
 </div>
 
-<div id="refreshHistory" class="adminLogList"></div>
+<div id="tokenSearchResult" class="adminTokenList"></div>
+
+</section>
+
+<!-- ENGINE -->
+
+<section class="adminSection" id="secEngine">
+
+<h3>Engine (Read-only)</h3>
+
+<p class="adminNote">Real values currently loaded from server/src/config/scoringConfig.js and tradePlanConfig.js - not editable this sprint.</p>
+
+<div id="engineConfigTables"></div>
+
+</section>
+
+<!-- PREDICTION -->
+
+<section class="adminSection" id="secPrediction">
+
+<h3>Prediction</h3>
+
+<p class="adminNote">Real outcomes from recommendation_log / recommendation_outcomes, evaluated against actual observed price history. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier, so none is shown here.</p>
+
+<div id="predictionSummary"></div>
+
+</section>
+
+<!-- ANALYTICS -->
+
+<section class="adminSection" id="secAnalytics">
+
+<h3>Admin Analytics</h3>
+
+<div id="analyticsGroups"></div>
 
 </section>
 
@@ -211,10 +204,7 @@ Running a live discovery + scoring cycle to compute real analytics...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/api.js"></script>
-<script src="js/discovery.js"></script>
-<script src="js/engine.js"></script>
-<script src="js/admin.js"></script>
+<script src="js/admin.js?v=2"></script>
 
 </body>
 

@@ -333,3 +333,240 @@ RESPONSIVE
     }
 
 }
+
+/* =======================
+NAV (engine-quality sprint additions below)
+======================= */
+
+.adminNav{
+
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    max-width:1100px;
+    margin:16px auto 0;
+    padding:0 20px;
+
+}
+
+.adminNav a{
+
+    color:var(--muted);
+    text-decoration:none;
+    font-size:12px;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.3px;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:999px;
+    padding:8px 14px;
+
+}
+
+.adminNav a:hover{
+
+    color:var(--text);
+    border-color:var(--purple);
+
+}
+
+/* =======================
+SEARCH ROW
+======================= */
+
+.adminSearchRow{
+
+    display:flex;
+    gap:10px;
+    margin-top:16px;
+
+}
+
+.adminSearchRow input{
+
+    flex:1;
+    height:42px;
+    border-radius:12px;
+    border:1px solid var(--border);
+    background:#1b1a2b;
+    color:var(--text);
+    padding:0 14px;
+    font-size:13px;
+
+}
+
+.adminSearchRow .primaryBtnAdmin{
+
+    width:auto;
+    padding:0 20px;
+
+}
+
+/* =======================
+TOKEN LIST (admin search results)
+======================= */
+
+.adminTokenList{
+
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    margin-top:16px;
+
+}
+
+.adminTokenRow{
+
+    background:#1b1a2b;
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:14px;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+
+}
+
+.adminTokenRowHead{
+
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:8px;
+
+}
+
+.adminTokenRowHead strong{
+
+    font-size:15px;
+
+}
+
+.adminPill{
+
+    display:inline-block;
+    font-size:10.5px;
+    font-weight:700;
+    padding:3px 10px;
+    border-radius:999px;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    color:var(--muted);
+
+}
+
+.adminPill.strongbuy{ color:#16c784; border-color:#16c784; }
+.adminPill.buy{ color:var(--purple); border-color:var(--purple); }
+.adminPill.hold{ color:var(--yellow); border-color:var(--yellow); }
+.adminPill.avoid{ color:var(--red); border-color:var(--red); }
+
+.adminTokenActions{
+
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+
+}
+
+.adminActionBtn{
+
+    background:var(--panel2);
+    border:1px solid var(--border);
+    color:var(--text);
+    border-radius:8px;
+    padding:6px 12px;
+    font-size:11.5px;
+    font-weight:600;
+    cursor:pointer;
+    text-decoration:none;
+
+}
+
+.adminActionBtn:hover{
+
+    border-color:var(--purple);
+
+}
+
+.adminActionBtn:disabled{
+
+    opacity:.5;
+    cursor:default;
+
+}
+
+.adminTokenDetail{
+
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:12px;
+    font-size:12px;
+    color:var(--muted);
+    white-space:pre-wrap;
+
+}
+
+/* =======================
+TABLES (engine config, prediction summary)
+======================= */
+
+.adminTableWrap{
+
+    overflow-x:auto;
+    margin-bottom:18px;
+
+}
+
+.adminTable{
+
+    width:100%;
+    border-collapse:collapse;
+    font-size:12.5px;
+
+}
+
+.adminTable caption{
+
+    text-align:left;
+    color:var(--text);
+    font-weight:700;
+    font-size:13px;
+    padding-bottom:8px;
+
+}
+
+.adminTable th,
+.adminTable td{
+
+    text-align:left;
+    padding:8px 10px;
+    border-bottom:1px solid var(--border);
+    white-space:nowrap;
+
+}
+
+.adminTable th{
+
+    color:var(--muted);
+    text-transform:uppercase;
+    font-size:10.5px;
+    letter-spacing:.3px;
+
+}
+
+.adminAnalyticsGroup{
+
+    margin-bottom:22px;
+
+}
+
+.adminAnalyticsGroup h4{
+
+    margin:0 0 10px;
+    font-size:13px;
+    color:var(--text);
+
+}

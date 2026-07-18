@@ -27,7 +27,13 @@ const config = Object.freeze({
         ? process.env.GMGN_PRIVATE_KEY.replace(/\\n/g, "\n")
         : null,
 
-    GMGN_HOST: process.env.GMGN_HOST || "https://openapi.gmgn.ai"
+    GMGN_HOST: process.env.GMGN_HOST || "https://openapi.gmgn.ai",
+
+    // Admin Panel (engine-quality sprint) - a single shared password,
+    // no role system yet (explicitly out of scope for this sprint).
+    // null (unset) means the admin API is fully disabled rather than
+    // silently open - see middleware/adminAuth.js.
+    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || null
 
 });
 

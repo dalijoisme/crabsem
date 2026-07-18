@@ -187,6 +187,22 @@ function countAll(){
 
 }
 
+// Real counts per auto-assigned label (see walletIntelligenceService.
+// computeLabel()) - the Admin Panel's Wallet dashboard breakdown. A
+// wallet with total_trades=0 has never been scored yet (primary_label
+// is NULL) and is grouped separately, never guessed into a label.
+
+function countsByLabel(){
+
+    return db.prepare(`
+        SELECT COALESCE(primary_label, 'Unlabeled') as label, COUNT(*) as count
+        FROM wallets
+        GROUP BY label
+        ORDER BY count DESC
+    `).all();
+
+}
+
 // Feature vectors for similarity - only wallets with enough real
 // trades to have a meaningful profile (see walletSimilarityService.js).
 
@@ -214,5 +230,6 @@ module.exports = {
     findActiveWalletAddresses,
     search,
     countAll,
+    countsByLabel,
     findFeatureVectors
 };

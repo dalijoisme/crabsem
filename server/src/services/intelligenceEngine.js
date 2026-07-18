@@ -266,26 +266,23 @@ function scoreToAction(participantScore){
 }
 
 // =====================================
-// STRUCTURAL SELF-VALIDATION (see config/scoringConfig.js for the
-// full reasoning) - counts real, already-available evidence that
-// directly contradicts a BUY-tier action, then downgrades the action
-// by one or two tiers accordingly. Runs AFTER the participant-score-
-// driven base action and BEFORE the hard safety veto: this is a
-// graduated "does real trend/flow evidence agree with this?" check,
-// not the absolute safety net that veto is.
+// STRUCTURAL SELF-VALIDATION / OUTCOME-BASED PENALTY (see
+// config/scoringConfig.js for the full reasoning) - counts real,
+// already-available evidence that directly contradicts a bullish
+// participant read (real downtrend, a dump in progress, a real
+// drawdown from an observed peak, real net distribution, smart
+// money/KOL actually exiting), then applies a real point PENALTY
+// directly to participantScore itself - not a cosmetic action-label
+// downgrade layered on top of an unchanged number. This is the
+// literal fix for "the participant score itself must come down when
+// real evidence disagrees with it": the score IS the flagged-down
+// number, so the timeline, the trade plan, and the action tier all
+// inherit the correction automatically instead of needing separate
+// patches in three places. Runs AFTER the raw per-module participant
+// score is combined and BEFORE scoreToAction()/the hard safety veto -
+// this is a graduated, evidence-COUNTED correction, not the absolute
+// safety net that veto is.
 // =====================================
-
-const ACTION_ORDER = ["STRONG BUY", "BUY", "HOLD", "AVOID"];
-
-function downgradeActionTo(action, target){
-
-    // Never upgrades, and never moves an action past AVOID - only
-    // ever steps DOWN the fixed tier order toward target.
-    if(ACTION_ORDER.indexOf(target) <= ACTION_ORDER.indexOf(action)) return action;
-
-    return target;
-
-}
 
 function computeStructuralRedFlags(token, trenchesEntry, participantModules){
 
@@ -345,35 +342,23 @@ function computeStructuralRedFlags(token, trenchesEntry, participantModules){
 
 }
 
-function applyStructuralDowngrade(action, redFlags){
+function applyStructuralPenalty(participantScoreRaw, redFlags){
 
-    const s = config.structuralValidation.downgradeAfter;
+    const s = config.structuralValidation;
 
-    const count = redFlags.length;
+    const penalty = Math.min(s.maxPenalty, redFlags.length * s.penaltyPerFlag);
 
-    let finalAction = action;
-
-    if(action === "STRONG BUY"){
-
-        if(count >= s.strongBuyToHold) finalAction = downgradeActionTo(action, "HOLD");
-        else if(count >= s.strongBuyToBuy) finalAction = downgradeActionTo(action, "BUY");
-
-    }
-    else if(action === "BUY"){
-
-        if(count >= s.buyToHold) finalAction = downgradeActionTo(action, "HOLD");
-
-    }
+    const penalized = Math.max(0, Math.round(participantScoreRaw - penalty));
 
     return {
 
-        action: finalAction,
+        participantScore: penalized,
 
-        downgraded: finalAction !== action,
+        participantScoreRaw,
 
-        redFlags,
+        penaltyApplied: penalty,
 
-        originalAction: action
+        redFlags
 
     };
 
@@ -666,7 +651,18 @@ function analyzeToken(token, ctx){
 
     };
 
-    const participantScore = combineScore(participantModules, PARTICIPANT_MAX, config.participant.neutralFraction);
+    const participantScoreRaw = combineScore(participantModules, PARTICIPANT_MAX, config.participant.neutralFraction);
+
+    // Real evidence check BEFORE the safety-net veto: does actual
+    // price trend/flow data agree with what the per-module scores
+    // above just computed? Detected from trenchesEntry/token fields
+    // already gathered above, plus the smartMoney/kol module scores
+    // already computed this same call - nothing new is fetched.
+    const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules);
+
+    const structuralPenalty = applyStructuralPenalty(participantScoreRaw, structuralRedFlags);
+
+    const participantScore = structuralPenalty.participantScore;
 
     const reasons = Object.values(participantModules).flatMap(m => m.reasons);
 
@@ -696,22 +692,18 @@ function analyzeToken(token, ctx){
 
     const riskReasons = [...participantRiskReasons, ...marketRiskReasons];
 
-    // ---- ACTION (participant-driven; structural evidence and market
-    // safety facts can only ever move it down, never up) ----
+    // ---- ACTION (participant-driven off the ALREADY-PENALIZED score;
+    // market safety facts can only ever move it down further, never up) ----
 
     const baseAction = scoreToAction(participantScore);
 
-    const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules);
+    if(structuralPenalty.penaltyApplied > 0){
 
-    const selfValidation = applyStructuralDowngrade(baseAction, structuralRedFlags);
-
-    if(selfValidation.downgraded){
-
-        riskReasons.unshift(`Self-validation downgraded ${selfValidation.originalAction} -> ${selfValidation.action}: ${structuralRedFlags.join("; ")}`);
+        riskReasons.unshift(`Self-validation: participant score reduced ${structuralPenalty.participantScoreRaw} -> ${participantScore} (-${structuralPenalty.penaltyApplied}): ${structuralRedFlags.join("; ")}`);
 
     }
 
-    const veto = applySafetyVeto(selfValidation.action, securityFacts, marketModules.liquidity.facts, token.holders != null ? Number(token.holders) : null);
+    const veto = applySafetyVeto(baseAction, securityFacts, marketModules.liquidity.facts, token.holders != null ? Number(token.holders) : null);
 
     const action = veto.action;
 
@@ -765,11 +757,15 @@ function analyzeToken(token, ctx){
 
             checked: true,
 
-            downgraded: selfValidation.downgraded,
+            penalized: structuralPenalty.penaltyApplied > 0,
 
-            redFlags: selfValidation.redFlags,
+            redFlags: structuralPenalty.redFlags,
 
-            originalAction: selfValidation.originalAction
+            participantScoreBeforePenalty: structuralPenalty.participantScoreRaw,
+
+            participantScoreAfterPenalty: participantScore,
+
+            penaltyApplied: structuralPenalty.penaltyApplied
 
         },
 

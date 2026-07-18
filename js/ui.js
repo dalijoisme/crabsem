@@ -207,6 +207,19 @@ function aiTradePlanBandsHtml(tradePlan){
 
     if(!rb) return `<div class="sectionTitle">AI Trade Plan</div><div class="disclaimerNote">No market cap data yet for this token - the plan will appear once it's collected.</div>`;
 
+    // WAITING FOR CONFIRMATION (engine-quality sprint): the backend
+    // deliberately withholds a numeric plan when confidence/real
+    // participant coverage is too thin, or the recommendation itself
+    // is AVOID (see tradePlanService.js's assessTradePlanReadiness) -
+    // shown honestly with the real reasons, never replaced with a
+    // guessed number.
+
+    if(rb.status === "waiting_for_confirmation"){
+
+        return `<div class="sectionTitle">AI Trade Plan</div><div class="disclaimerNote">Waiting for confirmation - ${(rb.reasons||[]).join(" ")}</div>`;
+
+    }
+
     // Defensive shape check: catches a stale cached copy of this file
     // talking to a newer/older API (or vice versa) - the real root
     // cause behind values silently rendering as "N/A" while the

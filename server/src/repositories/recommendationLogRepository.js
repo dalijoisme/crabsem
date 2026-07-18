@@ -10,10 +10,12 @@ const insertStmt = db.prepare(`
     INSERT INTO recommendation_log (
         token_address, symbol, action, stage, participant_score,
         market_health, confidence, risk, lifecycle, price_at_recommendation,
+        market_cap_at_recommendation, wallet_summary_json,
         reasons_json, confirmations_json, risk_reasons_json, breakdown_json
     ) VALUES (
         @tokenAddress, @symbol, @action, @stage, @participantScore,
         @marketHealth, @confidence, @risk, @lifecycle, @priceAtRecommendation,
+        @marketCapAtRecommendation, @walletSummaryJson,
         @reasonsJson, @confirmationsJson, @riskReasonsJson, @breakdownJson
     )
 `);

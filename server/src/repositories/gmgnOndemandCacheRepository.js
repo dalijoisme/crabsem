@@ -95,6 +95,23 @@ function buildCacheKey(endpoint, params){
 
 }
 
+// Admin Panel "Delete Cache" action - clears every on-demand cache
+// row that mentions this address, whether as a token address or a
+// wallet address param (params_json always contains the real param
+// object a cache entry was fetched with - see set() above). Forces
+// the NEXT request for this token/wallet to hit GMGN live again
+// instead of serving a possibly-stale cached fact.
+
+function deleteForAddress(address){
+
+    const info = db.prepare(`
+        DELETE FROM gmgn_ondemand_cache WHERE params_json LIKE '%' || ? || '%'
+    `).run(address);
+
+    return info.changes;
+
+}
+
 // Batch version of getIgnoringExpiry, for the Intelligence Engine's
 // list-mode analysis - one query for a whole page of tokens/wallets
 // instead of one query per cache key. Same ignore-expiry semantics.
@@ -133,4 +150,4 @@ function getManyIgnoringExpiry(cacheKeys){
 
 }
 
-module.exports = { get, set, countByEndpoint, getIgnoringExpiry, getManyIgnoringExpiry, buildCacheKey };
+module.exports = { get, set, countByEndpoint, getIgnoringExpiry, getManyIgnoringExpiry, buildCacheKey, deleteForAddress };

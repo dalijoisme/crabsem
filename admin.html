@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=2">
+<link rel="stylesheet" href="css/admin.css?v=3">
 
 </head>
 
@@ -84,6 +84,7 @@
 
 <nav class="adminNav" id="adminNav">
 
+<a href="#secDashboard">Dashboard</a>
 <a href="#secSystem">System</a>
 <a href="#secWallet">Wallet</a>
 <a href="#secToken">Token</a>
@@ -100,6 +101,35 @@ Loading real data from the backend...
 </div>
 
 <div id="adminContent" class="adminContent hidden">
+
+<!-- DASHBOARD (minimal login landing cards - GET /api/v1/admin/dashboard) -->
+
+<section class="adminSection" id="secDashboard">
+
+<h3>Dashboard</h3>
+
+<div class="adminGrid5">
+
+<div class="adminStat"><span>Engine Status</span><strong id="dashEngineStatus">-</strong></div>
+<div class="adminStat"><span>Scheduler</span><strong id="dashScheduler">-</strong></div>
+<div class="adminStat"><span>Database</span><strong id="dashDatabase">-</strong></div>
+<div class="adminStat"><span>Prediction Count</span><strong id="dashPredictionCount">-</strong></div>
+<div class="adminStat"><span>Strong Buy Count</span><strong id="dashStrongBuyCount">-</strong></div>
+
+</div>
+
+<p class="adminNote" style="margin-top:14px;">Validation Summary</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Win Rate</span><strong id="dashWinRate">-</strong></div>
+<div class="adminStat"><span>TP Count</span><strong id="dashTpCount">-</strong></div>
+<div class="adminStat"><span>SL Count</span><strong id="dashSlCount">-</strong></div>
+<div class="adminStat"><span>Open Count</span><strong id="dashOpenCount">-</strong></div>
+
+</div>
+
+</section>
 
 <!-- SYSTEM -->
 
@@ -204,7 +234,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=2"></script>
+<script src="js/admin.js?v=3"></script>
 
 </body>
 

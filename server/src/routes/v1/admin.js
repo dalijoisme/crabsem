@@ -15,8 +15,16 @@ const adminAuth = require("../../middleware/adminAuth");
 
 const router = express.Router();
 
+// POST /admin/login is the one admin route that must NOT be gated -
+// you need to log in before you have a token to be gated by. It is
+// registered BEFORE the router.use(adminAuth) gate below, which only
+// applies to routes registered after it.
+
+router.post("/admin/login", controller.login);
+
 router.use("/admin", adminAuth);
 
+router.get("/admin/dashboard", controller.getDashboard);
 router.get("/admin/system", controller.getSystem);
 router.get("/admin/wallets/summary", controller.getWalletsSummary);
 router.get("/admin/engine/config", controller.getEngineConfig);

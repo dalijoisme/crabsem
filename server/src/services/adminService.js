@@ -19,6 +19,7 @@ const gmgnOndemandCacheRepository = require("../repositories/gmgnOndemandCacheRe
 
 const healthService = require("./health");
 const validationMetricsService = require("./validationMetricsService");
+const predictionMetricsService = require("./predictionMetricsService");
 const intelligenceEngine = require("./intelligenceEngine");
 const tradePlanService = require("./tradePlanService");
 const dexscreenerClient = require("../collectors/dexscreener/dexscreenerClient");
@@ -223,6 +224,38 @@ function getPredictionSummary(){
 
 }
 
+// =====================================
+// DASHBOARD (the login-page landing cards) - pure composition of
+// already-existing, already-tested read functions above; no new
+// prediction/validation logic is written here, only displayed.
+// =====================================
+
+function getDashboard(){
+
+    const system = getSystem();
+
+    const predictionSummary = predictionMetricsService.getSummary();
+
+    const strongBuySummary = predictionMetricsService.getStrongBuySummary();
+
+    return {
+
+        engineStatus: system.engineStatus,
+
+        scheduler: system.scheduler,
+
+        database: system.database,
+
+        predictionCount: predictionSummary.predictionCount,
+
+        validationSummary: predictionSummary,
+
+        strongBuyCount: strongBuySummary.predictionCount
+
+    };
+
+}
+
 module.exports = {
 
     getSystem,
@@ -237,6 +270,8 @@ module.exports = {
 
     getEngineConfig,
 
-    getPredictionSummary
+    getPredictionSummary,
+
+    getDashboard
 
 };

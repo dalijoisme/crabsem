@@ -99,6 +99,13 @@ function showGate(message){
 
 }
 
+// Real login flow (login-then-token sprint): POST /admin/login with
+// the entered password -> the backend checks it against
+// process.env.ADMIN_PASSWORD once and hands back a session token
+// (see services/adminAuthService.js) -> that token is what's stored
+// and sent as X-Admin-Key on every subsequent /admin/* call. The raw
+// password itself is never stored or resent after this one request.
+
 async function attemptLogin(){
 
     const entered = adminPasswordInput.value;
@@ -111,7 +118,17 @@ async function attemptLogin(){
 
     try{
 
-        const res = await fetch(`${BASE_URL}/admin/system`, { headers: { "X-Admin-Key": entered } });
+        const res = await fetch(`${BASE_URL}/admin/login`, {
+
+            method: "POST",
+
+            headers: { "Content-Type": "application/json" },
+
+            body: JSON.stringify({ password: entered })
+
+        });
+
+        const json = await res.json().catch(() => null);
 
         if(res.status === 401){
 
@@ -129,7 +146,7 @@ async function attemptLogin(){
 
         }
 
-        if(!res.ok){
+        if(!res.ok || !json?.success || !json.data?.token){
 
             adminGateError.textContent = `Unexpected error (HTTP ${res.status}).`;
 
@@ -137,7 +154,7 @@ async function attemptLogin(){
 
         }
 
-        sessionStorage.setItem(ADMIN_KEY_STORAGE, entered);
+        sessionStorage.setItem(ADMIN_KEY_STORAGE, json.data.token);
 
         adminGate.style.display = "none";
 
@@ -257,7 +274,9 @@ async function loadAll(){
 
     try{
 
-        const [system, wallets, engineConfig, predictions] = await Promise.all([
+        const [dashboard, system, wallets, engineConfig, predictions] = await Promise.all([
+
+            adminFetch("/admin/dashboard"),
 
             adminFetch("/admin/system"),
 
@@ -268,6 +287,8 @@ async function loadAll(){
             adminFetch("/admin/predictions/summary")
 
         ]);
+
+        renderDashboard(dashboard);
 
         renderSystem(system);
 
@@ -296,6 +317,34 @@ async function loadAll(){
         adminContent.classList.remove("hidden");
 
     }
+
+}
+
+// =====================================
+// DASHBOARD (the minimal login-landing cards this sprint asked for)
+// =====================================
+
+function renderDashboard(d){
+
+    document.getElementById("dashEngineStatus").textContent = d.engineStatus.toUpperCase();
+
+    document.getElementById("dashScheduler").textContent = d.scheduler.gmgn.status.toUpperCase();
+
+    document.getElementById("dashDatabase").textContent = d.database.connected ? "Connected" : "Disconnected";
+
+    document.getElementById("dashPredictionCount").textContent = fmtNum(d.predictionCount);
+
+    document.getElementById("dashStrongBuyCount").textContent = fmtNum(d.strongBuyCount);
+
+    const v = d.validationSummary;
+
+    document.getElementById("dashWinRate").textContent = v.winRate != null ? fmtPct(v.winRate) : "n/a";
+
+    document.getElementById("dashTpCount").textContent = fmtNum(v.tpCount);
+
+    document.getElementById("dashSlCount").textContent = fmtNum(v.slCount);
+
+    document.getElementById("dashOpenCount").textContent = fmtNum(v.openCount);
 
 }
 

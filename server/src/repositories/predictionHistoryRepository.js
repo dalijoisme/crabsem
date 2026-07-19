@@ -106,7 +106,21 @@ function findById(id){
 // are inclusive; `to` is extended to the end of that calendar day so
 // "today" actually includes all of today, not just 00:00:00.
 
-function buildWhereClause({ status, recommendation, from, to } = {}){
+// `tradingOnly` (Product Refinement Sprint - "HOLD and AVOID are not
+// open positions") - restricts to recommendation IN ('STRONG BUY',
+// 'BUY'), the only two tiers this engine ever opens a real position
+// for. Win Rate / TP / SL / Open / ROI / holding-time queries must
+// ALWAYS pass this; AVOID never has a row to filter in the first place
+// (see tradePlanService.assessTradePlanReadiness - the readiness gate
+// unconditionally rejects AVOID, so no trade plan and no
+// prediction_history row is ever created for it), but HOLD DOES get a
+// real trade plan/row when the gate passes - without this filter, a
+// HOLD signal's real TP_HIT/SL_HIT outcome was being counted as if it
+// were a trade, even though HOLD never opened a position.
+
+const TRADING_TIERS = ["STRONG BUY", "BUY"];
+
+function buildWhereClause({ status, recommendation, tradingOnly, from, to } = {}){
 
     const clauses = [];
 
@@ -115,6 +129,8 @@ function buildWhereClause({ status, recommendation, from, to } = {}){
     if(status){ clauses.push("status = @status"); params.status = status; }
 
     if(recommendation){ clauses.push("recommendation = @recommendation"); params.recommendation = recommendation; }
+
+    if(tradingOnly){ clauses.push(`recommendation IN (${TRADING_TIERS.map(t => `'${t}'`).join(",")})`); }
 
     // Plain string comparison, not datetime(prediction_time) - both
     // sides are already the exact same real "YYYY-MM-DD HH:MM:SS" text
@@ -156,9 +172,9 @@ function countMany({ status, recommendation, from, to } = {}){
 
 // Real aggregate counts by status - Part 4/5's headline numbers.
 
-function countsByStatus({ recommendation, from, to } = {}){
+function countsByStatus({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ recommendation, from, to });
+    const { where, params } = buildWhereClause({ recommendation, tradingOnly, from, to });
 
     return db.prepare(`
         SELECT status, COUNT(*) as count FROM prediction_history
@@ -203,21 +219,38 @@ function findEarliestPredictionTime(){
 // counts per confidence band alongside TP/SL, which findClosed()
 // deliberately excludes.
 
-function findAllStatuses({ recommendation, from, to } = {}){
+function findAllStatuses({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, from, to });
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to });
 
     return db.prepare(`SELECT * FROM prediction_history ${where}`).all(params);
 
 }
 
-function findClosed({ recommendation, from, to } = {}){
+function findClosed({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, from, to });
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to });
 
     // findClosed always means "not OPEN" - folded in here rather than
     // via buildWhereClause's single-value `status` param, since this
     // is a negative/multi-value condition, not an equality filter.
+    const clauses = [where.replace(/^WHERE /, "") || null, "status != 'OPEN'"].filter(Boolean);
+
+    return db.prepare(`SELECT * FROM prediction_history WHERE ${clauses.join(" AND ")}`).all(params);
+
+}
+
+// HOLD-tier closed predictions (Product Refinement Sprint - HOLD gets
+// its own real evaluation instead of being folded into trading
+// stats). HOLD DOES get a real trade plan/row when the readiness gate
+// passes (unlike AVOID, which never does), so this is real, trackable
+// data - just evaluated under a different question ("was holding
+// correct?") than BUY/STRONG BUY's ("did the trade win?").
+
+function findClosedHold({ from, to } = {}){
+
+    const { where, params } = buildWhereClause({ status: undefined, recommendation: "HOLD", from, to });
+
     const clauses = [where.replace(/^WHERE /, "") || null, "status != 'OPEN'"].filter(Boolean);
 
     return db.prepare(`SELECT * FROM prediction_history WHERE ${clauses.join(" AND ")}`).all(params);
@@ -247,6 +280,8 @@ module.exports = {
     countsByRecommendation,
 
     findClosed,
+
+    findClosedHold,
 
     findAllStatuses,
 

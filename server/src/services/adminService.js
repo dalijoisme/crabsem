@@ -230,13 +230,34 @@ function getPredictionSummary(){
 // prediction/validation logic is written here, only displayed.
 // =====================================
 
+// Product Refinement Sprint, Part 1/2/4 - this used to expose one
+// ambiguous `predictionCount` (secretly = getSummary()'s ALL-TIER
+// total) alongside a `validationSummary` object that LOOKED like a
+// different concept but was the exact same query - the real source of
+// the "Prediction Count 2021 vs Prediction Validation 804" confusion
+// (both numbers always came from prediction_history via getSummary(),
+// just at different date-filter windows). Now split into two
+// genuinely distinct, clearly-named concepts:
+//   - totalPredictionsGenerated/validatedPredictions/pendingValidation:
+//     ALL recommendation tiers, ALL time - "how much has the engine
+//     done, and how much of that is finished being checked".
+//   - tradingPerformance: STRONG BUY/BUY ONLY (getSummary() is now
+//     always trading-tier-scoped - see its own doc comment) - "how did
+//     the trades this engine actually took perform".
+// holdAvoidEvaluation is the real, separate answer for the two tiers
+// that never open a position at all.
+
 function getDashboard(){
 
     const system = getSystem();
 
-    const predictionSummary = predictionMetricsService.getSummary();
+    const predictionCounts = predictionMetricsService.getPredictionCounts();
+
+    const tradingPerformance = predictionMetricsService.getSummary();
 
     const strongBuySummary = predictionMetricsService.getStrongBuySummary();
+
+    const holdAvoidEvaluation = predictionMetricsService.getHoldAvoidEvaluation();
 
     return {
 
@@ -246,11 +267,17 @@ function getDashboard(){
 
         database: system.database,
 
-        predictionCount: predictionSummary.predictionCount,
+        totalPredictionsGenerated: predictionCounts.totalPredictionsGenerated,
 
-        validationSummary: predictionSummary,
+        validatedPredictions: predictionCounts.validatedPredictions,
 
-        strongBuyCount: strongBuySummary.predictionCount
+        pendingValidation: predictionCounts.pendingValidation,
+
+        tradingPerformance,
+
+        strongBuyCount: strongBuySummary.predictionCount,
+
+        holdAvoidEvaluation
 
     };
 

@@ -530,6 +530,10 @@ function getEngineAdvisor({ from, to } = {}){
 
             estimatedWinRateImprovementPct: hypoWinRate != null && summary.winRate != null ? (hypoWinRate - summary.winRate) * 100 : null,
 
+            affectedParameter: "scoringConfig.js: participant.weights.developer",
+
+            implementation: `Change participant.weights.developer from ${currentValue} to ${Math.round(currentValue * 0.7)} in server/src/config/scoringConfig.js, then redeploy.`,
+
             sampleSize: devLosses.count,
 
             confidence: confidenceForSample(devLosses.count)
@@ -570,6 +574,10 @@ function getEngineAdvisor({ from, to } = {}){
 
                 estimatedWinRateImprovementPct: null,
 
+                affectedParameter: null,
+
+                implementation: "No direct engine parameter to change - this is a directional signal worth investigating manually (e.g. whether fresh-wallet activity deserves its own scored participant category), not an immediate config edit.",
+
                 sampleSize: Math.min(freshWinRates.length, kolWinRates.length),
 
                 confidence: confidenceForSample(Math.min(freshWinRates.length, kolWinRates.length))
@@ -600,6 +608,10 @@ function getEngineAdvisor({ from, to } = {}){
             expectedImprovement: null,
 
             estimatedWinRateImprovementPct: null,
+
+            affectedParameter: "scoringConfig.js: market.weights.liquidity",
+
+            implementation: `Change market.weights.liquidity from ${currentValue} to ${Math.round(currentValue * 1.15)} in server/src/config/scoringConfig.js, then redeploy.`,
 
             sampleSize: stats.mostDangerousTokenPattern.sampleSize,
 
@@ -634,6 +646,10 @@ function getEngineAdvisor({ from, to } = {}){
 
                 estimatedWinRateImprovementPct: null,
 
+                affectedParameter: "scoringConfig.js: market.weights.priceStability",
+
+                implementation: `Change market.weights.priceStability from ${currentValue} to ${Math.round(currentValue * 0.85)} in server/src/config/scoringConfig.js, then redeploy.`,
+
                 sampleSize: summary.tpCount,
 
                 confidence: confidenceForSample(summary.tpCount)
@@ -665,6 +681,10 @@ function getEngineAdvisor({ from, to } = {}){
 
             estimatedWinRateImprovementPct: null,
 
+            affectedParameter: "scoringConfig.js: actionTiers.buy",
+
+            implementation: `Change actionTiers.buy from ${currentValue} to ${currentValue + 5} in server/src/config/scoringConfig.js, then redeploy. This raises the participant score a token needs to qualify for BUY at all.`,
+
             sampleSize: lowBand.predictionCount,
 
             confidence: confidenceForSample(lowBand.predictionCount)
@@ -691,6 +711,10 @@ function getEngineAdvisor({ from, to } = {}){
             expectedImprovement: null,
 
             estimatedWinRateImprovementPct: null,
+
+            affectedParameter: "tradePlanConfig.js: target.maxTargetPct",
+
+            implementation: `Change target.maxTargetPct from ${currentValue}% to ${Math.round(currentValue * 0.85)}% in server/src/config/tradePlanConfig.js, then redeploy. This lowers the take-profit target so real gains are locked in sooner.`,
 
             sampleSize: summary.tpCount,
 
@@ -719,6 +743,10 @@ function getEngineAdvisor({ from, to } = {}){
 
             estimatedWinRateImprovementPct: null,
 
+            affectedParameter: "tradePlanConfig.js: stopLoss.baseStopPct",
+
+            implementation: `Change stopLoss.baseStopPct from ${currentValue}% to ${Math.round(currentValue * 1.2)}% in server/src/config/tradePlanConfig.js, then redeploy. This widens the stop distance to tolerate more real volatility before closing.`,
+
             sampleSize: summary.slCount,
 
             confidence: confidenceForSample(summary.slCount)
@@ -727,43 +755,16 @@ function getEngineAdvisor({ from, to } = {}){
 
     }
 
-    // 8. AVOID beats BUY on real average ROI (Product Improvement
-    // Sprint's explicit example) - if the tier the engine tells people
-    // to skip is realizing a HIGHER average ROI than the tier it tells
-    // people to buy, that's a real, structural signal that confidence
-    // thresholds are miscalibrated, not just noise.
-
-    const buyTier = stats.accuracyByTier.find(t => t.recommendation === "BUY");
-
-    const avoidTier = stats.accuracyByTier.find(t => t.recommendation === "AVOID");
-
-    if(buyTier && avoidTier && buyTier.sampleSize >= 5 && avoidTier.sampleSize >= 5 && buyTier.averageRoiPct != null && avoidTier.averageRoiPct != null){
-
-        if(avoidTier.averageRoiPct > buyTier.averageRoiPct){
-
-            advisories.push({
-
-                id: "avoid-beats-buy",
-
-                reason: `AVOID-tier tokens realized a higher average ROI (${avoidTier.averageRoiPct.toFixed(1)}%, n=${avoidTier.sampleSize}) than BUY-tier tokens (${buyTier.averageRoiPct.toFixed(1)}%, n=${buyTier.sampleSize}) this period - the tokens the engine says to skip are outperforming the ones it says to buy.`,
-
-                currentValue: `${engineConfig.actionTiers.buy} (BUY action-tier score threshold)`,
-
-                recommendedValue: `${engineConfig.actionTiers.buy + 10}`,
-
-                expectedImprovement: "Raising the BUY threshold would reclassify some current BUY-tier tokens as HOLD/AVOID - investigate which real signals are driving AVOID tokens' ROI before tuning blindly.",
-
-                estimatedWinRateImprovementPct: null,
-
-                sampleSize: Math.min(buyTier.sampleSize, avoidTier.sampleSize),
-
-                confidence: confidenceForSample(Math.min(buyTier.sampleSize, avoidTier.sampleSize))
-
-            });
-
-        }
-
-    }
+    // Product Refinement Sprint correctness fix: an earlier "AVOID
+    // beats BUY on real average ROI" rule used to live here, comparing
+    // accuracyByTier's AVOID row against BUY. It has been removed - per
+    // this sprint's investigation, AVOID predictions structurally NEVER
+    // get a trade plan or a prediction_history row at all (the
+    // readiness gate unconditionally rejects the AVOID tier - see
+    // tradePlanService.assessTradePlanReadiness), so avoidTier.sampleSize
+    // is always 0 and that rule could never actually fire. It was dead
+    // code based on a false premise about data availability, not a real
+    // insight - removing it rather than leaving inert code in place.
 
     // 9. Smart Money category contributing negative real ROI (Product
     // Improvement Sprint's explicit example) - real per-wallet ROI
@@ -795,6 +796,10 @@ function getEngineAdvisor({ from, to } = {}){
                 expectedImprovement: "Reducing this weight would lower the participant score contribution of Smart-Money-flagged activity - real effect on win rate would need to be measured after the change, not assumed in advance.",
 
                 estimatedWinRateImprovementPct: null,
+
+                affectedParameter: "scoringConfig.js: participant.weights.smartMoney",
+
+                implementation: `Change participant.weights.smartMoney from ${currentValue} to ${Math.round(currentValue * 0.75)} in server/src/config/scoringConfig.js, then redeploy.`,
 
                 sampleSize: smartMoneyRois.length,
 
@@ -1004,7 +1009,12 @@ function getAiHealth({ from, to } = {}){
 
         bestPerformingCategory: stats.bestWalletCategory,
 
-        worstPerformingCategory: stats.worstWalletCategory
+        worstPerformingCategory: stats.worstWalletCategory,
+
+        // Product Refinement Sprint, Part 3 - HOLD/AVOID get their own
+        // real evaluation here rather than being folded into the
+        // trading numbers above.
+        holdAvoidEvaluation: predictionMetricsService.getHoldAvoidEvaluation({ from, to })
 
     };
 

@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=8">
+<link rel="stylesheet" href="css/admin.css?v=9">
 
 </head>
 
@@ -168,12 +168,34 @@ Loading real data from the backend...
 <div class="adminStat"><span>Engine Status</span><strong id="dashEngineStatus">-</strong></div>
 <div class="adminStat"><span>Scheduler</span><strong id="dashScheduler">-</strong></div>
 <div class="adminStat"><span>Database</span><strong id="dashDatabase">-</strong></div>
-<div class="adminStat"><span>Prediction Count</span><strong id="dashPredictionCount">-</strong></div>
-<div class="adminStat"><span>Strong Buy Count</span><strong id="dashStrongBuyCount">-</strong></div>
+<div class="adminStat"><span>Strong Buy Signals Issued</span><strong id="dashStrongBuyCount">-</strong></div>
 
 </div>
 
-<p class="adminNote" style="margin-top:14px;">Validation Summary</p>
+<!-- Product Refinement Sprint, Part 1/4: this used to be one
+     ambiguous "Prediction Count" that quietly meant different things
+     in different places (the exact source of the "2021 vs 804"
+     confusion - both numbers were always the same query, just at
+     different date-filter windows, with no label saying so). Now
+     three explicit, always-All-Time counts: how much the engine has
+     ever generated, how much of that is done being checked, and how
+     much is still open/pending. This is a DIFFERENT question from
+     "Trading Performance" below, which is BUY + STRONG BUY signals
+     only, and DOES respect the date filter at the top of the page. -->
+
+<p class="adminNote" style="margin-top:14px;">All Predictions Ever Generated (every recommendation tier, all time - not affected by the date filter above)</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Total Predictions Generated</span><strong id="dashTotalGenerated">-</strong></div>
+<div class="adminStat"><span>Validated Predictions</span><strong id="dashValidated">-</strong></div>
+<div class="adminStat"><span>Pending Validation</span><strong id="dashPending">-</strong></div>
+
+</div>
+
+<p class="adminNote" style="margin-top:14px;">Trading Performance - BUY + STRONG BUY Only (respects the date filter above)</p>
+
+<p class="adminNote">HOLD and AVOID never open a real trading position in this engine, so they are never counted here - see "HOLD &amp; AVOID Evaluation" below for how those two tiers are actually judged.</p>
 
 <div class="adminGrid4">
 
@@ -183,6 +205,27 @@ Loading real data from the backend...
 <div class="adminStat"><span>Open Count</span><strong id="dashOpenCount">-</strong></div>
 
 </div>
+
+<!-- Product Refinement Sprint, Part 2/3 (HIGHEST PRIORITY): HOLD gets
+     a real evaluation of its own (it DOES get a real tracked outcome
+     when the readiness gate passes, unlike AVOID) - "Correct Hold"
+     (staying out was right) vs "Missed Opportunity" (the token would
+     have been a winning trade). AVOID is honestly disclosed as not
+     evaluable this way: it never receives a trade plan at all, by
+     design, so there is no real outcome data to score it against. -->
+
+<p class="adminNote" style="margin-top:14px;">HOLD &amp; AVOID Evaluation (never counted as a position - see above)</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Correct Hold</span><strong id="dashCorrectHold">-</strong></div>
+<div class="adminStat"><span>Missed Opportunity</span><strong id="dashMissedOpportunity">-</strong></div>
+<div class="adminStat"><span>Correct Hold Rate</span><strong id="dashCorrectHoldRate">-</strong></div>
+<div class="adminStat"><span>AVOID Evaluation</span><strong id="dashAvoidEvaluation" style="font-size:12px;font-weight:500;">-</strong></div>
+
+</div>
+
+<div id="dashMissedOpportunityReasons" class="adminBarList" style="margin-top:10px;"></div>
 
 <!-- AI HEALTH (Product Improvement Sprint, Part 5/8) - the "how
      healthy is my AI, is it improving, what should I improve today"
@@ -331,19 +374,23 @@ Loading real data from the backend...
 
 <h3>Prediction Validation</h3>
 
-<p class="adminNote">Real outcomes from prediction_history - the immutable, TP/SL/Expired-tracked "first recommendation" record per token. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier.</p>
+<p class="adminNote">Real outcomes from prediction_history - the immutable, TP/SL/Expired-tracked "first recommendation" record per token. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier. Only STRONG BUY/BUY ever open a real trading position; every trading-outcome number below (Win Rate, TP, SL, Open, ROI) reflects those two tiers only - see "HOLD &amp; AVOID Evaluation" on the Dashboard for how the other two tiers are judged instead.</p>
 
 <div class="ceoSectionHead">
-<h4>Signal Summary</h4>
+<h4>Signal Summary (all 4 tiers - STRONG BUY, BUY, HOLD, AVOID)</h4>
 <div class="ceoExportBtns" data-section="signal-summary"></div>
 </div>
+
+<p class="adminNote">How many signals of each type the engine issued - this counts every tier, not just the two that trade. AVOID's real count here will always be near-zero: AVOID never receives a trade plan, so it is only ever recorded here, never in prediction_history's outcome tracking.</p>
 
 <div id="ceoSignalSummary" class="ceoSignalGrid"></div>
 
 <div class="ceoSectionHead" style="margin-top:22px;">
-<h4>Result Summary</h4>
+<h4>Trading Signal Performance (BUY + STRONG BUY only)</h4>
 <div class="ceoExportBtns" data-section="result-summary"></div>
 </div>
+
+<p class="adminNote">The exact same definition as Dashboard's "Trading Performance" card, just respecting whatever date range is selected above (Dashboard's version is always All Time).</p>
 
 <div id="predValidationSummary"></div>
 
@@ -355,20 +402,22 @@ Loading real data from the backend...
 <div id="ceoStrongBuy" class="adminGrid4"></div>
 
 <div class="ceoSectionHead" style="margin-top:22px;">
-<h4>Failure Analysis</h4>
+<h4>Why Trades Win or Lose (BUY + STRONG BUY only)</h4>
 </div>
+
+<p class="adminNote">Every card and chart below only looks at closed BUY/STRONG BUY predictions - a HOLD or AVOID signal is never counted as a "loss" or "win" here, because neither one ever opened a real position.</p>
 
 <div id="ceoFailureHeadlines" class="ceoSignalGrid"></div>
 
 <div class="ceoChartsRow">
 
 <div class="ceoChartCol">
-<div class="ceoSectionHead"><h4>Losing Reasons</h4><div class="ceoExportBtns" data-section="failure-reasons"></div></div>
+<div class="ceoSectionHead"><h4>False Buy Reasons (didn't hit target)</h4><div class="ceoExportBtns" data-section="failure-reasons"></div></div>
 <div id="ceoFailureReasons" class="adminBarList"></div>
 </div>
 
 <div class="ceoChartCol">
-<div class="ceoSectionHead"><h4>Winning Reasons</h4><div class="ceoExportBtns" data-section="winning-reasons"></div></div>
+<div class="ceoSectionHead"><h4>Successful Buy Reasons (hit target)</h4><div class="ceoExportBtns" data-section="winning-reasons"></div></div>
 <div id="ceoWinningReasons" class="adminBarList"></div>
 </div>
 
@@ -378,18 +427,18 @@ Loading real data from the backend...
 </div>
 
 <div class="ceoChartCol">
-<div class="ceoSectionHead"><h4>Token Patterns Causing Losses</h4><div class="ceoExportBtns" data-section="token-pattern-losses"></div></div>
+<div class="ceoSectionHead"><h4>Market Cap Band Causing Losses</h4><div class="ceoExportBtns" data-section="token-pattern-losses"></div></div>
 <div id="ceoTokenPatternLosses" class="adminBarList"></div>
 </div>
 
 </div>
 
 <div class="ceoSectionHead" style="margin-top:22px;">
-<h4>Confidence Calibration</h4>
+<h4>Confidence Calibration (BUY + STRONG BUY only)</h4>
 <div class="ceoExportBtns" data-section="confidence-calibration"></div>
 </div>
 
-<p class="adminNote">Helps verify whether confidence scores are realistic - a well-calibrated engine should show higher win rates in higher confidence bands.</p>
+<p class="adminNote">Is confidence predictive of a WINNING TRADE, specifically - a well-calibrated engine should show higher win rates in higher confidence bands. HOLD/AVOID signals are excluded, since neither one is a trade.</p>
 
 <div id="ceoConfidenceCalibration" class="adminTableWrap"></div>
 
@@ -473,7 +522,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=8"></script>
+<script src="js/admin.js?v=9"></script>
 
 </body>
 

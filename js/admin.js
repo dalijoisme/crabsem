@@ -441,7 +441,7 @@ function gmgnWalletLink(address){
 
 let adminFirstLoadDone = false;
 
-const DASHBOARD_STAT_IDS = ["dashEngineStatus","dashScheduler","dashDatabase","dashPredictionCount","dashStrongBuyCount","dashWinRate","dashTpCount","dashSlCount","dashOpenCount"];
+const DASHBOARD_STAT_IDS = ["dashEngineStatus","dashScheduler","dashDatabase","dashStrongBuyCount","dashTotalGenerated","dashValidated","dashPending","dashWinRate","dashTpCount","dashSlCount","dashOpenCount","dashCorrectHold","dashMissedOpportunity","dashCorrectHoldRate","dashAvoidEvaluation"];
 
 const AI_HEALTH_STAT_IDS = ["aiHealthTodayAccuracy","aiHealthSevenDayTrend","aiHealthConfidence","aiHealthAvgRoi","aiHealthBestCategory","aiHealthWorstCategory","aiHealthTimeToTp","aiHealthTimeToSl"];
 
@@ -524,11 +524,23 @@ function renderDashboard(d){
 
     document.getElementById("dashDatabase").textContent = d.database.connected ? "Connected" : "Disconnected";
 
-    document.getElementById("dashPredictionCount").textContent = fmtNum(d.predictionCount);
-
     document.getElementById("dashStrongBuyCount").textContent = fmtNum(d.strongBuyCount);
 
-    const v = d.validationSummary;
+    // Product Refinement Sprint, Part 1/4 - ALL-TIER totals (never
+    // affected by the date filter above), clearly separate from
+    // "Trading Performance" below.
+
+    document.getElementById("dashTotalGenerated").textContent = fmtNum(d.totalPredictionsGenerated);
+
+    document.getElementById("dashValidated").textContent = fmtNum(d.validatedPredictions);
+
+    document.getElementById("dashPending").textContent = fmtNum(d.pendingValidation);
+
+    // Trading Performance - BUY + STRONG BUY only (Part 2, HIGHEST
+    // PRIORITY). getSummary() on the backend is now always scoped this
+    // way - HOLD/AVOID can never appear in these four numbers.
+
+    const v = d.tradingPerformance;
 
     document.getElementById("dashWinRate").textContent = v.winRate != null ? fmtPct(v.winRate) : "n/a";
 
@@ -537,6 +549,37 @@ function renderDashboard(d){
     document.getElementById("dashSlCount").textContent = fmtNum(v.slCount);
 
     document.getElementById("dashOpenCount").textContent = fmtNum(v.openCount);
+
+    // HOLD & AVOID Evaluation (Part 3) - HOLD gets a real evaluation of
+    // its own; AVOID is honestly disclosed as not evaluable this way.
+
+    const hae = d.holdAvoidEvaluation;
+
+    document.getElementById("dashCorrectHold").textContent = fmtNum(hae.hold.correctHoldCount);
+
+    document.getElementById("dashMissedOpportunity").textContent = fmtNum(hae.hold.missedOpportunityCount);
+
+    document.getElementById("dashCorrectHoldRate").textContent = hae.hold.correctHoldRate != null ? fmtPct(hae.hold.correctHoldRate) : "n/a";
+
+    document.getElementById("dashAvoidEvaluation").textContent = hae.avoid.evaluable ? "Evaluable" : "Not evaluable";
+
+    const reasonsEl = document.getElementById("dashMissedOpportunityReasons");
+
+    const avoidNote = !hae.avoid.evaluable ? `<p class="adminNote">${hae.avoid.reason}</p>` : "";
+
+    if(hae.hold.missedOpportunityReasons.length){
+
+        const max = Math.max(1, ...hae.hold.missedOpportunityReasons.map(r => r.count));
+
+        reasonsEl.innerHTML = avoidNote + `<p class="adminNote">Most common reasons a HOLD signal turned out to be a Missed Opportunity:</p>` +
+            hae.hold.missedOpportunityReasons.slice(0, 8).map(r => barRowCeo(r.reason, r.count, max)).join("");
+
+    }
+    else{
+
+        reasonsEl.innerHTML = avoidNote + `<p class="adminNote">No missed-opportunity reasons recorded yet.</p>`;
+
+    }
 
 }
 
@@ -839,6 +882,9 @@ async function openWalletDetail(address){
                 <div class="adminStat"><span>Median ROI</span><strong>${w.median_roi_pct!=null?w.median_roi_pct.toFixed(1)+"%":"-"}</strong></div>
                 <div class="adminStat"><span>Realized Profit</span><strong>${fmtUsd(w.realized_profit_usd)}</strong></div>
                 <div class="adminStat"><span>Avg Holding Time</span><strong>${fmtDuration(w.avg_holding_seconds)}</strong></div>
+                <div class="adminStat"><span>Engine Weight</span><strong style="font-size:12px;font-weight:500;">${engineWeightForLabel(w.primary_label)}</strong></div>
+                <div class="adminStat"><span>Confidence (last score)</span><strong>${fmtNum(w.confidence)}</strong></div>
+                <div class="adminStat"><span>Behavior (Risk Profile)</span><strong>${w.risk_profile || "-"}</strong></div>
             </div>
 
             <h4>Best / Worst Trade (real, individual closed positions)</h4>
@@ -1304,6 +1350,8 @@ function renderEngineAdvisorSummary(data){
                 <div><span>Priority</span>#${a.priority}</div>
                 <div style="grid-column:1/-1;"><span>Evidence</span>${a.evidence}</div>
                 <div style="grid-column:1/-1;"><span>Expected Improvement</span>${a.expectedImprovement ?? "Not quantifiable from current data"}</div>
+                <div><span>Affected Parameter</span>${a.affectedParameter ?? "No direct engine parameter"}</div>
+                <div style="grid-column:1/-1;"><span>How To Implement</span>${a.implementation ?? "No direct config change - treat as a directional signal to investigate manually."}</div>
             </div>
         </div>
     `).join("");
@@ -1324,7 +1372,35 @@ async function loadEngineAdvisor(){
 
 }
 
+// Cached for Wallet Detail's real "Engine Weight" field (Product
+// Refinement Sprint, Part 7) - avoids a second admin-gated fetch
+// inside the modal; refreshed every time the Engine section loads.
+
+let cachedEngineConfig = null;
+
+// Real, disclosed, PARTIAL mapping from a wallet's GMGN label to its
+// actual scored participant-weight key in scoringConfig.js - only 4 of
+// the 10 real primary_label values correspond 1:1 to a real scored
+// category. The rest (Sniper - inversely risk-scored, not a positive
+// weight; Scalper/Swing Trader/Long Holder/Trader/Unproven - pure
+// behavior classifications with no participant-score entry at all) are
+// honestly reported as not directly scored, never guessed.
+
+const WALLET_LABEL_TO_WEIGHT_KEY = { "Smart Money": "smartMoney", "Developer": "developer", "KOL Trader": "kol", "Whale": "whale" };
+
+function engineWeightForLabel(label){
+
+    const key = WALLET_LABEL_TO_WEIGHT_KEY[label];
+
+    if(!key || !cachedEngineConfig) return "Not a directly-scored participant category";
+
+    return `${cachedEngineConfig.participantWeights[key]} (participant score weight for "${label}")`;
+
+}
+
 function renderEngineConfig(c){
+
+    cachedEngineConfig = c;
 
     const html =
 

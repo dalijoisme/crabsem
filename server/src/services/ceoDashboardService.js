@@ -495,6 +495,17 @@ function hypotheticalWinRateIfFixed(tpCount, totalClosed, lossCount){
 
 }
 
+// Admin Panel Decision-Support Sprint, Task 6 - every advisory below
+// now carries the full 10-field set requested: problem, evidence,
+// affectedParameter (human label), configFile (exact real path),
+// property (exact real key path), currentValue (raw), recommendedValue
+// (raw), why (reasoning for the specific magnitude), expectedImprovement,
+// confidence - plus priority/severity, added once at the end. A rule
+// with no real matching engine parameter (fresh-wallet-undervalued)
+// reports configFile/property/currentValue/recommendedValue as null
+// rather than inventing a knob that doesn't exist - `why` still
+// explains, honestly, that there is nothing to tune yet.
+
 function getEngineAdvisor({ from, to } = {}){
 
     const stats = predictionMetricsService.getStatistics({ from, to });
@@ -514,25 +525,33 @@ function getEngineAdvisor({ from, to } = {}){
 
         const currentValue = engineConfig.participantWeights.developer;
 
+        const recommendedValue = Math.round(currentValue * 0.7);
+
         const hypoWinRate = hypotheticalWinRateIfFixed(summary.tpCount, closedCount, devLosses.count);
 
         advisories.push({
 
             id: "developer-weight-too-high",
 
-            reason: `Developer-identified wallets are present in ${devLosses.count}/${closedCount} (${((devLosses.count/closedCount)*100).toFixed(0)}%) of closed predictions that did NOT hit target.`,
+            problem: "Developer-linked wallets are dragging down BUY/STRONG BUY win rate",
 
-            currentValue: `${currentValue} (participant score weight)`,
+            evidence: `Developer-identified wallets are present in ${devLosses.count}/${closedCount} (${((devLosses.count/closedCount)*100).toFixed(0)}%) of closed predictions that did NOT hit target.`,
 
-            recommendedValue: `${Math.round(currentValue * 0.7)}`,
+            affectedParameter: "Developer Participant Weight",
 
-            expectedImprovement: hypoWinRate != null ? `Win rate could rise from ${(summary.winRate*100).toFixed(0)}% to as much as ${(hypoWinRate*100).toFixed(0)}% if developer-linked losses were eliminated (optimistic upper bound, not a guarantee).` : null,
+            configFile: "server/src/config/scoringConfig.js",
+
+            property: "participant.weights.developer",
+
+            currentValue,
+
+            recommendedValue,
+
+            why: "Developer-linked wallets are heavily overrepresented in closed losses relative to their overall presence - lowering this weight reduces how much a developer-linked wallet's activity can push a token's participant score toward BUY.",
+
+            expectedImprovement: hypoWinRate != null ? `Win rate could rise from ${(summary.winRate*100).toFixed(0)}% to as much as ${(hypoWinRate*100).toFixed(0)}% if developer-linked losses were eliminated (optimistic upper bound, not a guarantee).` : "Not quantifiable from current data",
 
             estimatedWinRateImprovementPct: hypoWinRate != null && summary.winRate != null ? (hypoWinRate - summary.winRate) * 100 : null,
-
-            affectedParameter: "scoringConfig.js: participant.weights.developer",
-
-            implementation: `Change participant.weights.developer from ${currentValue} to ${Math.round(currentValue * 0.7)} in server/src/config/scoringConfig.js, then redeploy.`,
 
             sampleSize: devLosses.count,
 
@@ -564,19 +583,25 @@ function getEngineAdvisor({ from, to } = {}){
 
                 id: "fresh-wallet-undervalued",
 
-                reason: `Fresh wallets (≤2 real trades) averaged ${(freshAvg*100).toFixed(0)}% win rate vs KOL wallets' ${(kolAvg*100).toFixed(0)}% this period.`,
+                problem: "Fresh wallets may be outperforming KOL-tagged wallets",
+
+                evidence: `Fresh wallets (≤2 real trades) averaged ${(freshAvg*100).toFixed(0)}% win rate vs KOL wallets' ${(kolAvg*100).toFixed(0)}% this period.`,
+
+                affectedParameter: null,
+
+                configFile: null,
+
+                property: null,
 
                 currentValue: null,
 
                 recommendedValue: null,
 
+                why: "No participant-score category exists for wallet freshness today, so there is nothing to tune directly in config - this is a signal worth a manual look (e.g. whether freshness deserves its own scored participant category), not an automatic parameter change.",
+
                 expectedImprovement: "No direct engine parameter scores wallet freshness today - this is a directional signal, not a tunable value.",
 
                 estimatedWinRateImprovementPct: null,
-
-                affectedParameter: null,
-
-                implementation: "No direct engine parameter to change - this is a directional signal worth investigating manually (e.g. whether fresh-wallet activity deserves its own scored participant category), not an immediate config edit.",
 
                 sampleSize: Math.min(freshWinRates.length, kolWinRates.length),
 
@@ -595,23 +620,31 @@ function getEngineAdvisor({ from, to } = {}){
 
         const currentValue = engineConfig.marketWeights.liquidity;
 
+        const recommendedValue = Math.round(currentValue * 1.15);
+
         advisories.push({
 
             id: "liquidity-weight-too-low",
 
-            reason: `The Micro-cap token pattern has the worst real win rate (${(stats.mostDangerousTokenPattern.winRate*100).toFixed(0)}%, n=${stats.mostDangerousTokenPattern.sampleSize}) of any ranked pattern this period.`,
+            problem: "Liquidity score may be underweighted relative to real micro-cap risk",
 
-            currentValue: `${currentValue} (market health weight)`,
+            evidence: `The Micro-cap token pattern has the worst real win rate (${(stats.mostDangerousTokenPattern.winRate*100).toFixed(0)}%, n=${stats.mostDangerousTokenPattern.sampleSize}) of any ranked pattern this period.`,
 
-            recommendedValue: `${Math.round(currentValue * 1.15)}`,
+            affectedParameter: "Liquidity Market-Health Weight",
 
-            expectedImprovement: null,
+            configFile: "server/src/config/scoringConfig.js",
+
+            property: "market.weights.liquidity",
+
+            currentValue,
+
+            recommendedValue,
+
+            why: "Micro-cap tokens are structurally the thinnest-liquidity band and show the worst real win rate of any ranked pattern - raising this weight makes thin liquidity count more heavily against a token's market health score before it ever reaches BUY.",
+
+            expectedImprovement: "Not quantifiable from current data",
 
             estimatedWinRateImprovementPct: null,
-
-            affectedParameter: "scoringConfig.js: market.weights.liquidity",
-
-            implementation: `Change market.weights.liquidity from ${currentValue} to ${Math.round(currentValue * 1.15)} in server/src/config/scoringConfig.js, then redeploy.`,
 
             sampleSize: stats.mostDangerousTokenPattern.sampleSize,
 
@@ -632,23 +665,31 @@ function getEngineAdvisor({ from, to } = {}){
 
             const currentValue = engineConfig.marketWeights.priceStability;
 
+            const recommendedValue = Math.round(currentValue * 0.85);
+
             advisories.push({
 
                 id: "momentum-overweight",
 
-                reason: `Average favorable excursion (${summary.averageMfePct.toFixed(0)}%) exceeds average realized ROI (${summary.averageRoiPct.toFixed(0)}%) by ${overshoot.toFixed(0)} points - real gains are being given back before close.`,
+                problem: "Price-stability weight may be overstating tokens that give back gains before close",
 
-                currentValue: `${currentValue} (price stability weight)`,
+                evidence: `Average favorable excursion (${summary.averageMfePct.toFixed(0)}%) exceeds average realized ROI (${summary.averageRoiPct.toFixed(0)}%) by ${overshoot.toFixed(0)} points - real gains are being given back before close.`,
 
-                recommendedValue: `${Math.round(currentValue * 0.85)}`,
+                affectedParameter: "Price Stability Market-Health Weight",
 
-                expectedImprovement: null,
+                configFile: "server/src/config/scoringConfig.js",
+
+                property: "market.weights.priceStability",
+
+                currentValue,
+
+                recommendedValue,
+
+                why: "Average favorable excursion (the best price seen) is running well above realized ROI, meaning tokens often looked good mid-flight but gave gains back before close - lowering this weight reduces how much price stability alone can inflate a token's market health score when the real close-out result is weaker.",
+
+                expectedImprovement: "Not quantifiable from current data",
 
                 estimatedWinRateImprovementPct: null,
-
-                affectedParameter: "scoringConfig.js: market.weights.priceStability",
-
-                implementation: `Change market.weights.priceStability from ${currentValue} to ${Math.round(currentValue * 0.85)} in server/src/config/scoringConfig.js, then redeploy.`,
 
                 sampleSize: summary.tpCount,
 
@@ -667,23 +708,31 @@ function getEngineAdvisor({ from, to } = {}){
 
         const currentValue = engineConfig.actionTiers.buy;
 
+        const recommendedValue = currentValue + 5;
+
         advisories.push({
 
             id: "confidence-threshold-too-aggressive",
 
-            reason: `Predictions under 60% confidence won only ${(lowBand.winRate*100).toFixed(0)}% of the time (n=${lowBand.predictionCount}) this period.`,
+            problem: "BUY action threshold may be too low, admitting weak-confidence signals",
 
-            currentValue: `${currentValue} (BUY action-tier score threshold)`,
+            evidence: `Predictions under 60% confidence won only ${(lowBand.winRate*100).toFixed(0)}% of the time (n=${lowBand.predictionCount}) this period.`,
 
-            recommendedValue: `${currentValue + 5}`,
+            affectedParameter: "BUY Action-Tier Score Threshold",
 
-            expectedImprovement: null,
+            configFile: "server/src/config/scoringConfig.js",
+
+            property: "actionTiers.buy",
+
+            currentValue,
+
+            recommendedValue,
+
+            why: "Predictions under 60% confidence are winning well below the engine's overall rate - raising the participant score required to qualify for BUY should filter out more of these before they are ever issued as a signal.",
+
+            expectedImprovement: "Not quantifiable from current data",
 
             estimatedWinRateImprovementPct: null,
-
-            affectedParameter: "scoringConfig.js: actionTiers.buy",
-
-            implementation: `Change actionTiers.buy from ${currentValue} to ${currentValue + 5} in server/src/config/scoringConfig.js, then redeploy. This raises the participant score a token needs to qualify for BUY at all.`,
 
             sampleSize: lowBand.predictionCount,
 
@@ -698,23 +747,31 @@ function getEngineAdvisor({ from, to } = {}){
 
         const currentValue = engineConfig.tradePlan.target.maxTargetPct;
 
+        const recommendedValue = Math.round(currentValue * 0.85);
+
         advisories.push({
 
             id: "take-profit-too-high",
 
-            reason: `Realized ROI (${summary.averageRoiPct.toFixed(0)}%) is well below the best price seen (MFE ${summary.averageMfePct.toFixed(0)}%) across ${summary.tpCount} TP-hit predictions - the target band may be letting real gains slip away.`,
+            problem: "Take-profit target may be set too high, giving back real gains",
 
-            currentValue: `${currentValue}% (max target %)`,
+            evidence: `Realized ROI (${summary.averageRoiPct.toFixed(0)}%) is well below the best price seen (MFE ${summary.averageMfePct.toFixed(0)}%) across ${summary.tpCount} TP-hit predictions - the target band may be letting real gains slip away.`,
 
-            recommendedValue: `${Math.round(currentValue * 0.85)}%`,
+            affectedParameter: "Take-Profit Target (Max %)",
 
-            expectedImprovement: null,
+            configFile: "server/src/config/tradePlanConfig.js",
+
+            property: "target.maxTargetPct",
+
+            currentValue,
+
+            recommendedValue,
+
+            why: "Realized ROI on TP-hit predictions is well below the best price actually seen (MFE) - a lower target locks in real gains sooner instead of waiting for a bigger move that often reverses first.",
+
+            expectedImprovement: "Not quantifiable from current data",
 
             estimatedWinRateImprovementPct: null,
-
-            affectedParameter: "tradePlanConfig.js: target.maxTargetPct",
-
-            implementation: `Change target.maxTargetPct from ${currentValue}% to ${Math.round(currentValue * 0.85)}% in server/src/config/tradePlanConfig.js, then redeploy. This lowers the take-profit target so real gains are locked in sooner.`,
 
             sampleSize: summary.tpCount,
 
@@ -729,23 +786,31 @@ function getEngineAdvisor({ from, to } = {}){
 
         const currentValue = engineConfig.tradePlan.stopLoss.baseStopPct;
 
+        const recommendedValue = Math.round(currentValue * 1.2);
+
         advisories.push({
 
             id: "stop-loss-too-tight",
 
-            reason: `${((summary.slCount/closedCount)*100).toFixed(0)}% of closed predictions this period hit stop-loss (n=${summary.slCount}/${closedCount}).`,
+            problem: "Stop-loss distance may be too tight for this token population's real volatility",
 
-            currentValue: `${currentValue}% (base stop distance)`,
+            evidence: `${((summary.slCount/closedCount)*100).toFixed(0)}% of closed predictions this period hit stop-loss (n=${summary.slCount}/${closedCount}).`,
 
-            recommendedValue: `${Math.round(currentValue * 1.2)}%`,
+            affectedParameter: "Base Stop-Loss Distance (%)",
 
-            expectedImprovement: null,
+            configFile: "server/src/config/tradePlanConfig.js",
+
+            property: "stopLoss.baseStopPct",
+
+            currentValue,
+
+            recommendedValue,
+
+            why: "Over half of closed predictions this period are exiting via stop-loss - widening the stop gives real, normal volatility more room before forcing an exit.",
+
+            expectedImprovement: "Not quantifiable from current data",
 
             estimatedWinRateImprovementPct: null,
-
-            affectedParameter: "tradePlanConfig.js: stopLoss.baseStopPct",
-
-            implementation: `Change stopLoss.baseStopPct from ${currentValue}% to ${Math.round(currentValue * 1.2)}% in server/src/config/tradePlanConfig.js, then redeploy. This widens the stop distance to tolerate more real volatility before closing.`,
 
             sampleSize: summary.slCount,
 
@@ -755,21 +820,17 @@ function getEngineAdvisor({ from, to } = {}){
 
     }
 
-    // Product Refinement Sprint correctness fix: an earlier "AVOID
-    // beats BUY on real average ROI" rule used to live here, comparing
-    // accuracyByTier's AVOID row against BUY. It has been removed - per
-    // this sprint's investigation, AVOID predictions structurally NEVER
-    // get a trade plan or a prediction_history row at all (the
-    // readiness gate unconditionally rejects the AVOID tier - see
-    // tradePlanService.assessTradePlanReadiness), so avoidTier.sampleSize
-    // is always 0 and that rule could never actually fire. It was dead
-    // code based on a false premise about data availability, not a real
-    // insight - removing it rather than leaving inert code in place.
+    // Correctness note (kept from the Product Refinement Sprint): an
+    // earlier "AVOID beats BUY on real average ROI" rule used to live
+    // here. It was removed - AVOID predictions structurally NEVER get a
+    // trade plan or a prediction_history row (the readiness gate
+    // unconditionally rejects the AVOID tier), so that rule's sample
+    // size was always 0 and it could never actually fire. Dead code
+    // based on a false premise, not a real insight.
 
-    // 9. Smart Money category contributing negative real ROI (Product
-    // Improvement Sprint's explicit example) - real per-wallet ROI
-    // across every wallet this engine has labeled "Smart Money",
-    // not a single anecdote.
+    // 8. Smart Money category contributing negative real ROI - real
+    // per-wallet ROI across every wallet this engine has labeled
+    // "Smart Money", not a single anecdote.
 
     const smartMoneyWallets = getWalletPerformance({ category: "Smart Money", from, to, limit: 200 }).wallets;
 
@@ -783,23 +844,31 @@ function getEngineAdvisor({ from, to } = {}){
 
             const currentValue = engineConfig.participantWeights.smartMoney;
 
+            const recommendedValue = Math.round(currentValue * 0.75);
+
             advisories.push({
 
                 id: "smart-money-negative-roi",
 
-                reason: `Wallets labeled Smart Money averaged a negative real ROI (${smartMoneyAvgRoi.toFixed(1)}%, n=${smartMoneyRois.length} wallets) this period - this participant category is currently a drag, not a signal.`,
+                problem: "Smart Money participant category is currently a drag on real ROI, not a signal",
 
-                currentValue: `${currentValue} (participant score weight)`,
+                evidence: `Wallets labeled Smart Money averaged a negative real ROI (${smartMoneyAvgRoi.toFixed(1)}%, n=${smartMoneyRois.length} wallets) this period.`,
 
-                recommendedValue: `${Math.round(currentValue * 0.75)}`,
+                affectedParameter: "Smart Money Participant Weight",
+
+                configFile: "server/src/config/scoringConfig.js",
+
+                property: "participant.weights.smartMoney",
+
+                currentValue,
+
+                recommendedValue,
+
+                why: "Wallets this engine labels Smart Money are averaging negative real ROI this period - lowering this weight reduces how much Smart-Money-flagged activity can push a token's participant score toward BUY while this category is underperforming.",
 
                 expectedImprovement: "Reducing this weight would lower the participant score contribution of Smart-Money-flagged activity - real effect on win rate would need to be measured after the change, not assumed in advance.",
 
                 estimatedWinRateImprovementPct: null,
-
-                affectedParameter: "scoringConfig.js: participant.weights.smartMoney",
-
-                implementation: `Change participant.weights.smartMoney from ${currentValue} to ${Math.round(currentValue * 0.75)} in server/src/config/scoringConfig.js, then redeploy.`,
 
                 sampleSize: smartMoneyRois.length,
 
@@ -811,13 +880,11 @@ function getEngineAdvisor({ from, to } = {}){
 
     }
 
-    // Priority/severity (Product Improvement Sprint, Part 6) - derived
-    // from the same real confidence + evidence already computed above,
-    // not a second, separately-guessed dimension. Priority is simply
-    // rank order (advisories are already pushed roughly high-impact-
-    // first); severity maps directly from the real sample-size-backed
-    // confidence tier. `evidence` mirrors `reason` under the field name
-    // the sprint asked for explicitly.
+    // Priority/severity - derived from the same real confidence/
+    // evidence already computed above, not a second, separately-
+    // guessed dimension. Priority is rank order (advisories are already
+    // pushed roughly high-impact-first); severity maps directly from
+    // the real sample-size-backed confidence tier.
 
     const severityForConfidence = { High: "High", Medium: "Medium", Low: "Low" };
 
@@ -827,17 +894,14 @@ function getEngineAdvisor({ from, to } = {}){
 
         a.severity = severityForConfidence[a.confidence] || "Low";
 
-        a.evidence = a.reason;
-
     });
 
-    // Admin V3.1 (Part 7) - a top-level summary so the advisor answers
-    // "what should I improve today?" without reading every card: real
-    // current-vs-previous-period win rate (null when there's no
-    // comparable previous period - e.g. the All Time default, which by
-    // definition has nothing before it, never a fabricated baseline),
-    // plus the top 1-2 real advisories restated as
-    // "Primary/Secondary Problem".
+    // A top-level summary so the advisor answers "what should I improve
+    // today?" without reading every card: real current-vs-previous-
+    // period win rate (null when there's no comparable previous period -
+    // e.g. the All Time default, which by definition has nothing before
+    // it, never a fabricated baseline), plus the top 1-2 real advisories
+    // restated as "Primary/Secondary Problem".
 
     const previousRange = computePreviousPeriod({ from, to });
 
@@ -857,11 +921,11 @@ function getEngineAdvisor({ from, to } = {}){
 
         previousPeriodAvailable: !!previousRange,
 
-        primaryProblem: top[0] ? top[0].reason : null,
+        primaryProblem: top[0] ? top[0].problem : null,
 
-        secondaryProblem: top[1] ? top[1].reason : null,
+        secondaryProblem: top[1] ? top[1].problem : null,
 
-        suggestedFix: top[0] && top[0].recommendedValue != null ? `Adjust ${top[0].id.replace(/-/g, " ")}: ${top[0].currentValue ?? "current value"} -> ${top[0].recommendedValue}` : (top[0] ? "Directional signal only - no direct engine parameter to adjust yet." : null),
+        suggestedFix: top[0] && top[0].recommendedValue != null ? `${top[0].affectedParameter}: ${top[0].currentValue} -> ${top[0].recommendedValue}` : (top[0] ? "Directional signal only - no direct engine parameter to adjust yet." : null),
 
         expectedImprovement: top[0] ? top[0].expectedImprovement : null,
 

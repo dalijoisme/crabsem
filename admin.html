@@ -90,7 +90,6 @@
 <a href="#secToken">Token</a>
 <a href="#secEngine">Engine</a>
 <a href="#secPrediction">Prediction</a>
-<a href="#secAnalytics">Analytics</a>
 <a href="#secLearn">Learn</a>
 
 </nav>
@@ -442,6 +441,10 @@ Loading real data from the backend...
 
 <div id="ceoConfidenceCalibration" class="adminTableWrap"></div>
 
+<div class="ceoSectionHead" style="margin-top:22px;"><h4>Which Tier Is Most Accurate? (cross-reference)</h4></div>
+
+<div id="topPredictionCrossRef"></div>
+
 <h4 style="margin-top:22px;">Legacy Recommendation Log Summary (Sprint 2, unfiltered)</h4>
 
 <p class="adminNote">Older, separate framework (recommendation_log/recommendation_outcomes) - logs every 5-minute tick rather than a single immutable first prediction. Kept for reference; does not respect the date filter above.</p>
@@ -450,28 +453,17 @@ Loading real data from the backend...
 
 </section>
 
-<!-- ANALYTICS -->
-
-<section class="adminSection" id="secAnalytics">
-
-<h3>Admin Analytics</h3>
-
-<p class="adminNote">Wallet Rankings/ROI below respect the same date filter (filtered on each wallet's own real last_seen field). Every leaderboard below supports search and a real row-count beyond the old fixed Top 10.</p>
-
-<div class="adminWalletPerfControls" id="analyticsControls">
-<input type="text" id="analyticsSearchInput" placeholder="Search wallet address across all leaderboards...">
-<button id="analyticsSearchBtn" class="adminActionBtn">Search</button>
-<select id="analyticsLimitSelect">
-<option value="10">10 rows</option>
-<option value="25" selected>25 rows</option>
-<option value="50">50 rows</option>
-<option value="100">100 rows</option>
-</select>
-</div>
-
-<div id="analyticsGroups"></div>
-
-</section>
+<!-- Decision-Support Sprint, Task 7: the standalone "Admin Analytics"
+     section (7 wallet leaderboards: Top Wallet by Score/ROI/Win Rate/
+     Trader/Smart Money/KOL/Sniper) has been REMOVED - audit finding:
+     every one of those was a strictly weaker duplicate of the Wallet
+     Performance table above (same real wallets/columns, but fixed
+     limit, no sort, no search, no pagination). It added no capability
+     Wallet Performance doesn't already do better. The one piece that
+     wasn't a wallet leaderboard duplicate - real per-action prediction
+     accuracy - is now folded into Prediction Validation above
+     ("Which Tier Is Most Accurate?"), where the same question is
+     already being asked with prediction_history-based numbers. -->
 
 <!-- LEARN (Product Improvement Sprint, Part 7, NEW) - the engine
      learns from its own real prediction history: GET
@@ -485,7 +477,13 @@ Loading real data from the backend...
 
 <h3>Learn</h3>
 
-<p class="adminNote">Real day-over-day comparison of the engine's own validation history - started recording on the date shown below. This is deterministic analysis over real data, not a trained machine-learning model.</p>
+<p class="adminNote">What the engine has learned about itself so far - real patterns, wallet behavior, and market behavior discovered from its own validation history (all-time, not affected by the date filter above), plus a real day-over-day change log. This is deterministic analysis over real data, not a trained machine-learning model.</p>
+
+<div class="ceoSectionHead"><h4>Knowledge Center (all-time)</h4></div>
+
+<div id="learnKnowledgeCenter" class="ceoSignalGrid"></div>
+
+<h4 style="margin-top:22px;">Engine Discovery (day-over-day change log)</h4>
 
 <div id="learnSummary"></div>
 
@@ -500,7 +498,7 @@ Loading real data from the backend...
 </div>
 
 <!-- WALLET DETAIL MODAL (Product Improvement Sprint, Part 4) - opened
-     by clicking any wallet address in Wallet Performance/Analytics.
+     by clicking any wallet address in Wallet Performance.
      Reads the same real GET /api/v1/wallets/:address profile endpoint
      the old single-wallet search box already used, now extended with
      bestTrade/worstTrade/openPositions(+current value)/predictionHistory

@@ -1072,6 +1072,18 @@ css) - single admin interface now, no separate stylesheet.
 
 }
 
+.ceoAdvisorGrid code{
+
+    font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+    font-size:11.5px;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:5px;
+    padding:1px 5px;
+    color:#d3bcff;
+
+}
+
 @media(max-width:900px){
 
     .ceoStatusRow{ grid-template-columns:repeat(3,1fr); }

@@ -481,7 +481,9 @@ async function loadAll(){
 
         loadOne(adminFetch("/admin/ceo/engine-history"), d => renderEngineHistory(d.history), () => noData("ceoEngineHistory")),
 
-        loadOne(adminFetch("/admin/learn/summary"), renderLearnSummary, () => { noData("learnSummary"); noData("learnHistory"); })
+        loadOne(adminFetch("/admin/learn/summary"), renderLearnSummary, () => { noData("learnSummary"); noData("learnHistory"); }),
+
+        loadOne(publicFetch("/validation/predictions/statistics"), renderLearnKnowledgeCenter, () => noData("learnKnowledgeCenter"))
 
     ]);
 
@@ -542,7 +544,7 @@ function renderDashboard(d){
 
     const v = d.tradingPerformance;
 
-    document.getElementById("dashWinRate").textContent = v.winRate != null ? fmtPct(v.winRate) : "n/a";
+    document.getElementById("dashWinRate").textContent = v.winRate != null ? fmtPct(v.winRate) : "No validated BUY/STRONG BUY yet";
 
     document.getElementById("dashTpCount").textContent = fmtNum(v.tpCount);
 
@@ -1228,6 +1230,45 @@ function deltaCardHtml(label, described){
 
 }
 
+// Knowledge Center (Decision-Support Sprint, Task 8) - "what has the
+// engine learned about itself, all-time": top winning/losing pattern,
+// wallet insight, market insight. Deliberately ALL-TIME (not scoped to
+// the page's date filter, unlike Prediction Validation) - this is
+// meant to answer "what do we know overall", not "how did this period
+// go", so it fetches predictionMetricsService.getStatistics() with no
+// from/to, independently of the filtered fetch Prediction Validation
+// uses. Same real fields already computed for the Failure Analysis
+// headlines - reused here, not recomputed differently.
+
+function renderLearnKnowledgeCenter(stats){
+
+    const el = document.getElementById("learnKnowledgeCenter");
+
+    el.innerHTML = `
+        <div class="ceoSignalCard strongbuy">
+            <span class="ceoSignalLabel">Top Winning Pattern</span>
+            <span class="ceoSignalCount" style="font-size:15px;">${stats.mostCommonWinningReason ? stats.mostCommonWinningReason.reason : "No wins with a recorded reason yet"}</span>
+            <span class="ceoSignalPct">${stats.mostCommonWinningReason ? fmtNum(stats.mostCommonWinningReason.count) + " occurrences, all-time" : "Not enough data to identify a pattern yet"}</span>
+        </div>
+        <div class="ceoSignalCard avoid">
+            <span class="ceoSignalLabel">Top Losing Pattern</span>
+            <span class="ceoSignalCount" style="font-size:15px;">${stats.mostCommonLosingReason ? stats.mostCommonLosingReason.reason : "No losses recorded yet"}</span>
+            <span class="ceoSignalPct">${stats.mostCommonLosingReason ? fmtNum(stats.mostCommonLosingReason.count) + " occurrences, all-time" : "Not enough data to identify a pattern yet"}</span>
+        </div>
+        <div class="ceoSignalCard buy">
+            <span class="ceoSignalLabel">Wallet Insight</span>
+            <span class="ceoSignalCount" style="font-size:14px;">${stats.bestWalletCategory ? `${stats.bestWalletCategory.key} wallets perform best` : "Not enough sample yet"}</span>
+            <span class="ceoSignalPct">${stats.bestWalletCategory ? `${fmtPct(stats.bestWalletCategory.winRate)} win rate (n=${stats.bestWalletCategory.sampleSize})${stats.worstWalletCategory ? ` vs ${stats.worstWalletCategory.key} at ${fmtPct(stats.worstWalletCategory.winRate)}` : ""}` : "No wallet category has reached the minimum real sample size (5) yet"}</span>
+        </div>
+        <div class="ceoSignalCard hold">
+            <span class="ceoSignalLabel">Market Insight</span>
+            <span class="ceoSignalCount" style="font-size:14px;">${stats.mostProfitableTokenPattern ? `${stats.mostProfitableTokenPattern.key} tokens perform best` : "Not enough sample yet"}</span>
+            <span class="ceoSignalPct">${stats.mostProfitableTokenPattern ? `${fmtPct(stats.mostProfitableTokenPattern.winRate)} win rate (n=${stats.mostProfitableTokenPattern.sampleSize})${stats.mostDangerousTokenPattern ? ` vs ${stats.mostDangerousTokenPattern.key} at ${fmtPct(stats.mostDangerousTokenPattern.winRate)}` : ""}` : "No market-cap band has reached the minimum real sample size (5) yet"}</span>
+        </div>
+    `;
+
+}
+
 function renderLearnSummary(data){
 
     const summaryEl = document.getElementById("learnSummary");
@@ -1338,20 +1379,20 @@ function renderEngineAdvisorSummary(data){
     el.innerHTML = warning + `<p class="adminNote" style="margin-top:10px;">All flagged issues this period, ranked by priority:</p>` + data.advisories.map(a => `
         <div class="ceoInsightCard">
             <div class="ceoInsightCardHead">
-                <span class="ceoInsightMessage"><strong>#${a.priority} - ${a.reason}</strong></span>
+                <span class="ceoInsightMessage"><strong>#${a.priority} - ${a.problem}</strong></span>
                 <span class="ceoImpactBadge severity-${a.severity.toLowerCase()}">${a.severity} Severity</span>
             </div>
             <div class="ceoAdvisorGrid">
-                <div><span>Current Value</span>${a.currentValue ?? "n/a - no direct engine parameter"}</div>
-                <div><span>Suggested Value</span>${a.recommendedValue ?? "n/a"}</div>
-                <div><span>Estimated Win Rate Improvement</span>${a.estimatedWinRateImprovementPct != null ? `+${a.estimatedWinRateImprovementPct.toFixed(1)}pp (optimistic upper bound)` : "Not quantifiable from current data"}</div>
-                <div><span>Sample Size</span>${fmtNum(a.sampleSize)}</div>
-                <div><span>Confidence</span>${a.confidence}</div>
-                <div><span>Priority</span>#${a.priority}</div>
                 <div style="grid-column:1/-1;"><span>Evidence</span>${a.evidence}</div>
-                <div style="grid-column:1/-1;"><span>Expected Improvement</span>${a.expectedImprovement ?? "Not quantifiable from current data"}</div>
-                <div><span>Affected Parameter</span>${a.affectedParameter ?? "No direct engine parameter"}</div>
-                <div style="grid-column:1/-1;"><span>How To Implement</span>${a.implementation ?? "No direct config change - treat as a directional signal to investigate manually."}</div>
+                <div><span>Affected Parameter</span>${a.affectedParameter ?? "No direct engine parameter - directional signal only"}</div>
+                <div><span>Confidence</span>${a.confidence} (n=${fmtNum(a.sampleSize)})</div>
+                <div><span>Config File</span>${a.configFile ? `<code>${a.configFile}</code>` : "n/a"}</div>
+                <div><span>Property</span>${a.property ? `<code>${a.property}</code>` : "n/a"}</div>
+                <div><span>Current Value</span>${a.currentValue ?? "n/a"}</div>
+                <div><span>Recommended Value</span>${a.recommendedValue ?? "n/a"}</div>
+                <div style="grid-column:1/-1;"><span>Why This Value</span>${a.why}</div>
+                <div style="grid-column:1/-1;"><span>Expected Improvement</span>${a.expectedImprovement}${a.estimatedWinRateImprovementPct != null ? ` (+${a.estimatedWinRateImprovementPct.toFixed(1)}pp optimistic upper bound)` : ""}</div>
+                <div><span>Priority</span>#${a.priority}</div>
             </div>
         </div>
     `).join("");
@@ -1445,12 +1486,12 @@ function renderPredValidationSummary(summary){
 
     document.getElementById("predValidationSummary").innerHTML = `
         <div class="adminGrid4">
-            <div class="adminStat"><span>Total Predictions</span><strong>${fmtNum(summary.predictionCount)}</strong></div>
+            <div class="adminStat"><span>BUY + STRONG BUY Predictions (this period)</span><strong>${fmtNum(summary.predictionCount)}</strong></div>
             <div class="adminStat"><span>TP Hit</span><strong>${fmtNum(summary.tpCount)}</strong></div>
             <div class="adminStat"><span>SL Hit</span><strong>${fmtNum(summary.slCount)}</strong></div>
             <div class="adminStat"><span>Expired</span><strong>${fmtNum(summary.expiredCount)}</strong></div>
             <div class="adminStat"><span>Open</span><strong>${fmtNum(summary.openCount)}</strong></div>
-            <div class="adminStat"><span>Win Rate</span><strong>${summary.winRate!=null?fmtPct(summary.winRate):"n/a"}</strong></div>
+            <div class="adminStat"><span>Win Rate</span><strong>${summary.winRate!=null?fmtPct(summary.winRate):"No validated BUY/STRONG BUY yet"}</strong></div>
             <div class="adminStat"><span>Average ROI</span><strong>${summary.averageRoiPct!=null?summary.averageRoiPct.toFixed(2)+"%":"-"}</strong></div>
             <div class="adminStat"><span>Median ROI</span><strong>${summary.medianRoiPct!=null?summary.medianRoiPct.toFixed(2)+"%":"-"}</strong></div>
             <div class="adminStat"><span>Largest Winner</span><strong>${summary.largestWinnerPct!=null?summary.largestWinnerPct.toFixed(1)+"%":"-"}</strong></div>
@@ -1503,7 +1544,7 @@ function renderStrongBuyCeo(s){
         <div class="adminStat"><span>SL</span><strong>${fmtNum(s.slCount)}</strong></div>
         <div class="adminStat"><span>Expired</span><strong>${fmtNum(s.expiredCount)}</strong></div>
         <div class="adminStat"><span>Open</span><strong>${fmtNum(s.openCount)}</strong></div>
-        <div class="adminStat"><span>Win Rate</span><strong>${s.winRate!=null?fmtPct(s.winRate):"n/a"}</strong></div>
+        <div class="adminStat"><span>Win Rate</span><strong>${s.winRate!=null?fmtPct(s.winRate):"No validated STRONG BUY yet"}</strong></div>
         <div class="adminStat"><span>Average ROI</span><strong>${s.averageRoiPct!=null?s.averageRoiPct.toFixed(1)+"%":"-"}</strong></div>
         <div class="adminStat"><span>Avg Time to TP</span><strong>${fmtDuration(s.averageTimeToTpSeconds)}</strong></div>
     `;
@@ -1606,7 +1647,7 @@ function renderFailureAnalysisCeo(f){
 
     document.getElementById("ceoConfidenceCalibration").innerHTML = `
         <table class="adminTable">
-            <thead><tr><th>Confidence Band</th><th>Predictions</th><th>TP</th><th>SL</th><th>Win Rate</th></tr></thead>
+            <thead><tr><th>Confidence Band</th><th>Predictions</th><th>TP</th><th>SL</th><th>Expired</th><th>Open</th><th>Win Rate</th></tr></thead>
             <tbody>
             ${f.confidenceCalibration.map(b => `
                 <tr>
@@ -1614,7 +1655,9 @@ function renderFailureAnalysisCeo(f){
                     <td>${fmtNum(b.predictionCount)}</td>
                     <td>${fmtNum(b.tpCount)}</td>
                     <td>${fmtNum(b.slCount)}</td>
-                    <td>${b.winRate!=null?fmtPct(b.winRate):"n/a"}</td>
+                    <td>${fmtNum(b.expiredCount)}</td>
+                    <td>${fmtNum(b.openCount)}</td>
+                    <td>${b.winRate!=null?fmtPct(b.winRate):"No closed predictions in this band yet"}</td>
                 </tr>
             `).join("")}
             </tbody>
@@ -2046,7 +2089,7 @@ async function loadPredictionAndAnalytics(){
 
     lastLegacyPredictions = await adminFetch("/admin/predictions/summary").catch(() => ({ horizons: [] }));
 
-    await renderAnalytics(lastLegacyPredictions);
+    renderTopPredictionCrossRef(lastLegacyPredictions);
 
     renderExportButtons();
 
@@ -2055,24 +2098,6 @@ async function loadPredictionAndAnalytics(){
 }
 
 let lastLegacyPredictions = { horizons: [] };
-
-document.getElementById("analyticsSearchBtn").onclick = () => {
-
-    analyticsState.q = document.getElementById("analyticsSearchInput").value.trim();
-
-    renderAnalytics(lastLegacyPredictions);
-
-};
-
-document.getElementById("analyticsSearchInput").addEventListener("keyup", (e) => { if(e.key === "Enter") document.getElementById("analyticsSearchBtn").click(); });
-
-document.getElementById("analyticsLimitSelect").addEventListener("change", (e) => {
-
-    analyticsState.limit = Number(e.target.value);
-
-    renderAnalytics(lastLegacyPredictions);
-
-});
 
 // Filter UI wiring - quick buttons compute a real UTC date range and
 // mirror it into the Start/End inputs; the Apply button reads
@@ -2125,7 +2150,7 @@ function renderPredictions(p){
 
     const summaryRows = `
         <div class="adminGrid4">
-            <div class="adminStat"><span>Prediction Count</span><strong>${fmtNum(p.totalRecommendationsLogged)}</strong></div>
+            <div class="adminStat"><span>Legacy Log Count (Sprint 2 framework, NOT prediction_history)</span><strong>${fmtNum(p.totalRecommendationsLogged)}</strong></div>
             <div class="adminStat"><span>Outcomes Evaluated</span><strong>${fmtNum(p.totalOutcomesEvaluated)}</strong></div>
             <div class="adminStat"><span>Min Sample Size</span><strong>${p.minSampleSizeForMetrics}</strong></div>
             <div class="adminStat"><span>Win Definition</span><strong>BUY&gt;${p.winDefinition.buyMinReturnPct}% / HOLD&gt;${p.winDefinition.holdMinReturnPct}% / AVOID&le;${p.winDefinition.avoidMaxReturnPct}%</strong></div>
@@ -2174,119 +2199,44 @@ function renderPredictions(p){
 }
 
 // =====================================
-// ADMIN ANALYTICS
+// TOP PREDICTION CROSS-REFERENCE (Decision-Support Sprint, Task 7) -
+// this used to live in a standalone "Analytics" section alongside 7
+// wallet leaderboards. Audit finding: those leaderboards were a
+// strictly weaker duplicate of the Wallet Performance table above
+// (same wallets, same real columns, but fixed-limit and without
+// sort/search/pagination) - they added no real capability Wallet
+// Performance doesn't already do better, so Analytics as a distinct
+// section has been removed rather than kept as clutter. This one
+// non-duplicate piece - "what's the engine's real per-action accuracy"
+// - has no wallet leaderboard identity at all, so it's folded into
+// Prediction Validation, where the same question is already being
+// asked with prediction_history-based numbers just above it.
 // =====================================
 
-// Admin V3.1, Part 11 - "should display ALL DATA, do NOT limit to Top
-// 10". Every leaderboard below now reads a real, selectable row count
-// (10/25/50/100 - MAX_LIMIT on the backend's /wallets/* routes is 200,
-// see server/src/utils/validators.js) and a real address search (`q`,
-// the same server-side substring match Wallet Performance uses),
-// instead of the old hardcoded limit:10 + client-side .slice(0,10).
-// This does not (yet) add full per-column sort/pagination the way
-// Wallet Performance got in Part 5 - a deliberate, disclosed scope
-// choice given seven leaderboards would each need their own paging
-// state; search + a real row-count selector covers most of Part 11's
-// ask without that added complexity.
+function renderTopPredictionCrossRef(predictions){
 
-const analyticsState = { limit: 25, q: "" };
+    const el = document.getElementById("topPredictionCrossRef");
 
-async function walletTable(title, path, params = {}){
+    if(!el) return;
 
-    try{
+    if(!predictions.horizons || !predictions.horizons.length){
 
-        const data = await publicFetch(`${path}${buildFilterParams({ ...params, limit: analyticsState.limit, q: analyticsState.q || undefined })}`);
+        el.innerHTML = `<p class="adminNote">No data available - the legacy per-horizon accuracy log has no rows yet.</p>`;
 
-        const wallets = data.wallets || [];
-
-        if(!wallets.length) return `<div class="adminAnalyticsGroup"><h4>${title}</h4><p class="adminNote">No data available.</p></div>`;
-
-        const rows = wallets.map(w => `
-            <tr>
-                <td><span title="${w.wallet_address}">${w.wallet_address.slice(0,4)}...${w.wallet_address.slice(-4)}</span></td>
-                <td>${w.primary_label || "-"}</td>
-                <td>${fmtNum(w.score)}</td>
-                <td>${fmtPct(w.win_rate)}</td>
-                <td>${fmtNum(w.avg_roi_pct,1)}%</td>
-                <td>${fmtNum(w.total_trades)}</td>
-            </tr>
-        `).join("");
-
-        return `
-            <div class="adminAnalyticsGroup">
-                <div class="adminTableWrap">
-                    <table class="adminTable">
-                        <caption>${title} (${wallets.length} shown)</caption>
-                        <thead><tr><th>Wallet</th><th>Label</th><th>Score</th><th>Win Rate</th><th>Avg ROI</th><th>Trades</th></tr></thead>
-                        <tbody>${rows}</tbody>
-                    </table>
-                </div>
-            </div>
-        `;
+        return;
 
     }
-    catch(e){
-
-        console.error(e);
-
-        return `<div class="adminAnalyticsGroup"><h4>${title}</h4><p class="adminNote">No data available.</p></div>`;
-
-    }
-
-}
-
-async function renderAnalytics(predictions){
-
-    const el = document.getElementById("analyticsGroups");
-
-    // Only show the "loading" placeholder on the very first render -
-    // a filter change (or any later re-render) keeps the previous
-    // tables visible until the new ones are ready, then swaps once,
-    // instead of blanking the section on every date-filter click.
-
-    if(!el.dataset.loadedOnce) el.innerHTML = `<p class="adminNote">Loading leaderboards...</p>`;
-
-    const [topWallet, topRoi, topWinRate, topTrader, topSmartMoney, topKol, topSniper] = await Promise.all([
-
-        walletTable("Top Wallet (by Score)", "/wallets/leaderboard", { sort: "score" }),
-
-        walletTable("Top ROI", "/wallets/leaderboard", { sort: "avg_roi_pct" }),
-
-        walletTable("Top Win Rate", "/wallets/leaderboard", { sort: "win_rate" }),
-
-        walletTable("Top Trader", "/wallets/search", { label: "Trader" }),
-
-        walletTable("Top Smart Money", "/wallets/search", { label: "Smart Money" }),
-
-        walletTable("Top KOL", "/wallets/search", { label: "KOL Trader" }),
-
-        walletTable("Top Sniper", "/wallets/search", { label: "Sniper" })
-
-    ]);
-
-    el.dataset.loadedOnce = "1";
-
-    // "Top Prediction" - there is no separate leaderboard entity for
-    // this (a recommendation is not a wallet); the honest, real
-    // mapping is the same per-action accuracy breakdown already shown
-    // in the Prediction section above, cross-referenced here rather
-    // than invented as a new leaderboard that doesn't exist.
 
     const bestHorizon = predictions.horizons.find(h => h.winRate != null) || predictions.horizons[0];
 
-    const topPredictionHtml = `
-        <div class="adminAnalyticsGroup">
-            <h4>Top Prediction (real accuracy, not a wallet leaderboard)</h4>
-            <p class="adminNote">"Top Prediction" has no separate identity in this engine - shown here is the real per-action accuracy at the ${bestHorizon?.horizon || "shortest"} horizon, the same data as the Prediction section.</p>
-            <div class="adminGrid4">
-                <div class="adminStat"><span>STRONG BUY Accuracy</span><strong>${bestHorizon?.accuracyByAction?.strongBuy?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.strongBuy.accuracy) : "n/a"}</strong></div>
-                <div class="adminStat"><span>BUY Accuracy</span><strong>${bestHorizon?.accuracyByAction?.buy?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.buy.accuracy) : "n/a"}</strong></div>
-                <div class="adminStat"><span>HOLD Accuracy</span><strong>${bestHorizon?.accuracyByAction?.hold?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.hold.accuracy) : "n/a"}</strong></div>
-                <div class="adminStat"><span>AVOID Accuracy</span><strong>${bestHorizon?.accuracyByAction?.avoid?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.avoid.accuracy) : "n/a"}</strong></div>
-            </div>
+    el.innerHTML = `
+        <p class="adminNote">Cross-reference from the older per-horizon accuracy log (recommendation_log, Sprint 2) - shown here because it answers the same "which tier is most accurate" question this section is about, at the ${bestHorizon?.horizon || "shortest"} horizon.</p>
+        <div class="adminGrid4">
+            <div class="adminStat"><span>STRONG BUY Accuracy</span><strong>${bestHorizon?.accuracyByAction?.strongBuy?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.strongBuy.accuracy) : "No sample recorded yet"}</strong></div>
+            <div class="adminStat"><span>BUY Accuracy</span><strong>${bestHorizon?.accuracyByAction?.buy?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.buy.accuracy) : "No sample recorded yet"}</strong></div>
+            <div class="adminStat"><span>HOLD Accuracy</span><strong>${bestHorizon?.accuracyByAction?.hold?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.hold.accuracy) : "No sample recorded yet"}</strong></div>
+            <div class="adminStat"><span>AVOID Accuracy</span><strong>${bestHorizon?.accuracyByAction?.avoid?.accuracy != null ? fmtPct(bestHorizon.accuracyByAction.avoid.accuracy) : "No sample recorded yet"}</strong></div>
         </div>
     `;
-
-    el.innerHTML = topWallet + topRoi + topWinRate + topTrader + topSmartMoney + topKol + topSniper + topPredictionHtml;
 
 }

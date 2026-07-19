@@ -528,6 +528,10 @@ function getEngineAdvisor({ from, to } = {}){
 
             expectedImprovement: hypoWinRate != null ? `Win rate could rise from ${(summary.winRate*100).toFixed(0)}% to as much as ${(hypoWinRate*100).toFixed(0)}% if developer-linked losses were eliminated (optimistic upper bound, not a guarantee).` : null,
 
+            estimatedWinRateImprovementPct: hypoWinRate != null && summary.winRate != null ? (hypoWinRate - summary.winRate) * 100 : null,
+
+            sampleSize: devLosses.count,
+
             confidence: confidenceForSample(devLosses.count)
 
         });
@@ -564,6 +568,10 @@ function getEngineAdvisor({ from, to } = {}){
 
                 expectedImprovement: "No direct engine parameter scores wallet freshness today - this is a directional signal, not a tunable value.",
 
+                estimatedWinRateImprovementPct: null,
+
+                sampleSize: Math.min(freshWinRates.length, kolWinRates.length),
+
                 confidence: confidenceForSample(Math.min(freshWinRates.length, kolWinRates.length))
 
             });
@@ -590,6 +598,10 @@ function getEngineAdvisor({ from, to } = {}){
             recommendedValue: `${Math.round(currentValue * 1.15)}`,
 
             expectedImprovement: null,
+
+            estimatedWinRateImprovementPct: null,
+
+            sampleSize: stats.mostDangerousTokenPattern.sampleSize,
 
             confidence: confidenceForSample(stats.mostDangerousTokenPattern.sampleSize)
 
@@ -620,6 +632,10 @@ function getEngineAdvisor({ from, to } = {}){
 
                 expectedImprovement: null,
 
+                estimatedWinRateImprovementPct: null,
+
+                sampleSize: summary.tpCount,
+
                 confidence: confidenceForSample(summary.tpCount)
 
             });
@@ -647,6 +663,10 @@ function getEngineAdvisor({ from, to } = {}){
 
             expectedImprovement: null,
 
+            estimatedWinRateImprovementPct: null,
+
+            sampleSize: lowBand.predictionCount,
+
             confidence: confidenceForSample(lowBand.predictionCount)
 
         });
@@ -669,6 +689,10 @@ function getEngineAdvisor({ from, to } = {}){
             recommendedValue: `${Math.round(currentValue * 0.85)}%`,
 
             expectedImprovement: null,
+
+            estimatedWinRateImprovementPct: null,
+
+            sampleSize: summary.tpCount,
 
             confidence: confidenceForSample(summary.tpCount)
 
@@ -693,11 +717,114 @@ function getEngineAdvisor({ from, to } = {}){
 
             expectedImprovement: null,
 
+            estimatedWinRateImprovementPct: null,
+
+            sampleSize: summary.slCount,
+
             confidence: confidenceForSample(summary.slCount)
 
         });
 
     }
+
+    // 8. AVOID beats BUY on real average ROI (Product Improvement
+    // Sprint's explicit example) - if the tier the engine tells people
+    // to skip is realizing a HIGHER average ROI than the tier it tells
+    // people to buy, that's a real, structural signal that confidence
+    // thresholds are miscalibrated, not just noise.
+
+    const buyTier = stats.accuracyByTier.find(t => t.recommendation === "BUY");
+
+    const avoidTier = stats.accuracyByTier.find(t => t.recommendation === "AVOID");
+
+    if(buyTier && avoidTier && buyTier.sampleSize >= 5 && avoidTier.sampleSize >= 5 && buyTier.averageRoiPct != null && avoidTier.averageRoiPct != null){
+
+        if(avoidTier.averageRoiPct > buyTier.averageRoiPct){
+
+            advisories.push({
+
+                id: "avoid-beats-buy",
+
+                reason: `AVOID-tier tokens realized a higher average ROI (${avoidTier.averageRoiPct.toFixed(1)}%, n=${avoidTier.sampleSize}) than BUY-tier tokens (${buyTier.averageRoiPct.toFixed(1)}%, n=${buyTier.sampleSize}) this period - the tokens the engine says to skip are outperforming the ones it says to buy.`,
+
+                currentValue: `${engineConfig.actionTiers.buy} (BUY action-tier score threshold)`,
+
+                recommendedValue: `${engineConfig.actionTiers.buy + 10}`,
+
+                expectedImprovement: "Raising the BUY threshold would reclassify some current BUY-tier tokens as HOLD/AVOID - investigate which real signals are driving AVOID tokens' ROI before tuning blindly.",
+
+                estimatedWinRateImprovementPct: null,
+
+                sampleSize: Math.min(buyTier.sampleSize, avoidTier.sampleSize),
+
+                confidence: confidenceForSample(Math.min(buyTier.sampleSize, avoidTier.sampleSize))
+
+            });
+
+        }
+
+    }
+
+    // 9. Smart Money category contributing negative real ROI (Product
+    // Improvement Sprint's explicit example) - real per-wallet ROI
+    // across every wallet this engine has labeled "Smart Money",
+    // not a single anecdote.
+
+    const smartMoneyWallets = getWalletPerformance({ category: "Smart Money", from, to, limit: 200 }).wallets;
+
+    const smartMoneyRois = smartMoneyWallets.map(w => w.averageRoiPct).filter(v => v != null);
+
+    if(smartMoneyRois.length >= 5){
+
+        const smartMoneyAvgRoi = smartMoneyRois.reduce((a,b)=>a+b,0) / smartMoneyRois.length;
+
+        if(smartMoneyAvgRoi < 0){
+
+            const currentValue = engineConfig.participantWeights.smartMoney;
+
+            advisories.push({
+
+                id: "smart-money-negative-roi",
+
+                reason: `Wallets labeled Smart Money averaged a negative real ROI (${smartMoneyAvgRoi.toFixed(1)}%, n=${smartMoneyRois.length} wallets) this period - this participant category is currently a drag, not a signal.`,
+
+                currentValue: `${currentValue} (participant score weight)`,
+
+                recommendedValue: `${Math.round(currentValue * 0.75)}`,
+
+                expectedImprovement: "Reducing this weight would lower the participant score contribution of Smart-Money-flagged activity - real effect on win rate would need to be measured after the change, not assumed in advance.",
+
+                estimatedWinRateImprovementPct: null,
+
+                sampleSize: smartMoneyRois.length,
+
+                confidence: confidenceForSample(smartMoneyRois.length)
+
+            });
+
+        }
+
+    }
+
+    // Priority/severity (Product Improvement Sprint, Part 6) - derived
+    // from the same real confidence + evidence already computed above,
+    // not a second, separately-guessed dimension. Priority is simply
+    // rank order (advisories are already pushed roughly high-impact-
+    // first); severity maps directly from the real sample-size-backed
+    // confidence tier. `evidence` mirrors `reason` under the field name
+    // the sprint asked for explicitly.
+
+    const severityForConfidence = { High: "High", Medium: "Medium", Low: "Low" };
+
+    advisories.forEach((a, i) => {
+
+        a.priority = i + 1;
+
+        a.severity = severityForConfidence[a.confidence] || "Low";
+
+        a.evidence = a.reason;
+
+    });
 
     // Admin V3.1 (Part 7) - a top-level summary so the advisor answers
     // "what should I improve today?" without reading every card: real
@@ -742,6 +869,142 @@ function getEngineAdvisor({ from, to } = {}){
         advisories: advisories.slice(0, 5),
 
         sampleWarning: summary.predictionCount < 20 ? `Sample size (${summary.predictionCount} predictions) is small - treat these as directional, not conclusive.` : null
+
+    };
+
+}
+
+// =====================================
+// AI DASHBOARD / AI HEALTH (Product Improvement Sprint, Part 5/8) -
+// the top-of-page answer to "how healthy is my AI, is it improving,
+// what should I improve today" within a few real numbers. Every field
+// here is computed from the SAME real predictionMetricsService/
+// ceoDashboardService functions the rest of the dashboard already
+// uses - nothing new is invented, this only reframes existing real
+// data plus two genuinely new-but-real checks (Confidence Health,
+// 7-Day Trend) that are honest about not having enough real history
+// yet when that's actually true (see the earliest-prediction-time
+// check below - real prediction data currently spans well under 7
+// days, so a "7-day trend" computed today would compare a real week
+// against a mostly-empty "previous week" and call it a real trend;
+// this reports that honestly instead).
+// =====================================
+
+function todayUtcRange(){
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    return { from: today, to: today };
+
+}
+
+function daysAgoUtc(date, n){
+
+    return new Date(date.getTime() - n*24*60*60*1000).toISOString().slice(0, 10);
+
+}
+
+function getConfidenceHealth(confidenceCalibration){
+
+    const usableBands = confidenceCalibration.filter(b => b.predictionCount >= 10 && b.winRate != null);
+
+    if(usableBands.length < 2){
+
+        return { status: "Insufficient Data", orderedPairs: null, totalPairs: null, detail: "Fewer than two confidence bands have at least 10 real closed predictions yet - not enough data to judge calibration." };
+
+    }
+
+    // confidenceCalibration is already ordered highest-confidence-band
+    // first (config.confidenceBuckets) - a well-calibrated engine
+    // should show win rate falling (or holding) as confidence falls.
+
+    let orderedPairs = 0;
+
+    for(let i = 0; i < usableBands.length - 1; i++){
+
+        if(usableBands[i].winRate >= usableBands[i+1].winRate) orderedPairs++;
+
+    }
+
+    const totalPairs = usableBands.length - 1;
+
+    const ratio = orderedPairs / totalPairs;
+
+    const status = ratio >= 0.75 ? "Well Calibrated" : (ratio >= 0.4 ? "Mixed" : "Poorly Calibrated");
+
+    return { status, orderedPairs, totalPairs, detail: `${orderedPairs}/${totalPairs} adjacent confidence bands (≥10 real predictions each) show win rate falling as confidence falls, as a well-calibrated engine should.` };
+
+}
+
+function getAiHealth({ from, to } = {}){
+
+    const stats = predictionMetricsService.getStatistics({ from, to });
+
+    const summary = stats.overall;
+
+    const todaySummary = predictionMetricsService.getSummary(todayUtcRange());
+
+    const earliest = predictionMetricsService.getEarliestPredictionTime();
+
+    const now = new Date();
+
+    const realHistoryDays = earliest ? (now.getTime() - new Date(earliest.replace(" ", "T") + "Z").getTime()) / (24*60*60*1000) : 0;
+
+    let sevenDayTrend = { available: false, reason: `Real prediction history currently spans ${realHistoryDays.toFixed(1)} day(s) - need at least 14 real days (7 to measure + 7 to compare against) before a real 7-day trend can be computed.` };
+
+    if(realHistoryDays >= 14){
+
+        const last7 = predictionMetricsService.getSummary({ from: daysAgoUtc(now, 7), to: daysAgoUtc(now, 0) });
+
+        const prev7 = predictionMetricsService.getSummary({ from: daysAgoUtc(now, 14), to: daysAgoUtc(now, 8) });
+
+        sevenDayTrend = {
+
+            available: true,
+
+            currentWinRate: last7.winRate,
+
+            previousWinRate: prev7.winRate,
+
+            delta: (last7.winRate != null && prev7.winRate != null) ? last7.winRate - prev7.winRate : null
+
+        };
+
+    }
+
+    return {
+
+        generatedAt: new Date().toISOString(),
+
+        todaysAccuracy: todaySummary.winRate,
+
+        todaysPredictionCount: todaySummary.predictionCount,
+
+        sevenDayTrend,
+
+        predictionCount: summary.predictionCount,
+
+        winRate: summary.winRate,
+
+        averageRoiPct: summary.averageRoiPct,
+
+        openCount: summary.openCount,
+
+        tpCount: summary.tpCount,
+
+        slCount: summary.slCount,
+
+        expiredCount: summary.expiredCount,
+
+        averageTimeToTpSeconds: summary.averageTimeToTpSeconds,
+
+        averageTimeToSlSeconds: summary.averageTimeToSlSeconds,
+
+        confidenceHealth: getConfidenceHealth(stats.confidenceCalibration),
+
+        bestPerformingCategory: stats.bestWalletCategory,
+
+        worstPerformingCategory: stats.worstWalletCategory
 
     };
 
@@ -946,6 +1209,8 @@ module.exports = {
     getAvailableWalletCategories,
     getRecommendations,
     getEngineAdvisor,
+    getAiHealth,
+    getConfidenceHealth,
     getEngineHistory: engineVersionService.getHistory,
     getExportTable,
     getExportableSections

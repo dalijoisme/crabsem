@@ -152,6 +152,23 @@ async function getRecommendations(req, res, next){
 
 }
 
+// Product Improvement Sprint, Part 5/8 - AI Dashboard/AI Health.
+
+async function getAiHealth(req, res, next){
+
+    try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
+
+        sendSuccess(res, ceoDashboardService.getAiHealth(range));
+
+    }
+    catch(err){ next(err); }
+
+}
+
 async function getEngineHistory(req, res, next){
 
     try{ sendSuccess(res, { history: ceoDashboardService.getEngineHistory() }); }
@@ -247,6 +264,7 @@ module.exports = {
     getWalletCategories,
     getRecommendations,
     getEngineAdvisor,
+    getAiHealth,
     getEngineHistory,
     exportTable
 

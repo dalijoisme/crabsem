@@ -9,6 +9,7 @@
 
 const config = require("../config/predictionValidationConfig");
 const predictionValidationService = require("../services/predictionValidationService");
+const learnService = require("../services/learnService");
 
 let isRunning = false;
 
@@ -39,6 +40,16 @@ function runOnce(){
             `timeline recorded=${result.timelineResult.recorded} (${durationMs}ms)`
 
         );
+
+        // Learn System (Product Improvement Sprint, Part 7) - upserts
+        // TODAY's real engine_daily_metrics row on the same cadence as
+        // the rest of this cycle. Wrapped in its own try/catch so a
+        // failure here can NEVER break the real TP/SL/EXPIRED tracking
+        // above - that cycle is load-bearing, this one is additive.
+
+        try{ learnService.recordDailySnapshot(); }
+
+        catch(learnErr){ console.error(`[prediction-validation-scheduler] Learn System snapshot failed: ${learnErr.message}`, learnErr); }
 
         return result;
 

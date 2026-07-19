@@ -221,7 +221,7 @@ function accuracyByTier(closed){
 
         const rows = closed.filter(p => p.recommendation === tier);
 
-        if(!rows.length) return { recommendation: tier, sampleSize: 0, accuracy: null };
+        if(!rows.length) return { recommendation: tier, sampleSize: 0, accuracy: null, averageRoiPct: null };
 
         const correct = tier === "AVOID"
 
@@ -229,7 +229,13 @@ function accuracyByTier(closed){
 
             : rows.filter(p => p.status === "TP_HIT").length;
 
-        return { recommendation: tier, sampleSize: rows.length, accuracy: correct / rows.length };
+        // Additive (Product Improvement Sprint) - real average ROI per
+        // tier, alongside the existing win-rate/accuracy figure. Feeds
+        // the AI Advisor's "AVOID predictions produce better ROI than
+        // BUY" comparison rule (ceoDashboardService.js).
+        const rois = rows.map(p => p.current_roi_pct).filter(v => v != null);
+
+        return { recommendation: tier, sampleSize: rows.length, accuracy: correct / rows.length, averageRoiPct: mean(rois) };
 
     });
 
@@ -507,4 +513,15 @@ function getTimeline(predictionId){
 
 }
 
-module.exports = { getSummary, getStrongBuySummary, getHistory, getStatistics, getTimeline, getSignalSummary };
+// Real earliest prediction_time in the whole table - thin pass-through
+// so callers outside this service (AI Dashboard/Learn System) can
+// check "do we actually have N real days of history yet?" without
+// reaching around this service straight into the repository layer.
+
+function getEarliestPredictionTime(){
+
+    return predictionHistoryRepository.findEarliestPredictionTime();
+
+}
+
+module.exports = { getSummary, getStrongBuySummary, getHistory, getStatistics, getTimeline, getSignalSummary, getEarliestPredictionTime };

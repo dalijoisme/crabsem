@@ -398,6 +398,30 @@ function gmgnLink(address){
 
 }
 
+// Wallet-address explorer links (Admin V3.1/Product Sprint, Part 3) -
+// distinct from gmgnLink() above, which is a TOKEN page URL. GMGN's
+// real wallet-profile URL uses /sol/address/ instead of /sol/token/.
+
+function solscanWalletLink(address){
+
+    return `https://solscan.io/account/${address}`;
+
+}
+
+function birdeyeWalletLink(address){
+
+    return `https://birdeye.so/profile/${address}?chain=solana`;
+
+}
+
+function gmgnWalletLink(address){
+
+    const code = (typeof CONFIG !== "undefined" && CONFIG.GMGN_REFERRAL_CODE) || "";
+
+    return `https://gmgn.ai/sol/address/${code}_${address}`;
+
+}
+
 // =====================================
 // MAIN LOAD CYCLE
 // =====================================
@@ -418,6 +442,8 @@ function gmgnLink(address){
 let adminFirstLoadDone = false;
 
 const DASHBOARD_STAT_IDS = ["dashEngineStatus","dashScheduler","dashDatabase","dashPredictionCount","dashStrongBuyCount","dashWinRate","dashTpCount","dashSlCount","dashOpenCount"];
+
+const AI_HEALTH_STAT_IDS = ["aiHealthTodayAccuracy","aiHealthSevenDayTrend","aiHealthConfidence","aiHealthAvgRoi","aiHealthBestCategory","aiHealthWorstCategory","aiHealthTimeToTp","aiHealthTimeToSl"];
 
 const SYSTEM_STAT_IDS = ["sysEngineStatus","sysScheduler","sysUptime","sysDb","sysDbSize","sysMigration","sysTokenCount","sysLastScan","sysNextScan"];
 
@@ -453,7 +479,9 @@ async function loadAll(){
 
         loadOne(adminFetch("/admin/ceo/engine-status"), renderEngineStatus, () => { setElsText(["dashEngineVersion"], "N/A"); noData("ceoStatusRow"); }),
 
-        loadOne(adminFetch("/admin/ceo/engine-history"), d => renderEngineHistory(d.history), () => noData("ceoEngineHistory"))
+        loadOne(adminFetch("/admin/ceo/engine-history"), d => renderEngineHistory(d.history), () => noData("ceoEngineHistory")),
+
+        loadOne(adminFetch("/admin/learn/summary"), renderLearnSummary, () => { noData("learnSummary"); noData("learnHistory"); })
 
     ]);
 
@@ -509,6 +537,34 @@ function renderDashboard(d){
     document.getElementById("dashSlCount").textContent = fmtNum(v.slCount);
 
     document.getElementById("dashOpenCount").textContent = fmtNum(v.openCount);
+
+}
+
+// AI HEALTH (Product Improvement Sprint, Part 5/8) - "how healthy is
+// my AI, is it improving, what should I improve today", above the
+// fold. Fed by GET /admin/ceo/ai-health.
+
+function renderAiHealth(d){
+
+    document.getElementById("aiHealthTodayAccuracy").textContent = d.todaysAccuracy != null ? `${fmtPct(d.todaysAccuracy)} (n=${fmtNum(d.todaysPredictionCount)})` : "n/a today";
+
+    const trend = d.sevenDayTrend;
+
+    document.getElementById("aiHealthSevenDayTrend").textContent = trend.available
+        ? `${trend.delta != null ? (trend.delta > 0 ? "+" : "") + (trend.delta*100).toFixed(1) + "pp" : "n/a"}`
+        : "Not enough history yet";
+
+    document.getElementById("aiHealthConfidence").textContent = d.confidenceHealth.status;
+
+    document.getElementById("aiHealthAvgRoi").textContent = d.averageRoiPct != null ? d.averageRoiPct.toFixed(1) + "%" : "-";
+
+    document.getElementById("aiHealthBestCategory").textContent = d.bestPerformingCategory ? `${d.bestPerformingCategory.key} (${fmtPct(d.bestPerformingCategory.winRate)})` : "Not enough sample yet";
+
+    document.getElementById("aiHealthWorstCategory").textContent = d.worstPerformingCategory ? `${d.worstPerformingCategory.key} (${fmtPct(d.worstPerformingCategory.winRate)})` : "Not enough sample yet";
+
+    document.getElementById("aiHealthTimeToTp").textContent = fmtDuration(d.averageTimeToTpSeconds);
+
+    document.getElementById("aiHealthTimeToSl").textContent = fmtDuration(d.averageTimeToSlSeconds);
 
 }
 
@@ -599,8 +655,11 @@ document.getElementById("walletSearchBtn").onclick = async () => {
                     <div class="adminStat"><span>Avg Holding Time</span><strong>${fmtDuration(wallet.avg_holding_seconds)}</strong></div>
                     <div class="adminStat"><span>Last Seen</span><strong>${wallet.last_seen || "-"}</strong></div>
                 </div>
+                <button class="adminActionBtn" style="margin-top:12px;" data-detail="${wallet.wallet_address}">View Full Detail</button>
             </div>
         `;
+
+        resultEl.querySelector("[data-detail]").onclick = () => openWalletDetail(wallet.wallet_address);
 
     }
     catch(e){
@@ -610,6 +669,247 @@ document.getElementById("walletSearchBtn").onclick = async () => {
     }
 
 };
+
+// =====================================
+// WALLET DETAIL MODAL (Product Improvement Sprint, Part 4) - reuses
+// the same real GET /wallets/:address profile endpoint the search box
+// above already calls (now extended with bestTrade/worstTrade/
+// openPositions/predictionHistory - see walletQueryService.js). No
+// chart library dependency - two small real canvas line charts
+// (Historical Performance from wallet_score_history, Profit/Loss from
+// real closed positions' profit_usd over time).
+// =====================================
+
+const walletDetailModal = document.getElementById("walletDetailModal");
+const walletDetailBody = document.getElementById("walletDetailBody");
+const walletDetailTitle = document.getElementById("walletDetailTitle");
+
+function closeWalletDetail(){
+
+    walletDetailModal.classList.add("hidden");
+
+    walletDetailBody.innerHTML = "";
+
+}
+
+document.getElementById("walletDetailCloseBtn").onclick = closeWalletDetail;
+
+walletDetailModal.addEventListener("click", (e) => { if(e.target === walletDetailModal) closeWalletDetail(); });
+
+document.addEventListener("keyup", (e) => { if(e.key === "Escape" && !walletDetailModal.classList.contains("hidden")) closeWalletDetail(); });
+
+// Minimal real line-chart renderer - no fabricated data, no external
+// library. Draws a device-pixel-ratio-aware line + filled area for a
+// real numeric series; `values` with fewer than 2 real points renders
+// a "not enough data yet" note instead of a flat/misleading line.
+
+function drawSparkline(canvas, values, { positiveColor = "#16c784", negativeColor = "#ff5c5c" } = {}){
+
+    const real = values.filter(v => v != null && !isNaN(v));
+
+    const ctx = canvas.getContext("2d");
+
+    const dpr = window.devicePixelRatio || 1;
+
+    const w = canvas.clientWidth || 400;
+
+    const h = canvas.clientHeight || 140;
+
+    canvas.width = w * dpr;
+
+    canvas.height = h * dpr;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.clearRect(0, 0, w, h);
+
+    if(real.length < 2) return false;
+
+    const min = Math.min(...real, 0);
+
+    const max = Math.max(...real, 0);
+
+    const range = (max - min) || 1;
+
+    const pad = 8;
+
+    const stepX = (w - pad*2) / (real.length - 1);
+
+    const xAt = i => pad + i*stepX;
+
+    const yAt = v => h - pad - ((v - min) / range) * (h - pad*2);
+
+    const last = real[real.length - 1];
+
+    const color = last >= (real[0] ?? 0) ? positiveColor : negativeColor;
+
+    // Zero line, when zero is within range (profit/loss charts).
+    if(min < 0 && max > 0){
+
+        ctx.strokeStyle = "rgba(255,255,255,.15)";
+
+        ctx.beginPath();
+
+        ctx.moveTo(0, yAt(0));
+
+        ctx.lineTo(w, yAt(0));
+
+        ctx.stroke();
+
+    }
+
+    ctx.beginPath();
+
+    real.forEach((v, i) => { const x = xAt(i), y = yAt(v); if(i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+
+    ctx.lineTo(xAt(real.length-1), h - pad);
+
+    ctx.lineTo(xAt(0), h - pad);
+
+    ctx.closePath();
+
+    ctx.fillStyle = color + "22";
+
+    ctx.fill();
+
+    ctx.beginPath();
+
+    real.forEach((v, i) => { const x = xAt(i), y = yAt(v); if(i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+
+    ctx.strokeStyle = color;
+
+    ctx.lineWidth = 2;
+
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+
+    ctx.beginPath();
+
+    ctx.arc(xAt(real.length-1), yAt(last), 3, 0, Math.PI*2);
+
+    ctx.fill();
+
+    return true;
+
+}
+
+function tradeRowHtml(label, trade){
+
+    if(!trade) return `<div class="adminStat"><span>${label}</span><strong>No closed trades yet</strong></div>`;
+
+    return `
+        <div class="adminStat">
+            <span>${label}</span>
+            <strong>${trade.roi_pct != null ? trade.roi_pct.toFixed(1)+"%" : "-"} on ${trade.token_symbol || shortAddr(trade.token_address)}</strong>
+            <span style="font-size:11px;color:var(--muted);">${fmtUsd(trade.profit_usd)} · held ${fmtDuration(trade.holding_seconds)} · exited ${trade.exit_time || "-"}</span>
+        </div>
+    `;
+
+}
+
+async function openWalletDetail(address){
+
+    walletDetailTitle.textContent = `Wallet Detail - ${address}`;
+
+    walletDetailBody.innerHTML = `<p class="adminNote">Loading...</p>`;
+
+    walletDetailModal.classList.remove("hidden");
+
+    try{
+
+        const profile = await publicFetch(`/wallets/${encodeURIComponent(address)}`);
+
+        const w = profile.wallet;
+
+        const open = profile.openPositions || [];
+
+        const scoreHistory = profile.scoreHistory || [];
+
+        const closed = (profile.recentPositions || []).filter(p => p.status === "closed").sort((a,b) => new Date(a.exit_time) - new Date(b.exit_time));
+
+        walletDetailBody.innerHTML = `
+
+            <div class="adminGrid4">
+                <div class="adminStat"><span>Score</span><strong>${fmtNum(w.score)}</strong></div>
+                <div class="adminStat"><span>Label</span><strong>${w.primary_label || "Unproven"}</strong></div>
+                <div class="adminStat"><span>Total Trades</span><strong>${fmtNum(w.total_trades)}</strong></div>
+                <div class="adminStat"><span>Win Rate</span><strong>${fmtPct(w.win_rate)}</strong></div>
+                <div class="adminStat"><span>Average ROI</span><strong>${w.avg_roi_pct!=null?w.avg_roi_pct.toFixed(1)+"%":"-"}</strong></div>
+                <div class="adminStat"><span>Median ROI</span><strong>${w.median_roi_pct!=null?w.median_roi_pct.toFixed(1)+"%":"-"}</strong></div>
+                <div class="adminStat"><span>Realized Profit</span><strong>${fmtUsd(w.realized_profit_usd)}</strong></div>
+                <div class="adminStat"><span>Avg Holding Time</span><strong>${fmtDuration(w.avg_holding_seconds)}</strong></div>
+            </div>
+
+            <h4>Best / Worst Trade (real, individual closed positions)</h4>
+            <div class="adminGrid4">
+                ${tradeRowHtml("Best Trade", profile.bestTrade)}
+                ${tradeRowHtml("Worst Trade", profile.worstTrade)}
+                <div class="adminStat"><span>Best ROI (all-time, stored)</span><strong>${w.best_roi_pct!=null?w.best_roi_pct.toFixed(1)+"%":"-"}</strong></div>
+                <div class="adminStat"><span>Worst ROI (all-time, stored)</span><strong>${w.worst_roi_pct!=null?w.worst_roi_pct.toFixed(1)+"%":"-"}</strong></div>
+            </div>
+
+            <h4>Current Holdings (${open.length} open position${open.length===1?"":"s"})</h4>
+            ${open.length ? `
+                <div class="adminTableWrap">
+                    <table class="adminTable">
+                        <thead><tr><th>Token</th><th>Entry Time</th><th>Entry Price</th><th>Current Price</th><th>Unrealized ROI</th><th>Est. Current Value</th></tr></thead>
+                        <tbody>
+                        ${open.map(p => `
+                            <tr>
+                                <td>${p.token_symbol || shortAddr(p.token_address)}</td>
+                                <td>${p.entry_time}</td>
+                                <td>${p.entry_price!=null?"$"+p.entry_price:"-"}</td>
+                                <td>${p.currentPrice!=null?"$"+p.currentPrice:"n/a"}</td>
+                                <td>${p.unrealizedRoiPct!=null?p.unrealizedRoiPct.toFixed(1)+"%":"n/a"}</td>
+                                <td>${p.currentValueUsd!=null?fmtUsd(p.currentValueUsd):"n/a"}</td>
+                            </tr>
+                        `).join("")}
+                        </tbody>
+                    </table>
+                </div>
+                <p class="adminNote">Current price is this token's last GMGN scan (~30s cadence), not a live quote at the moment you're viewing this.</p>
+            ` : `<p class="adminNote">No open positions.</p>`}
+
+            <h4>Historical Performance (real score over time)</h4>
+            <div class="adminModalChartWrap"><canvas id="walletDetailScoreChart"></canvas></div>
+            <p class="adminNote" id="walletDetailScoreNote"></p>
+
+            <h4>Profit / Loss (real closed trades, chronological)</h4>
+            <div class="adminModalChartWrap"><canvas id="walletDetailPnlChart"></canvas></div>
+            <p class="adminNote" id="walletDetailPnlNote"></p>
+
+            <h4>Prediction History</h4>
+            <p class="adminNote">${profile.predictionHistory?.reason || "Not available."}</p>
+
+        `;
+
+        const scoreValues = scoreHistory.slice().reverse().map(s => s.score);
+
+        const scoreOk = drawSparkline(document.getElementById("walletDetailScoreChart"), scoreValues);
+
+        document.getElementById("walletDetailScoreNote").textContent = scoreOk
+            ? `${scoreValues.length} real recompute snapshots shown, oldest to newest.`
+            : "Not enough historical snapshots yet for this wallet.";
+
+        const pnlValues = closed.map(p => p.profit_usd);
+
+        const pnlOk = drawSparkline(document.getElementById("walletDetailPnlChart"), pnlValues);
+
+        document.getElementById("walletDetailPnlNote").textContent = pnlOk
+            ? `${pnlValues.length} real closed trades shown, oldest to newest (per-trade profit/loss in USD, not cumulative).`
+            : "Not enough closed trades yet for this wallet.";
+
+    }
+    catch(e){
+
+        console.error(e);
+
+        walletDetailBody.innerHTML = `<p class="adminNote">No data available.</p>`;
+
+    }
+
+}
 
 // =====================================
 // TOKEN
@@ -864,6 +1164,87 @@ function renderEngineHistory(history){
 }
 
 // =====================================
+// LEARN SYSTEM (Product Improvement Sprint, Part 7, NEW) - reads GET
+// /admin/learn/summary, which is real, append-only day-over-day
+// history (engine_daily_metrics, migration 013) - started recording
+// the day this sprint shipped, never backfilled with invented history
+// for earlier days. Honestly reports "not enough data yet" until at
+// least 2 real days exist.
+// =====================================
+
+function deltaCardHtml(label, described){
+
+    if(!described) return `<div class="ceoSignalCard hold"><span class="ceoSignalLabel">${label}</span><span class="ceoSignalPct">No change</span></div>`;
+
+    const cls = described.dir === "improved" ? "strongbuy" : (described.dir === "worsened" ? "avoid" : "hold");
+
+    return `<div class="ceoSignalCard ${cls}"><span class="ceoSignalLabel">${described.label}</span><span class="ceoSignalCount" style="font-size:16px;">${described.delta}</span><span class="ceoSignalPct">${described.dir}</span></div>`;
+
+}
+
+function renderLearnSummary(data){
+
+    const summaryEl = document.getElementById("learnSummary");
+
+    if(!data.available){
+
+        summaryEl.innerHTML = `<p class="adminNote">${data.reason}</p>`;
+
+    }
+    else{
+
+        const changes = [data.walletCategoryChange, data.tokenPatternChange, data.confidenceHealthChange].filter(Boolean);
+
+        summaryEl.innerHTML = `
+            <p class="adminNote">Comparing ${data.latestDate} (most recent real day) to ${data.previousDate} (${data.realDaysRecorded} real days recorded so far).</p>
+            <div class="ceoSignalGrid">
+                <div class="ceoSignalCard ${data.overallWinRateDelta > 0 ? "strongbuy" : (data.overallWinRateDelta < 0 ? "avoid" : "hold")}">
+                    <span class="ceoSignalLabel">Overall Win Rate</span>
+                    <span class="ceoSignalCount" style="font-size:16px;">${data.overallWinRateDelta != null ? (data.overallWinRateDelta > 0 ? "+" : "") + data.overallWinRateDelta.toFixed(1) + "pp" : "n/a"}</span>
+                </div>
+                <div class="ceoSignalCard ${data.averageRoiDelta > 0 ? "strongbuy" : (data.averageRoiDelta < 0 ? "avoid" : "hold")}">
+                    <span class="ceoSignalLabel">Average ROI</span>
+                    <span class="ceoSignalCount" style="font-size:16px;">${data.averageRoiDelta != null ? (data.averageRoiDelta > 0 ? "+" : "") + data.averageRoiDelta.toFixed(1) + "%" : "n/a"}</span>
+                </div>
+            </div>
+            <h4>What Improved</h4>
+            ${data.whatImproved.length ? `<div class="ceoSignalGrid">${data.whatImproved.map(d => deltaCardHtml(d.label, d)).join("")}</div>` : `<p class="adminNote">Nothing improved by a meaningful margin.</p>`}
+            <h4>What Got Worse</h4>
+            ${data.whatWorsened.length ? `<div class="ceoSignalGrid">${data.whatWorsened.map(d => deltaCardHtml(d.label, d)).join("")}</div>` : `<p class="adminNote">Nothing got meaningfully worse.</p>`}
+            ${changes.length ? `<h4>Other Changes</h4><ul>${changes.map(c => `<li class="adminNote">${c}</li>`).join("")}</ul>` : ""}
+        `;
+
+    }
+
+    const historyEl = document.getElementById("learnHistory");
+
+    if(!data.history || !data.history.length){ historyEl.innerHTML = `<p class="adminNote">No data available.</p>`; return; }
+
+    historyEl.innerHTML = `
+        <table class="adminTable">
+            <thead><tr>
+                <th>Date</th><th>Predictions</th><th>Win Rate</th><th>Average ROI</th>
+                <th>Best Wallet Category</th><th>Worst Wallet Category</th><th>Confidence Health</th>
+            </tr></thead>
+            <tbody>
+            ${data.history.map(h => `
+                <tr>
+                    <td>${h.date}</td>
+                    <td>${fmtNum(h.predictionCount)}</td>
+                    <td>${h.winRate!=null?fmtPct(h.winRate):"n/a"}</td>
+                    <td>${h.averageRoiPct!=null?h.averageRoiPct.toFixed(1)+"%":"-"}</td>
+                    <td>${h.bestWalletCategory || "-"}</td>
+                    <td>${h.worstWalletCategory || "-"}</td>
+                    <td>${h.confidenceHealthStatus || "-"}</td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+
+}
+
+// =====================================
 // AI ENGINE ADVISOR (Admin V3 Section 8)
 // =====================================
 
@@ -908,15 +1289,20 @@ function renderEngineAdvisorSummary(data){
 
     const warning = data.sampleWarning ? `<p class="adminNote">${data.sampleWarning}</p>` : "";
 
-    el.innerHTML = warning + `<p class="adminNote" style="margin-top:10px;">All flagged issues this period:</p>` + data.advisories.map(a => `
+    el.innerHTML = warning + `<p class="adminNote" style="margin-top:10px;">All flagged issues this period, ranked by priority:</p>` + data.advisories.map(a => `
         <div class="ceoInsightCard">
             <div class="ceoInsightCardHead">
-                <span class="ceoInsightMessage"><strong>${a.reason}</strong></span>
-                <span class="ceoImpactBadge ${a.confidence.toLowerCase()}">${a.confidence} Confidence</span>
+                <span class="ceoInsightMessage"><strong>#${a.priority} - ${a.reason}</strong></span>
+                <span class="ceoImpactBadge severity-${a.severity.toLowerCase()}">${a.severity} Severity</span>
             </div>
             <div class="ceoAdvisorGrid">
                 <div><span>Current Value</span>${a.currentValue ?? "n/a - no direct engine parameter"}</div>
-                <div><span>Recommended Value</span>${a.recommendedValue ?? "n/a"}</div>
+                <div><span>Suggested Value</span>${a.recommendedValue ?? "n/a"}</div>
+                <div><span>Estimated Win Rate Improvement</span>${a.estimatedWinRateImprovementPct != null ? `+${a.estimatedWinRateImprovementPct.toFixed(1)}pp (optimistic upper bound)` : "Not quantifiable from current data"}</div>
+                <div><span>Sample Size</span>${fmtNum(a.sampleSize)}</div>
+                <div><span>Confidence</span>${a.confidence}</div>
+                <div><span>Priority</span>#${a.priority}</div>
+                <div style="grid-column:1/-1;"><span>Evidence</span>${a.evidence}</div>
                 <div style="grid-column:1/-1;"><span>Expected Improvement</span>${a.expectedImprovement ?? "Not quantifiable from current data"}</div>
             </div>
         </div>
@@ -1284,8 +1670,14 @@ async function renderWalletPerformanceCeo(category){
                 ${data.wallets.map(w => `
                     <tr>
                         <td>${w.rank}</td>
-                        <td><span title="${w.walletAddress}">${shortAddr(w.walletAddress)}</span>
-                            <button class="adminActionBtn" style="padding:2px 6px;font-size:10px;" data-copy="${w.walletAddress}">Copy</button>
+                        <td>
+                            <span class="adminWalletAddrLink" title="View wallet detail" data-detail="${w.walletAddress}">${shortAddr(w.walletAddress)}</span>
+                            <div class="adminWalletRowActions">
+                                <button class="adminActionBtn" data-copy="${w.walletAddress}" title="Copy full address">&#128203; Copy</button>
+                                <a class="adminActionBtn" href="${solscanWalletLink(w.walletAddress)}" target="_blank" rel="noopener noreferrer" title="Open on Solscan">&#128279; Solscan</a>
+                                <a class="adminActionBtn" href="${birdeyeWalletLink(w.walletAddress)}" target="_blank" rel="noopener noreferrer" title="Open on Birdeye">&#128279; Birdeye</a>
+                                <a class="adminActionBtn" href="${gmgnWalletLink(w.walletAddress)}" target="_blank" rel="noopener noreferrer" title="Open on GMGN">&#128279; GMGN</a>
+                            </div>
                         </td>
                         <td>${w.category}</td>
                         <td>${fmtNum(w.predictionCount)}</td>
@@ -1311,7 +1703,9 @@ async function renderWalletPerformanceCeo(category){
 
         el.querySelectorAll("[data-copy]").forEach(btn => {
 
-            btn.onclick = () => {
+            btn.onclick = (e) => {
+
+                e.stopPropagation();
 
                 navigator.clipboard.writeText(btn.dataset.copy);
 
@@ -1322,6 +1716,12 @@ async function renderWalletPerformanceCeo(category){
                 setTimeout(() => { btn.textContent = original; }, 1200);
 
             };
+
+        });
+
+        el.querySelectorAll("[data-detail]").forEach(span => {
+
+            span.onclick = () => openWalletDetail(span.dataset.detail);
 
         });
 
@@ -1557,6 +1957,8 @@ async function loadPredictionAndAnalytics(){
         }),
 
         loadOne(adminFetch(`/admin/ceo/signal-summary${buildFilterParams()}`), renderSignalSummary, () => noData("ceoSignalSummary")),
+
+        loadOne(adminFetch(`/admin/ceo/ai-health${buildFilterParams()}`), renderAiHealth, () => setElsText(AI_HEALTH_STAT_IDS, "N/A")),
 
         loadOne(adminFetch("/admin/ceo/wallet-categories"), d => renderCategoryTabs(d.categories), () => noData("ceoCategoryTabs"))
 

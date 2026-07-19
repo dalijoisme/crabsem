@@ -186,6 +186,18 @@ function countsByRecommendation({ from, to } = {}){
 // Closed predictions (a real resolved outcome exists) - the only rows
 // win-rate/ROI/timing statistics are computed from.
 
+// Real earliest prediction_time in the whole table (Product
+// Improvement Sprint's AI Dashboard/Learn System) - used to decide
+// whether a "last 7 days" or "day-over-day" comparison has enough real
+// history behind it yet, instead of silently comparing two windows
+// where one is mostly/entirely empty and calling it a real trend.
+
+function findEarliestPredictionTime(){
+
+    return db.prepare("SELECT MIN(prediction_time) as earliest FROM prediction_history").get().earliest;
+
+}
+
 // Every status (OPEN included), same real filter as findClosed - Admin
 // V3.1's Confidence Calibration fix (Part 9) needs real Expired/Open
 // counts per confidence band alongside TP/SL, which findClosed()
@@ -236,6 +248,8 @@ module.exports = {
 
     findClosed,
 
-    findAllStatuses
+    findAllStatuses,
+
+    findEarliestPredictionTime
 
 };

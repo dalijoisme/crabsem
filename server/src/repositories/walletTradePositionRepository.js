@@ -89,6 +89,49 @@ function countByWallet(walletAddress){
 
 }
 
+// Wallet Detail panel (Product Improvement Sprint, Part 4) - "Best
+// Trade"/"Worst Trade" are real, individual closed positions (ranked
+// by their own real roi_pct), not an invented summary stat.
+
+function findBestTrade(walletAddress){
+
+    return db.prepare(`
+        SELECT * FROM wallet_trade_positions
+        WHERE wallet_address = ? AND status = 'closed' AND roi_pct IS NOT NULL
+        ORDER BY roi_pct DESC
+        LIMIT 1
+    `).get(walletAddress);
+
+}
+
+function findWorstTrade(walletAddress){
+
+    return db.prepare(`
+        SELECT * FROM wallet_trade_positions
+        WHERE wallet_address = ? AND status = 'closed' AND roi_pct IS NOT NULL
+        ORDER BY roi_pct ASC
+        LIMIT 1
+    `).get(walletAddress);
+
+}
+
+// Real still-open positions (Part 4's "Current Holdings") - this row
+// itself carries no live price (see the schema doc comment at the top
+// of this file); walletQueryService.getProfile() joins each one
+// against gmgn_tokens' own last-scanned price to compute a real,
+// last-known (not truly live) unrealized value.
+
+function findOpenByWallet(walletAddress, limit = 50){
+
+    return db.prepare(`
+        SELECT * FROM wallet_trade_positions
+        WHERE wallet_address = ? AND status = 'open'
+        ORDER BY entry_time DESC
+        LIMIT ?
+    `).all(walletAddress, limit);
+
+}
+
 // The highest activity_feed row id already matched into a position -
 // lets the ledger builder resume from where it left off instead of
 // rescanning the whole activity feed every run.
@@ -113,6 +156,9 @@ module.exports = {
     findOldestOpenPosition,
     findClosedByWallet,
     findByWallet,
+    findOpenByWallet,
+    findBestTrade,
+    findWorstTrade,
     countByWallet,
     getMaxMatchedActivityId
 };

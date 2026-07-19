@@ -12,6 +12,7 @@
 const express = require("express");
 const controller = require("../../controllers/adminController");
 const ceoController = require("../../controllers/ceoDashboardController");
+const learnController = require("../../controllers/learnController");
 const adminAuth = require("../../middleware/adminAuth");
 
 const router = express.Router();
@@ -51,7 +52,11 @@ router.get("/admin/ceo/wallet-performance", ceoController.getWalletPerformance);
 router.get("/admin/ceo/wallet-categories", ceoController.getWalletCategories);
 router.get("/admin/ceo/recommendations", ceoController.getRecommendations);
 router.get("/admin/ceo/engine-advisor", ceoController.getEngineAdvisor);
+router.get("/admin/ceo/ai-health", ceoController.getAiHealth);
 router.get("/admin/ceo/engine-history", ceoController.getEngineHistory);
 router.get("/admin/ceo/export", ceoController.exportTable);
+
+// Learn System (Product Improvement Sprint, Part 7).
+router.get("/admin/learn/summary", learnController.getSummary);
 
 module.exports = router;

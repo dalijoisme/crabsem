@@ -783,6 +783,37 @@ css) - single admin interface now, no separate stylesheet.
 
 }
 
+.adminWalletAddrLink{
+
+    cursor:pointer;
+    text-decoration:underline;
+    text-decoration-style:dotted;
+    text-underline-offset:3px;
+
+}
+
+.adminWalletAddrLink:hover{
+
+    color:var(--purple);
+
+}
+
+.adminWalletRowActions{
+
+    display:flex;
+    flex-wrap:wrap;
+    gap:4px;
+    margin-top:4px;
+
+}
+
+.adminWalletRowActions .adminActionBtn{
+
+    padding:2px 6px;
+    font-size:10px;
+
+}
+
 .adminPager{
 
     display:flex;
@@ -837,6 +868,86 @@ css) - single admin interface now, no separate stylesheet.
 .adminExportMenu button:hover{
 
     background:var(--panel);
+
+}
+
+/* Wallet Detail modal (Product Improvement Sprint, Part 4). */
+
+.adminModalOverlay{
+
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.6);
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:40px 16px;
+    z-index:500;
+    overflow-y:auto;
+
+}
+
+.adminModalCard{
+
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:18px;
+    width:100%;
+    max-width:920px;
+    padding:24px;
+    max-height:calc(100vh - 80px);
+    overflow-y:auto;
+
+}
+
+.adminModalHead{
+
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:16px;
+    gap:12px;
+
+}
+
+.adminModalHead h3{
+
+    margin:0;
+    font-size:16px;
+    word-break:break-all;
+
+}
+
+.adminModalBody h4{
+
+    margin:22px 0 10px;
+    font-size:13px;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--muted);
+
+}
+
+.adminModalBody h4:first-child{
+
+    margin-top:0;
+
+}
+
+.adminModalChartWrap{
+
+    background:#1b1a2b;
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:12px;
+
+}
+
+.adminModalChartWrap canvas{
+
+    width:100%;
+    height:140px;
+    display:block;
 
 }
 
@@ -921,6 +1032,10 @@ css) - single admin interface now, no separate stylesheet.
 .ceoImpactBadge.high{ background:rgba(255,90,90,.15); color:var(--red); }
 .ceoImpactBadge.medium{ background:rgba(246,185,59,.15); color:var(--yellow); }
 .ceoImpactBadge.low{ background:rgba(139,92,246,.15); color:var(--purple); }
+
+.ceoImpactBadge.severity-high{ background:rgba(255,90,90,.15); color:var(--red); }
+.ceoImpactBadge.severity-medium{ background:rgba(246,185,59,.15); color:var(--yellow); }
+.ceoImpactBadge.severity-low{ background:rgba(139,92,246,.15); color:var(--purple); }
 
 .ceoInsightMessage{
 

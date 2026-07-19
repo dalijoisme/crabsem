@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=7">
+<link rel="stylesheet" href="css/admin.css?v=8">
 
 </head>
 
@@ -91,6 +91,7 @@
 <a href="#secEngine">Engine</a>
 <a href="#secPrediction">Prediction</a>
 <a href="#secAnalytics">Analytics</a>
+<a href="#secLearn">Learn</a>
 
 </nav>
 
@@ -183,6 +184,27 @@ Loading real data from the backend...
 
 </div>
 
+<!-- AI HEALTH (Product Improvement Sprint, Part 5/8) - the "how
+     healthy is my AI, is it improving, what should I improve today"
+     answer, above the fold. Fed by GET /admin/ceo/ai-health, which
+     reuses the exact same real stats the rest of the dashboard
+     already computes - nothing new is invented here. -->
+
+<p class="adminNote" style="margin-top:14px;">AI Health</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Today's Accuracy</span><strong id="aiHealthTodayAccuracy">-</strong></div>
+<div class="adminStat"><span>7-Day Trend</span><strong id="aiHealthSevenDayTrend">-</strong></div>
+<div class="adminStat"><span>Confidence Health</span><strong id="aiHealthConfidence">-</strong></div>
+<div class="adminStat"><span>Average ROI</span><strong id="aiHealthAvgRoi">-</strong></div>
+<div class="adminStat"><span>Best Performing Category</span><strong id="aiHealthBestCategory">-</strong></div>
+<div class="adminStat"><span>Worst Performing Category</span><strong id="aiHealthWorstCategory">-</strong></div>
+<div class="adminStat"><span>Avg Time to TP</span><strong id="aiHealthTimeToTp">-</strong></div>
+<div class="adminStat"><span>Avg Time to SL</span><strong id="aiHealthTimeToSl">-</strong></div>
+
+</div>
+
 </section>
 
 <!-- SYSTEM -->
@@ -245,9 +267,12 @@ Loading real data from the backend...
 <input type="text" id="ceoWalletPerfSearch" placeholder="Search wallet address...">
 <button id="ceoWalletPerfSearchBtn" class="adminActionBtn">Search</button>
 <select id="ceoWalletPerfPageSize">
-<option value="100">100 rows</option>
+<option value="25">25 rows</option>
+<option value="50">50 rows</option>
+<option value="100" selected>100 rows</option>
 <option value="250">250 rows</option>
 <option value="500">500 rows</option>
+<option value="1000">1000 rows</option>
 <option value="all">Show All</option>
 </select>
 </div>
@@ -399,12 +424,56 @@ Loading real data from the backend...
 
 </section>
 
+<!-- LEARN (Product Improvement Sprint, Part 7, NEW) - the engine
+     learns from its own real prediction history: GET
+     /admin/learn/summary reads engine_daily_metrics (migration 013),
+     a real, append-only daily rollup that started recording the day
+     this sprint shipped. It is NEVER backfilled with invented history
+     for days before that, and reports "not enough data yet" honestly
+     until at least 2 real days have been recorded. -->
+
+<section class="adminSection" id="secLearn">
+
+<h3>Learn</h3>
+
+<p class="adminNote">Real day-over-day comparison of the engine's own validation history - started recording on the date shown below. This is deterministic analysis over real data, not a trained machine-learning model.</p>
+
+<div id="learnSummary"></div>
+
+<h4 style="margin-top:22px;">Daily History (real, append-only)</h4>
+
+<div id="learnHistory" class="adminTableWrap"></div>
+
+</section>
+
+</div>
+
+</div>
+
+<!-- WALLET DETAIL MODAL (Product Improvement Sprint, Part 4) - opened
+     by clicking any wallet address in Wallet Performance/Analytics.
+     Reads the same real GET /api/v1/wallets/:address profile endpoint
+     the old single-wallet search box already used, now extended with
+     bestTrade/worstTrade/openPositions(+current value)/predictionHistory
+     disclosure - see server/src/services/walletQueryService.js. -->
+
+<div id="walletDetailModal" class="adminModalOverlay hidden">
+
+<div class="adminModalCard">
+
+<div class="adminModalHead">
+<h3 id="walletDetailTitle">Wallet Detail</h3>
+<button id="walletDetailCloseBtn" class="adminActionBtn">Close &times;</button>
+</div>
+
+<div id="walletDetailBody" class="adminModalBody"></div>
+
 </div>
 
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=7"></script>
+<script src="js/admin.js?v=8"></script>
 
 </body>
 

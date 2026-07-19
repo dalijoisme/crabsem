@@ -186,6 +186,19 @@ function countsByRecommendation({ from, to } = {}){
 // Closed predictions (a real resolved outcome exists) - the only rows
 // win-rate/ROI/timing statistics are computed from.
 
+// Every status (OPEN included), same real filter as findClosed - Admin
+// V3.1's Confidence Calibration fix (Part 9) needs real Expired/Open
+// counts per confidence band alongside TP/SL, which findClosed()
+// deliberately excludes.
+
+function findAllStatuses({ recommendation, from, to } = {}){
+
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, from, to });
+
+    return db.prepare(`SELECT * FROM prediction_history ${where}`).all(params);
+
+}
+
 function findClosed({ recommendation, from, to } = {}){
 
     const { where, params } = buildWhereClause({ status: undefined, recommendation, from, to });
@@ -221,6 +234,8 @@ module.exports = {
 
     countsByRecommendation,
 
-    findClosed
+    findClosed,
+
+    findAllStatuses
 
 };

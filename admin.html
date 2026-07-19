@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=6">
+<link rel="stylesheet" href="css/admin.css?v=7">
 
 </head>
 
@@ -136,6 +136,25 @@ Loading real data from the backend...
 
 </section>
 
+<!-- AI ENGINE ADVISOR (Admin V3.1, Part 7) - moved to the very top:
+     the most important section, answering "what should I improve
+     today?" before any other number on the page. -->
+
+<section class="adminSection" id="secAdvisor">
+
+<div class="ceoSectionHead">
+<h3>AI Engine Advisor - What Should I Improve Today?</h3>
+<div class="ceoExportBtns" data-section="engine-advisor"></div>
+</div>
+
+<p class="adminNote">Deterministic, rule-based analysis over real validation history for the period selected above - not a machine-learning model. Each recommendation shows the real current engine value, a suggested value, and the real sample size behind it.</p>
+
+<div id="ceoEngineAdvisorSummary" class="adminGrid4"></div>
+
+<div id="ceoEngineAdvisor" class="ceoInsightList" style="margin-top:14px;"></div>
+
+</section>
+
 <!-- DASHBOARD (minimal login landing cards - GET /api/v1/admin/dashboard) -->
 
 <section class="adminSection" id="secDashboard">
@@ -216,9 +235,26 @@ Loading real data from the backend...
 <div class="ceoExportBtns" data-section="wallet-performance"></div>
 </div>
 
+<p class="adminNote">Access to ALL tracked wallets, not just a Top 10 - search, sort any column, and page through the full filtered set below.</p>
+
+<p class="adminNote">"Strong BUY / BUY / HOLD / AVOID" and "Expired" columns show <strong>n/a</strong> per wallet: prediction_history stores no wallet-address link, so this schema cannot compute which recommendation tier or expiry a given wallet was tied to. TP / SL / Open / Win Rate / ROI below are the wallet's own real trading outcomes - a disclosed, different (but real) number, not the same thing as "predictions this wallet caused".</p>
+
 <div class="ceoCategoryTabs" id="ceoCategoryTabs"></div>
 
+<div class="adminWalletPerfControls" id="ceoWalletPerfControls">
+<input type="text" id="ceoWalletPerfSearch" placeholder="Search wallet address...">
+<button id="ceoWalletPerfSearchBtn" class="adminActionBtn">Search</button>
+<select id="ceoWalletPerfPageSize">
+<option value="100">100 rows</option>
+<option value="250">250 rows</option>
+<option value="500">500 rows</option>
+<option value="all">Show All</option>
+</select>
+</div>
+
 <div id="ceoWalletPerformance" class="adminTableWrap"></div>
+
+<div id="ceoWalletPerfPager" class="adminPager"></div>
 
 </section>
 
@@ -246,15 +282,6 @@ Loading real data from the backend...
 <h3>Engine</h3>
 
 <div class="ceoStatusRow" id="ceoStatusRow"></div>
-
-<div class="ceoSectionHead" style="margin-top:22px;">
-<h4>AI Engine Advisor</h4>
-<div class="ceoExportBtns" data-section="engine-advisor"></div>
-</div>
-
-<p class="adminNote">Deterministic, rule-based analysis over real validation history - not a machine-learning model. Each recommendation shows the real current engine value, a suggested value, and the real sample size behind it.</p>
-
-<div id="ceoEngineAdvisor" class="ceoInsightList"></div>
 
 <div class="ceoSectionHead" style="margin-top:22px;">
 <h4>Engine Evolution</h4>
@@ -355,7 +382,18 @@ Loading real data from the backend...
 
 <h3>Admin Analytics</h3>
 
-<p class="adminNote">Wallet Rankings/ROI below respect the same date filter (filtered on each wallet's own real last_seen field).</p>
+<p class="adminNote">Wallet Rankings/ROI below respect the same date filter (filtered on each wallet's own real last_seen field). Every leaderboard below supports search and a real row-count beyond the old fixed Top 10.</p>
+
+<div class="adminWalletPerfControls" id="analyticsControls">
+<input type="text" id="analyticsSearchInput" placeholder="Search wallet address across all leaderboards...">
+<button id="analyticsSearchBtn" class="adminActionBtn">Search</button>
+<select id="analyticsLimitSelect">
+<option value="10">10 rows</option>
+<option value="25" selected>25 rows</option>
+<option value="50">50 rows</option>
+<option value="100">100 rows</option>
+</select>
+</div>
 
 <div id="analyticsGroups"></div>
 
@@ -366,7 +404,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=6"></script>
+<script src="js/admin.js?v=7"></script>
 
 </body>
 

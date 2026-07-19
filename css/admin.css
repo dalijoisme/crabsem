@@ -745,6 +745,101 @@ css) - single admin interface now, no separate stylesheet.
 
 }
 
+/* Admin V3.1 - Wallet Performance / Analytics search + pagination
+   controls (Parts 5 and 11). */
+
+.adminWalletPerfControls{
+
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:10px;
+    margin-bottom:14px;
+
+}
+
+.adminWalletPerfControls input[type="text"]{
+
+    flex:1 1 260px;
+    min-width:200px;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    color:var(--text);
+    border-radius:8px;
+    padding:9px 12px;
+    font-size:13px;
+
+}
+
+.adminWalletPerfControls select{
+
+    background:var(--panel2);
+    border:1px solid var(--border);
+    color:var(--text);
+    border-radius:8px;
+    padding:9px 12px;
+    font-size:13px;
+    cursor:pointer;
+
+}
+
+.adminPager{
+
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-top:12px;
+    flex-wrap:wrap;
+
+}
+
+/* Export - single button + dropdown menu (Part 6), replacing the old
+   two-button-per-section pattern. */
+
+.adminExportDropdown{
+
+    position:relative;
+    display:inline-block;
+
+}
+
+.adminExportMenu{
+
+    position:absolute;
+    top:calc(100% + 6px);
+    right:0;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:6px;
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    min-width:140px;
+    z-index:20;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+
+}
+
+.adminExportMenu button{
+
+    background:transparent;
+    border:none;
+    color:var(--text);
+    text-align:left;
+    padding:8px 10px;
+    border-radius:6px;
+    font-size:12px;
+    cursor:pointer;
+
+}
+
+.adminExportMenu button:hover{
+
+    background:var(--panel);
+
+}
+
 .ceoCategoryTabs button{
 
     background:var(--panel2);

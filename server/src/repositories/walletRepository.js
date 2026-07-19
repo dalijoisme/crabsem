@@ -149,7 +149,8 @@ function findActiveWalletAddresses(minTrades = 1){
 
 const SORTABLE_COLUMNS = [
     "score", "win_rate", "avg_roi_pct", "realized_profit_usd",
-    "total_trades", "last_seen", "best_roi_pct"
+    "total_trades", "last_seen", "best_roi_pct",
+    "win_count", "loss_count", "open_position_count", "avg_holding_seconds", "wallet_address"
 ];
 
 // `from`/`to` (Admin Date Filter, UX sprint Part 2) filter on the
@@ -161,11 +162,16 @@ const SORTABLE_COLUMNS = [
 // last observed activity falls in range, disclosed as an
 // approximation, not overclaimed as exact historical replay.
 
-function search({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, limit = 50, sortColumn = "score", direction = "DESC" }){
+// Shared WHERE-clause builder for search()/countSearch() (Admin V3.1,
+// Wallet Performance redesign - Part 5) - `q` is a real substring
+// match against wallet_address (LIKE '%q%'), which cannot use an
+// index (leading wildcard) but is fine at the real current scale of
+// this table (thousands of rows, verified via EXPLAIN QUERY PLAN
+// alongside the sortable/filterable columns below, which DO use their
+// real indexes) - it would need FTS/trigram indexing to stay fast at
+// a materially larger row count than exists today.
 
-    if(!SORTABLE_COLUMNS.includes(sortColumn)) sortColumn = "score";
-
-    const dir = direction === "ASC" ? "ASC" : "DESC";
+function buildWalletWhere({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, q } = {}){
 
     const clauses = ["total_trades > 0"];
 
@@ -194,14 +200,36 @@ function search({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, lim
 
     if(to){ clauses.push("last_seen <= @to"); params.to = `${to} 23:59:59`; }
 
+    if(q){ clauses.push("wallet_address LIKE @q"); params.q = `%${q}%`; }
+
+    return { where: `WHERE ${clauses.join(" AND ")}`, params };
+
+}
+
+function search({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, q, limit = 50, offset = 0, sortColumn = "score", direction = "DESC" }){
+
+    if(!SORTABLE_COLUMNS.includes(sortColumn)) sortColumn = "score";
+
+    const dir = direction === "ASC" ? "ASC" : "DESC";
+
+    const { where, params } = buildWalletWhere({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, q });
+
     const sql = `
         SELECT * FROM wallets
-        WHERE ${clauses.join(" AND ")}
+        ${where}
         ORDER BY ${sortColumn} ${dir} NULLS LAST
-        LIMIT @limit
+        LIMIT @limit OFFSET @offset
     `;
 
-    return db.prepare(sql).all({ ...params, limit });
+    return db.prepare(sql).all({ ...params, limit, offset });
+
+}
+
+function countSearch({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, q } = {}){
+
+    const { where, params } = buildWalletWhere({ minWinRate, minRoi, minTrades, maxTrades, label, from, to, q });
+
+    return db.prepare(`SELECT COUNT(*) as count FROM wallets ${where}`).get(params).count;
 
 }
 
@@ -253,6 +281,7 @@ module.exports = {
     findManyByAddresses,
     findActiveWalletAddresses,
     search,
+    countSearch,
     countAll,
     countsByLabel,
     findFeatureVectors

@@ -266,17 +266,30 @@ function getStatistics({ from, to } = {}){
 
     const closed = predictionHistoryRepository.findClosed({ from, to });
 
+    // Admin V3.1 fix (Part 9): Confidence Calibration must show real
+    // Expired/Open counts alongside TP/SL, which means bucketing over
+    // EVERY status, not just closed ones - `closed` above stays the
+    // real source for every other statistic in this function (failure/
+    // win analysis, wallet/token pattern performance), none of which
+    // make sense for a still-OPEN prediction.
+
+    const allForCalibration = predictionHistoryRepository.findAllStatuses({ from, to });
+
     const confidenceBuckets = config.confidenceBuckets.map(bucket => {
 
-        const inBucket = closed.filter(p => p.confidence != null && p.confidence >= bucket.min && p.confidence < bucket.max);
+        const inBucket = allForCalibration.filter(p => p.confidence != null && p.confidence >= bucket.min && p.confidence < bucket.max);
 
         const tp = inBucket.filter(p => p.status === "TP_HIT").length;
 
-        // Additive fields (Admin V3) - tpCount/slCount alongside the
-        // existing winRate/averageRoiPct, never replacing them.
         const sl = inBucket.filter(p => p.status === "SL_HIT").length;
 
-        const rois = inBucket.map(p => p.current_roi_pct).filter(v => v != null);
+        const expired = inBucket.filter(p => p.status === "EXPIRED").length;
+
+        const open = inBucket.filter(p => p.status === "OPEN").length;
+
+        const closedInBucket = tp + sl + expired;
+
+        const rois = inBucket.filter(p => p.status !== "OPEN").map(p => p.current_roi_pct).filter(v => v != null);
 
         return {
 
@@ -288,7 +301,11 @@ function getStatistics({ from, to } = {}){
 
             slCount: sl,
 
-            winRate: inBucket.length ? tp / inBucket.length : null,
+            expiredCount: expired,
+
+            openCount: open,
+
+            winRate: closedInBucket ? tp / closedInBucket : null,
 
             averageRoiPct: mean(rois)
 

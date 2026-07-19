@@ -16,6 +16,17 @@ function search(params){
 
 }
 
+// Real total count matching the same filter (Admin V3.1, Wallet
+// Performance pagination) - separate from search()'s page-sized
+// result so the frontend can compute total pages without ever
+// fetching more rows than the current page needs.
+
+function countSearch(params){
+
+    return walletRepository.countSearch(params);
+
+}
+
 function getProfile(address){
 
     const wallet = walletRepository.findByAddress(address);
@@ -38,10 +49,10 @@ function getProfile(address){
 
 }
 
-function leaderboard({ limit = 50, sortColumn = "score", from, to } = {}){
+function leaderboard({ limit = 50, sortColumn = "score", direction = "DESC", q, from, to } = {}){
 
-    return walletRepository.search({ minTrades: 3, limit, sortColumn, direction: "DESC", from, to });
+    return walletRepository.search({ minTrades: 3, limit, sortColumn, direction: direction === "ASC" ? "ASC" : "DESC", q, from, to });
 
 }
 
-module.exports = { search, getProfile, leaderboard };
+module.exports = { search, countSearch, getProfile, leaderboard };

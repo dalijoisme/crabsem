@@ -67,6 +67,8 @@ async function search(req, res, next){
 
             label: req.query.label || undefined,
 
+            q: req.query.q || undefined,
+
             from: range.from,
 
             to: range.to,
@@ -102,7 +104,7 @@ async function leaderboard(req, res, next){
 
         if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
 
-        const wallets = walletQueryService.leaderboard({ limit: limitCheck.limit, sortColumn: req.query.sort || "score", from: range.from, to: range.to });
+        const wallets = walletQueryService.leaderboard({ limit: limitCheck.limit, sortColumn: req.query.sort || "score", direction: req.query.direction, q: req.query.q || undefined, from: range.from, to: range.to });
 
         sendSuccess(res, { wallets });
 

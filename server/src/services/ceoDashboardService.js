@@ -28,6 +28,7 @@ const adminService = require("./adminService");
 const engineVersionService = require("./engineVersionService");
 const predictionMetricsService = require("./predictionMetricsService");
 const walletQueryService = require("./walletQueryService");
+const { computePreviousPeriod } = require("../utils/dateRange");
 
 const WALLET_CATEGORIES = {
 
@@ -87,17 +88,53 @@ function getSignalSummary(params){
 // SECTION 5 - WALLET PERFORMANCE
 // =====================================
 
-function getWalletPerformance({ category, from, to, limit = 20 } = {}){
+// Frontend-facing sort key -> real wallets column (Admin V3.1, Wallet
+// Performance redesign, Part 5's "sort by every column"). Only real
+// stored/computed columns are sortable - there is no column for the
+// four requested "Strong BUY/BUY/HOLD/AVOID" tiers or "Expired" (see
+// this file's Section 5 doc comment: prediction_history has no
+// wallet-address linkage, so those tiers cannot be computed per
+// wallet from this schema, sortable or not).
+
+const WALLET_SORT_COLUMNS = {
+
+    walletAddress: "wallet_address",
+    predictionCount: "total_trades",
+    tpCount: "win_count",
+    slCount: "loss_count",
+    openCount: "open_position_count",
+    winRate: "win_rate",
+    averageRoiPct: "avg_roi_pct",
+    totalRealizedProfitUsd: "realized_profit_usd",
+    averageHoldingSeconds: "avg_holding_seconds",
+    score: "score",
+    lastSeen: "last_seen"
+
+};
+
+// Hard cap on how many rows a single request can pull back, even for
+// "Show All" (Part 12 - must stay fast at 100K/500K/1M scale). At
+// today's real wallet count (~5.4K) this cap has no visible effect;
+// it exists so this endpoint can never be asked to materialize an
+// unbounded result set once the table grows.
+
+const WALLET_PERFORMANCE_MAX_LIMIT = 5000;
+
+function getWalletPerformance({ category, from, to, q, limit = 20, offset = 0, sortBy, direction = "DESC" } = {}){
 
     const mapping = WALLET_CATEGORIES[category];
 
     if(category && !mapping){
 
-        return { category, wallets: [], error: `"${category}" is not a real, distinguishable wallet category in this schema.` };
+        return { category, wallets: [], total: 0, error: `"${category}" is not a real, distinguishable wallet category in this schema.` };
 
     }
 
-    const result = walletQueryService.search({
+    const sortColumn = WALLET_SORT_COLUMNS[sortBy] || "score";
+
+    const safeLimit = Math.min(Math.max(1, Number(limit) || 20), WALLET_PERFORMANCE_MAX_LIMIT);
+
+    const searchParams = {
 
         label: mapping?.label,
 
@@ -107,21 +144,35 @@ function getWalletPerformance({ category, from, to, limit = 20 } = {}){
 
         to,
 
-        limit,
+        q,
 
-        sortColumn: "score",
+        limit: safeLimit,
 
-        direction: "DESC"
+        offset: Math.max(0, Number(offset) || 0),
 
-    });
+        sortColumn,
+
+        direction: direction === "ASC" ? "ASC" : "DESC"
+
+    };
+
+    const result = walletQueryService.search(searchParams);
+
+    const total = walletQueryService.countSearch({ label: mapping?.label, maxTrades: mapping?.maxTrades, from, to, q });
 
     return {
 
         category: category || "All",
 
+        total,
+
+        limit: safeLimit,
+
+        offset: searchParams.offset,
+
         wallets: result.wallets.map((w, i) => ({
 
-            rank: i + 1,
+            rank: searchParams.offset + i + 1,
 
             walletAddress: w.wallet_address,
 
@@ -141,7 +192,11 @@ function getWalletPerformance({ category, from, to, limit = 20 } = {}){
 
             openCount: w.open_position_count,
 
-            score: w.score
+            averageHoldingSeconds: w.avg_holding_seconds,
+
+            score: w.score,
+
+            lastSeen: w.last_seen
 
         }))
 
@@ -644,9 +699,45 @@ function getEngineAdvisor({ from, to } = {}){
 
     }
 
+    // Admin V3.1 (Part 7) - a top-level summary so the advisor answers
+    // "what should I improve today?" without reading every card: real
+    // current-vs-previous-period win rate (null when there's no
+    // comparable previous period - e.g. the All Time default, which by
+    // definition has nothing before it, never a fabricated baseline),
+    // plus the top 1-2 real advisories restated as
+    // "Primary/Secondary Problem".
+
+    const previousRange = computePreviousPeriod({ from, to });
+
+    const previousWinRate = previousRange ? predictionMetricsService.getSummary(previousRange).winRate : null;
+
+    const top = advisories.slice(0, 2);
+
     return {
 
         generatedAt: new Date().toISOString(),
+
+        currentWinRate: summary.winRate,
+
+        previousWinRate,
+
+        winRateDelta: (summary.winRate != null && previousWinRate != null) ? (summary.winRate - previousWinRate) : null,
+
+        previousPeriodAvailable: !!previousRange,
+
+        primaryProblem: top[0] ? top[0].reason : null,
+
+        secondaryProblem: top[1] ? top[1].reason : null,
+
+        suggestedFix: top[0] && top[0].recommendedValue != null ? `Adjust ${top[0].id.replace(/-/g, " ")}: ${top[0].currentValue ?? "current value"} -> ${top[0].recommendedValue}` : (top[0] ? "Directional signal only - no direct engine parameter to adjust yet." : null),
+
+        expectedImprovement: top[0] ? top[0].expectedImprovement : null,
+
+        confidence: top[0] ? top[0].confidence : null,
+
+        currentParameter: top[0] ? top[0].currentValue : null,
+
+        recommendedParameter: top[0] ? top[0].recommendedValue : null,
 
         advisories: advisories.slice(0, 5),
 
@@ -736,7 +827,11 @@ const EXPORT_TABLES = {
 
     "wallet-performance": (params) => {
 
-        const data = getWalletPerformance(params);
+        // Export always covers the FULL filtered set (every matching
+        // wallet up to the real hard cap), never just whatever page
+        // size the on-screen table happened to be showing - "Export"
+        // means "give me the data", not "give me the current page".
+        const data = getWalletPerformance({ ...params, limit: WALLET_PERFORMANCE_MAX_LIMIT, offset: 0 });
 
         return {
 
@@ -745,7 +840,9 @@ const EXPORT_TABLES = {
                 { key: "category", label: "Category" }, { key: "predictionCount", label: "Prediction Count" },
                 { key: "winRate", label: "Win Rate" }, { key: "averageRoiPct", label: "Average ROI %" },
                 { key: "totalRealizedProfitUsd", label: "Total Realized Profit (USD)" },
-                { key: "tpCount", label: "TP" }, { key: "slCount", label: "SL" }, { key: "openCount", label: "Open" }
+                { key: "tpCount", label: "TP" }, { key: "slCount", label: "SL" }, { key: "openCount", label: "Open" },
+                { key: "averageHoldingSeconds", label: "Avg Holding Time (s)" }, { key: "score", label: "Score" },
+                { key: "lastSeen", label: "Last Seen" }
             ],
 
             rows: data.wallets
@@ -790,6 +887,8 @@ const EXPORT_TABLES = {
 
         columns: [
             { key: "label", label: "Confidence Band" }, { key: "predictionCount", label: "Predictions" },
+            { key: "tpCount", label: "TP" }, { key: "slCount", label: "SL" },
+            { key: "expiredCount", label: "Expired" }, { key: "openCount", label: "Open" },
             { key: "winRate", label: "Win Rate" }, { key: "averageRoiPct", label: "Average ROI %" }
         ],
 

@@ -98,7 +98,12 @@ async function getWalletPerformance(req, res, next){
 
         if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
 
-        const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+        // 5000 mirrors ceoDashboardService's own WALLET_PERFORMANCE_MAX_LIMIT
+        // hard cap (Part 12) - the service re-clamps regardless, this just
+        // avoids handing it an obviously-bogus huge number up front.
+        const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 20));
+
+        const offset = Math.max(0, Number(req.query.offset) || 0);
 
         sendSuccess(res, ceoDashboardService.getWalletPerformance({
 
@@ -108,7 +113,15 @@ async function getWalletPerformance(req, res, next){
 
             to: range.to,
 
-            limit
+            q: req.query.q || undefined,
+
+            limit,
+
+            offset,
+
+            sortBy: req.query.sortBy || undefined,
+
+            direction: req.query.direction || undefined
 
         }));
 

@@ -635,3 +635,245 @@ DATE FILTER (Admin Prediction Validation)
     color:var(--purple);
 
 }
+
+/* =======================
+ADMIN V3 - merged in from the deleted CEO Dashboard page (admin-ceo.
+css) - single admin interface now, no separate stylesheet.
+======================= */
+
+.ceoSectionHead{
+
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-bottom:14px;
+
+}
+
+.ceoSectionHead h3,
+.ceoSectionHead h4{
+
+    margin:0;
+
+}
+
+.ceoExportBtns{
+
+    display:flex;
+    gap:8px;
+
+}
+
+.ceoStatusRow{
+
+    display:grid;
+    grid-template-columns:repeat(6,1fr);
+    gap:14px;
+
+}
+
+.ceoSignalGrid{
+
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:14px;
+
+}
+
+.ceoSignalCard{
+
+    background:#1b1a2b;
+    border-radius:14px;
+    padding:16px;
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+
+}
+
+.ceoSignalCard .ceoSignalLabel{
+
+    font-size:11px;
+    color:var(--muted);
+    text-transform:uppercase;
+    letter-spacing:.3px;
+
+}
+
+.ceoSignalCard .ceoSignalCount{
+
+    font-size:26px;
+    font-weight:700;
+
+}
+
+.ceoSignalCard .ceoSignalPct{
+
+    font-size:12px;
+    color:var(--muted);
+
+}
+
+.ceoTrend{
+
+    font-size:12px;
+    font-weight:700;
+    display:inline-flex;
+    align-items:center;
+    gap:4px;
+    margin-top:4px;
+
+}
+
+.ceoTrend.up{ color:var(--green); }
+.ceoTrend.down{ color:var(--red); }
+.ceoTrend.flat{ color:var(--muted); }
+
+.ceoSignalCard.strongbuy{ border-left:3px solid #16c784; }
+.ceoSignalCard.buy{ border-left:3px solid var(--purple); }
+.ceoSignalCard.hold{ border-left:3px solid var(--yellow); }
+.ceoSignalCard.avoid{ border-left:3px solid var(--red); }
+
+.ceoCategoryTabs{
+
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    margin-bottom:16px;
+
+}
+
+.ceoCategoryTabs button{
+
+    background:var(--panel2);
+    border:1px solid var(--border);
+    color:var(--muted);
+    border-radius:999px;
+    padding:8px 16px;
+    font-size:12px;
+    font-weight:700;
+    cursor:pointer;
+
+}
+
+.ceoCategoryTabs button.active{
+
+    background:var(--purple);
+    color:white;
+    border-color:var(--purple);
+
+}
+
+.ceoChartsRow{
+
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:20px;
+    margin-top:20px;
+
+}
+
+.ceoChartCol{
+
+    background:#1b1a2b;
+    border-radius:14px;
+    padding:16px;
+
+}
+
+.ceoInsightList{
+
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+
+}
+
+.ceoInsightCard{
+
+    background:#1b1a2b;
+    border-radius:12px;
+    padding:14px 16px;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+
+}
+
+.ceoInsightCardHead{
+
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:10px;
+
+}
+
+.ceoImpactBadge{
+
+    flex:0 0 auto;
+    font-size:10.5px;
+    font-weight:700;
+    text-transform:uppercase;
+    padding:4px 10px;
+    border-radius:999px;
+    white-space:nowrap;
+
+}
+
+.ceoImpactBadge.high{ background:rgba(255,90,90,.15); color:var(--red); }
+.ceoImpactBadge.medium{ background:rgba(246,185,59,.15); color:var(--yellow); }
+.ceoImpactBadge.low{ background:rgba(139,92,246,.15); color:var(--purple); }
+
+.ceoInsightMessage{
+
+    font-size:13px;
+    color:var(--text);
+    line-height:1.5;
+
+}
+
+.ceoAdvisorGrid{
+
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:10px;
+    font-size:12px;
+
+}
+
+.ceoAdvisorGrid div{
+
+    background:var(--panel);
+    border-radius:8px;
+    padding:8px 10px;
+
+}
+
+.ceoAdvisorGrid span{
+
+    display:block;
+    color:var(--muted);
+    font-size:10px;
+    text-transform:uppercase;
+    margin-bottom:3px;
+
+}
+
+@media(max-width:900px){
+
+    .ceoStatusRow{ grid-template-columns:repeat(3,1fr); }
+    .ceoSignalGrid{ grid-template-columns:repeat(2,1fr); }
+    .ceoChartsRow{ grid-template-columns:1fr; }
+    .ceoAdvisorGrid{ grid-template-columns:1fr; }
+
+}
+
+@media(max-width:480px){
+
+    .ceoStatusRow{ grid-template-columns:repeat(2,1fr); }
+    .ceoSignalGrid{ grid-template-columns:1fr; }
+
+}

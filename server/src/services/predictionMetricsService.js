@@ -272,6 +272,10 @@ function getStatistics({ from, to } = {}){
 
         const tp = inBucket.filter(p => p.status === "TP_HIT").length;
 
+        // Additive fields (Admin V3) - tpCount/slCount alongside the
+        // existing winRate/averageRoiPct, never replacing them.
+        const sl = inBucket.filter(p => p.status === "SL_HIT").length;
+
         const rois = inBucket.map(p => p.current_roi_pct).filter(v => v != null);
 
         return {
@@ -279,6 +283,10 @@ function getStatistics({ from, to } = {}){
             label: bucket.label,
 
             predictionCount: inBucket.length,
+
+            tpCount: tp,
+
+            slCount: sl,
 
             winRate: inBucket.length ? tp / inBucket.length : null,
 
@@ -316,6 +324,59 @@ function getStatistics({ from, to } = {}){
 
     const winAnalysis = Object.entries(winReasonCounts).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
 
+    // Additive (Admin V3) - WIN RATE per wallet category / token
+    // pattern across ALL closed predictions (not just losses), so
+    // "best"/"worst" can be derived from a real rate, not just a raw
+    // loss count. Requires a real minimum sample (5) before a category
+    // is ranked at all - a 1-prediction "100% win rate" category is
+    // noise, not a real best performer.
+
+    const MIN_SAMPLE = 5;
+
+    function performanceByGroup(rows, groupFn){
+
+        const groups = {};
+
+        rows.forEach(p => {
+
+            const key = groupFn(p);
+
+            if(!groups[key]) groups[key] = [];
+
+            groups[key].push(p);
+
+        });
+
+        return Object.entries(groups).map(([key, groupRows]) => {
+
+            const tp = groupRows.filter(p => p.status === "TP_HIT").length;
+
+            const rois = groupRows.map(p => p.current_roi_pct).filter(v => v != null);
+
+            return {
+
+                key,
+
+                sampleSize: groupRows.length,
+
+                winRate: groupRows.length ? tp / groupRows.length : null,
+
+                averageRoiPct: mean(rois)
+
+            };
+
+        });
+
+    }
+
+    const walletCategoryPerformance = performanceByGroup(closed, walletCategoryFor);
+
+    const tokenPatternPerformance = performanceByGroup(closed, p => marketCapBandFor(p.entry_market_cap));
+
+    const rankedWalletCategories = walletCategoryPerformance.filter(g => g.sampleSize >= MIN_SAMPLE && g.winRate != null).sort((a, b) => b.winRate - a.winRate);
+
+    const rankedTokenPatterns = tokenPatternPerformance.filter(g => g.sampleSize >= MIN_SAMPLE && g.winRate != null).sort((a, b) => b.winRate - a.winRate);
+
     return {
 
         confidenceCalibration: confidenceBuckets,
@@ -331,6 +392,21 @@ function getStatistics({ from, to } = {}){
         walletCategoryLosses: Object.entries(walletCategoryLossCounts).map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count),
 
         tokenPatternLosses: Object.entries(tokenPatternLossCounts).map(([pattern, count]) => ({ pattern, count })).sort((a, b) => b.count - a.count),
+
+        // Additive (Admin V3) - real win-rate-ranked performance, and
+        // the best/worst derived from it. null when no group has the
+        // minimum real sample size yet - never a guessed "best".
+        walletCategoryPerformance,
+
+        tokenPatternPerformance,
+
+        bestWalletCategory: rankedWalletCategories[0] || null,
+
+        worstWalletCategory: rankedWalletCategories[rankedWalletCategories.length - 1] || null,
+
+        mostProfitableTokenPattern: rankedTokenPatterns[0] || null,
+
+        mostDangerousTokenPattern: rankedTokenPatterns[rankedTokenPatterns.length - 1] || null,
 
         accuracyByTier: accuracyByTier(closed),
 

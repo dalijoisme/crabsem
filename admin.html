@@ -14,7 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="css/dashboard.css">
-<link rel="stylesheet" href="css/admin.css?v=5">
+<link rel="stylesheet" href="css/admin.css?v=6">
 
 </head>
 
@@ -74,8 +74,6 @@
 
 </div>
 
-<a href="admin-ceo.html" class="adminRefreshBtn">CEO Dashboard</a>
-
 <button id="adminRefreshBtn" class="adminRefreshBtn">Refresh Now</button>
 
 <button id="adminLogoutBtn" class="adminRefreshBtn">Log Out</button>
@@ -104,6 +102,40 @@ Loading real data from the backend...
 
 <div id="adminContent" class="adminContent hidden">
 
+<!-- GLOBAL DATE FILTER (Admin V3) - page-level, applies to Dashboard,
+     Wallet Performance, Prediction (Signal/Result/Strong Buy/Failure/
+     Confidence Calibration), Engine Advisor, and Analytics - every
+     section below reads from this one shared filter. -->
+
+<section class="adminSection ceoFilterSection">
+
+<div class="adminDateFilter">
+
+<div class="adminDateFilterRow">
+
+<label>Start Date <input type="date" id="predFilterFrom"></label>
+<label>End Date <input type="date" id="predFilterTo"></label>
+<button id="predFilterApplyBtn" class="adminActionBtn">Apply</button>
+
+</div>
+
+<div class="adminDateFilterQuick">
+
+<button class="adminActionBtn" data-quick="today">Today</button>
+<button class="adminActionBtn" data-quick="yesterday">Yesterday</button>
+<button class="adminActionBtn" data-quick="7d">Last 7 Days</button>
+<button class="adminActionBtn" data-quick="30d">Last 30 Days</button>
+<button class="adminActionBtn" data-quick="month">This Month</button>
+<button class="adminActionBtn active" data-quick="all">All Time</button>
+
+</div>
+
+<div id="predFilterActiveLabel" class="adminNote">Showing: All Time - every section below updates from this one filter.</div>
+
+</div>
+
+</section>
+
 <!-- DASHBOARD (minimal login landing cards - GET /api/v1/admin/dashboard) -->
 
 <section class="adminSection" id="secDashboard">
@@ -112,6 +144,7 @@ Loading real data from the backend...
 
 <div class="adminGrid5">
 
+<div class="adminStat"><span>Engine Version</span><strong id="dashEngineVersion">-</strong></div>
 <div class="adminStat"><span>Engine Status</span><strong id="dashEngineStatus">-</strong></div>
 <div class="adminStat"><span>Scheduler</span><strong id="dashScheduler">-</strong></div>
 <div class="adminStat"><span>Database</span><strong id="dashDatabase">-</strong></div>
@@ -178,6 +211,15 @@ Loading real data from the backend...
 
 <div id="walletSearchResult"></div>
 
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Wallet Performance</h4>
+<div class="ceoExportBtns" data-section="wallet-performance"></div>
+</div>
+
+<div class="ceoCategoryTabs" id="ceoCategoryTabs"></div>
+
+<div id="ceoWalletPerformance" class="adminTableWrap"></div>
+
 </section>
 
 <!-- TOKEN -->
@@ -201,7 +243,29 @@ Loading real data from the backend...
 
 <section class="adminSection" id="secEngine">
 
-<h3>Engine (Read-only)</h3>
+<h3>Engine</h3>
+
+<div class="ceoStatusRow" id="ceoStatusRow"></div>
+
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>AI Engine Advisor</h4>
+<div class="ceoExportBtns" data-section="engine-advisor"></div>
+</div>
+
+<p class="adminNote">Deterministic, rule-based analysis over real validation history - not a machine-learning model. Each recommendation shows the real current engine value, a suggested value, and the real sample size behind it.</p>
+
+<div id="ceoEngineAdvisor" class="ceoInsightList"></div>
+
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Engine Evolution</h4>
+<div class="ceoExportBtns" data-section="engine-history"></div>
+</div>
+
+<p class="adminNote">Starts real, from this point forward - there was no version-tracking mechanism before it, so no historical rows are invented for versions that predate this table.</p>
+
+<div id="ceoEngineHistory" class="adminTableWrap"></div>
+
+<h4 style="margin-top:22px;">Engine Configuration (Read-only)</h4>
 
 <p class="adminNote">Real values currently loaded from server/src/config/scoringConfig.js and tradePlanConfig.js - not editable this sprint.</p>
 
@@ -217,31 +281,65 @@ Loading real data from the backend...
 
 <p class="adminNote">Real outcomes from prediction_history - the immutable, TP/SL/Expired-tracked "first recommendation" record per token. The engine has 4 real action tiers - STRONG BUY, BUY, HOLD, AVOID - there is no "SELL" tier.</p>
 
-<div class="adminDateFilter">
-
-<div class="adminDateFilterRow">
-
-<label>Start Date <input type="date" id="predFilterFrom"></label>
-<label>End Date <input type="date" id="predFilterTo"></label>
-<button id="predFilterApplyBtn" class="adminActionBtn">Apply</button>
-
+<div class="ceoSectionHead">
+<h4>Signal Summary</h4>
+<div class="ceoExportBtns" data-section="signal-summary"></div>
 </div>
 
-<div class="adminDateFilterQuick">
+<div id="ceoSignalSummary" class="ceoSignalGrid"></div>
 
-<button class="adminActionBtn" data-quick="today">Today</button>
-<button class="adminActionBtn" data-quick="yesterday">Yesterday</button>
-<button class="adminActionBtn" data-quick="7d">Last 7 Days</button>
-<button class="adminActionBtn" data-quick="30d">Last 30 Days</button>
-<button class="adminActionBtn" data-quick="all">All Time</button>
-
-</div>
-
-<div id="predFilterActiveLabel" class="adminNote">Showing: All Time</div>
-
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Result Summary</h4>
+<div class="ceoExportBtns" data-section="result-summary"></div>
 </div>
 
 <div id="predValidationSummary"></div>
+
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Strong Buy Analysis</h4>
+<div class="ceoExportBtns" data-section="strong-buy"></div>
+</div>
+
+<div id="ceoStrongBuy" class="adminGrid4"></div>
+
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Failure Analysis</h4>
+</div>
+
+<div id="ceoFailureHeadlines" class="ceoSignalGrid"></div>
+
+<div class="ceoChartsRow">
+
+<div class="ceoChartCol">
+<div class="ceoSectionHead"><h4>Losing Reasons</h4><div class="ceoExportBtns" data-section="failure-reasons"></div></div>
+<div id="ceoFailureReasons" class="adminBarList"></div>
+</div>
+
+<div class="ceoChartCol">
+<div class="ceoSectionHead"><h4>Winning Reasons</h4><div class="ceoExportBtns" data-section="winning-reasons"></div></div>
+<div id="ceoWinningReasons" class="adminBarList"></div>
+</div>
+
+<div class="ceoChartCol">
+<div class="ceoSectionHead"><h4>Wallet Category Causing Losses</h4><div class="ceoExportBtns" data-section="wallet-category-losses"></div></div>
+<div id="ceoWalletCategoryLosses" class="adminBarList"></div>
+</div>
+
+<div class="ceoChartCol">
+<div class="ceoSectionHead"><h4>Token Patterns Causing Losses</h4><div class="ceoExportBtns" data-section="token-pattern-losses"></div></div>
+<div id="ceoTokenPatternLosses" class="adminBarList"></div>
+</div>
+
+</div>
+
+<div class="ceoSectionHead" style="margin-top:22px;">
+<h4>Confidence Calibration</h4>
+<div class="ceoExportBtns" data-section="confidence-calibration"></div>
+</div>
+
+<p class="adminNote">Helps verify whether confidence scores are realistic - a well-calibrated engine should show higher win rates in higher confidence bands.</p>
+
+<div id="ceoConfidenceCalibration" class="adminTableWrap"></div>
 
 <h4 style="margin-top:22px;">Legacy Recommendation Log Summary (Sprint 2, unfiltered)</h4>
 
@@ -268,7 +366,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/admin.js?v=5"></script>
+<script src="js/admin.js?v=6"></script>
 
 </body>
 

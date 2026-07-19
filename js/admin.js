@@ -288,6 +288,14 @@ function computeQuickRange(key){
 
     if(key === "30d") return { from: toDateStr(daysAgoUTC(29)), to: toDateStr(today) };
 
+    if(key === "month"){
+
+        const first = new Date(); first.setUTCHours(0,0,0,0); first.setUTCDate(1);
+
+        return { from: toDateStr(first), to: toDateStr(today) };
+
+    }
+
     return { from: undefined, to: undefined }; // "all"
 
 }
@@ -373,7 +381,7 @@ async function loadAll(){
 
     try{
 
-        const [dashboard, system, wallets, engineConfig, predictions] = await Promise.all([
+        const [dashboard, system, wallets, engineConfig, predictions, engineStatus, engineHistory] = await Promise.all([
 
             adminFetch("/admin/dashboard"),
 
@@ -383,7 +391,11 @@ async function loadAll(){
 
             adminFetch("/admin/engine/config"),
 
-            adminFetch("/admin/predictions/summary")
+            adminFetch("/admin/predictions/summary"),
+
+            adminFetch("/admin/ceo/engine-status"),
+
+            adminFetch("/admin/ceo/engine-history")
 
         ]);
 
@@ -396,6 +408,10 @@ async function loadAll(){
         renderEngineConfig(engineConfig);
 
         renderPredictions(predictions);
+
+        renderEngineStatus(engineStatus);
+
+        renderEngineHistory(engineHistory.history);
 
         await loadPredictionAndAnalytics();
 
@@ -743,6 +759,108 @@ function kvTable(title, obj){
 
 }
 
+// =====================================
+// ENGINE STATUS (Admin V3 Section 1) - also updates the Dashboard's
+// small "Engine Version" teaser card from this same fetch, since both
+// display the same real value from one backend call.
+// =====================================
+
+function renderEngineStatus(s){
+
+    const versionEl = document.getElementById("dashEngineVersion");
+
+    if(versionEl) versionEl.textContent = s.engineVersion;
+
+    document.getElementById("ceoStatusRow").innerHTML = `
+        <div class="adminStat"><span>Engine Version</span><strong>${s.engineVersion}</strong></div>
+        <div class="adminStat"><span>AI Model Version</span><strong>${s.aiModelVersion}</strong></div>
+        <div class="adminStat"><span>Prediction Engine</span><strong>${s.predictionEngineStatus.toUpperCase()}</strong></div>
+        <div class="adminStat"><span>Validation Scheduler</span><strong>${s.validationSchedulerStatus.toUpperCase()}</strong></div>
+        <div class="adminStat"><span>Database</span><strong>${s.databaseStatus}</strong></div>
+        <div class="adminStat"><span>Version Notes</span><strong style="font-size:11px;font-weight:400;color:var(--muted);">${s.engineVersionNotes.slice(0,90)}...</strong></div>
+    `;
+
+}
+
+// =====================================
+// ENGINE EVOLUTION (Admin V3 Section 9)
+// =====================================
+
+function renderEngineHistory(history){
+
+    const el = document.getElementById("ceoEngineHistory");
+
+    if(!history.length){ el.innerHTML = `<p class="adminNote">No version recorded yet.</p>`; return; }
+
+    el.innerHTML = `
+        <table class="adminTable">
+            <thead><tr>
+                <th>Version</th><th>Deployed</th><th>Win Rate</th><th>Avg ROI</th>
+                <th>Predictions</th><th>Win Rate Δ vs Previous</th><th>Avg ROI Δ vs Previous</th>
+            </tr></thead>
+            <tbody>
+            ${history.map(v => `
+                <tr>
+                    <td>${v.version}</td>
+                    <td>${v.deployedAt}</td>
+                    <td>${v.winRate!=null?fmtPct(v.winRate):"n/a"}</td>
+                    <td>${v.averageRoiPct!=null?v.averageRoiPct.toFixed(1)+"%":"-"}</td>
+                    <td>${fmtNum(v.predictionCount)}</td>
+                    <td>${v.winRateDelta != null ? fmtPct(v.winRateDelta) : "n/a (first version)"}</td>
+                    <td>${v.averageRoiDelta != null ? v.averageRoiDelta.toFixed(1)+"%" : "n/a (first version)"}</td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+
+}
+
+// =====================================
+// AI ENGINE ADVISOR (Admin V3 Section 8)
+// =====================================
+
+async function loadEngineAdvisor(){
+
+    const el = document.getElementById("ceoEngineAdvisor");
+
+    try{
+
+        const data = await adminFetch(`/admin/ceo/engine-advisor${buildFilterParams()}`);
+
+        if(!data.advisories.length){
+
+            el.innerHTML = `<p class="adminNote">No rule crossed its real threshold for this period yet - nothing to recommend.</p>`;
+
+            return;
+
+        }
+
+        const warning = data.sampleWarning ? `<p class="adminNote">${data.sampleWarning}</p>` : "";
+
+        el.innerHTML = warning + data.advisories.map(a => `
+            <div class="ceoInsightCard">
+                <div class="ceoInsightCardHead">
+                    <span class="ceoInsightMessage"><strong>${a.reason}</strong></span>
+                    <span class="ceoImpactBadge ${a.confidence.toLowerCase()}">${a.confidence} Confidence</span>
+                </div>
+                <div class="ceoAdvisorGrid">
+                    <div><span>Current Value</span>${a.currentValue ?? "n/a - no direct engine parameter"}</div>
+                    <div><span>Recommended Value</span>${a.recommendedValue ?? "n/a"}</div>
+                    <div style="grid-column:1/-1;"><span>Expected Improvement</span>${a.expectedImprovement ?? "Not quantifiable from current data"}</div>
+                </div>
+            </div>
+        `).join("");
+
+    }
+    catch(e){
+
+        el.innerHTML = `<p class="adminNote">Failed to load: ${e.message}</p>`;
+
+    }
+
+}
+
 function renderEngineConfig(c){
 
     const html =
@@ -780,20 +898,22 @@ function renderEngineConfig(c){
 // UX sprint Part 2)
 // =====================================
 
-function renderPredValidationSummary(summary, strongBuy, statistics){
+// Result Summary ONLY (Admin V3 split this out of one big block into
+// its own container - Signal Summary/Strong Buy/Failure Analysis/
+// Confidence Calibration each now have their own function+container).
 
-    const el = document.getElementById("predValidationSummary");
+function renderPredValidationSummary(summary){
 
-    const summaryCards = `
+    document.getElementById("predValidationSummary").innerHTML = `
         <div class="adminGrid4">
-            <div class="adminStat"><span>Prediction Count</span><strong>${fmtNum(summary.predictionCount)}</strong></div>
+            <div class="adminStat"><span>Total Predictions</span><strong>${fmtNum(summary.predictionCount)}</strong></div>
+            <div class="adminStat"><span>TP Hit</span><strong>${fmtNum(summary.tpCount)}</strong></div>
+            <div class="adminStat"><span>SL Hit</span><strong>${fmtNum(summary.slCount)}</strong></div>
+            <div class="adminStat"><span>Expired</span><strong>${fmtNum(summary.expiredCount)}</strong></div>
+            <div class="adminStat"><span>Open</span><strong>${fmtNum(summary.openCount)}</strong></div>
             <div class="adminStat"><span>Win Rate</span><strong>${summary.winRate!=null?fmtPct(summary.winRate):"n/a"}</strong></div>
             <div class="adminStat"><span>Average ROI</span><strong>${summary.averageRoiPct!=null?summary.averageRoiPct.toFixed(2)+"%":"-"}</strong></div>
             <div class="adminStat"><span>Median ROI</span><strong>${summary.medianRoiPct!=null?summary.medianRoiPct.toFixed(2)+"%":"-"}</strong></div>
-            <div class="adminStat"><span>TP Count</span><strong>${fmtNum(summary.tpCount)}</strong></div>
-            <div class="adminStat"><span>SL Count</span><strong>${fmtNum(summary.slCount)}</strong></div>
-            <div class="adminStat"><span>Expired Count</span><strong>${fmtNum(summary.expiredCount)}</strong></div>
-            <div class="adminStat"><span>Open Count</span><strong>${fmtNum(summary.openCount)}</strong></div>
             <div class="adminStat"><span>Largest Winner</span><strong>${summary.largestWinnerPct!=null?summary.largestWinnerPct.toFixed(1)+"%":"-"}</strong></div>
             <div class="adminStat"><span>Largest Loser</span><strong>${summary.largestLoserPct!=null?summary.largestLoserPct.toFixed(1)+"%":"-"}</strong></div>
             <div class="adminStat"><span>Avg Time to TP</span><strong>${fmtDuration(summary.averageTimeToTpSeconds)}</strong></div>
@@ -801,58 +921,345 @@ function renderPredValidationSummary(summary, strongBuy, statistics){
         </div>
     `;
 
-    const strongBuyCards = `
-        <h4 style="margin-top:18px;">Strong Buy Only</h4>
-        <div class="adminGrid4">
-            <div class="adminStat"><span>Prediction Count</span><strong>${fmtNum(strongBuy.predictionCount)}</strong></div>
-            <div class="adminStat"><span>Win Rate</span><strong>${strongBuy.winRate!=null?fmtPct(strongBuy.winRate):"n/a"}</strong></div>
-            <div class="adminStat"><span>Average ROI</span><strong>${strongBuy.averageRoiPct!=null?strongBuy.averageRoiPct.toFixed(2)+"%":"-"}</strong></div>
-            <div class="adminStat"><span>TP / SL / Expired</span><strong>${fmtNum(strongBuy.tpCount)} / ${fmtNum(strongBuy.slCount)} / ${fmtNum(strongBuy.expiredCount)}</strong></div>
+}
+
+// Signal Summary (Admin V3 Section 3) - count/percentage/trend per tier.
+
+function trendHtml(trendCount, trendPct){
+
+    if(trendCount == null) return `<span class="ceoTrend flat">No prior period</span>`;
+
+    const dir = trendCount > 0 ? "up" : (trendCount < 0 ? "down" : "flat");
+
+    const arrow = dir === "up" ? "▲" : (dir === "down" ? "▼" : "—");
+
+    const pctStr = trendPct != null ? ` (${(trendPct*100).toFixed(0)}%)` : "";
+
+    return `<span class="ceoTrend ${dir}">${arrow} ${trendCount > 0 ? "+" : ""}${trendCount}${pctStr} vs previous period</span>`;
+
+}
+
+function renderSignalSummary(data){
+
+    const classFor = { "STRONG BUY": "strongbuy", "BUY": "buy", "HOLD": "hold", "AVOID": "avoid" };
+
+    document.getElementById("ceoSignalSummary").innerHTML = data.tiers.map(t => `
+        <div class="ceoSignalCard ${classFor[t.recommendation]}">
+            <span class="ceoSignalLabel">${t.recommendation}</span>
+            <span class="ceoSignalCount">${fmtNum(t.count)}</span>
+            <span class="ceoSignalPct">${t.percentage!=null?fmtPct(t.percentage):"n/a"} of ${fmtNum(data.total)} total</span>
+            ${trendHtml(t.trendCount, t.trendPct)}
+        </div>
+    `).join("");
+
+}
+
+// Strong Buy Analysis (Admin V3 Section 6)
+
+function renderStrongBuyCeo(s){
+
+    document.getElementById("ceoStrongBuy").innerHTML = `
+        <div class="adminStat"><span>Issued</span><strong>${fmtNum(s.predictionCount)}</strong></div>
+        <div class="adminStat"><span>TP</span><strong>${fmtNum(s.tpCount)}</strong></div>
+        <div class="adminStat"><span>SL</span><strong>${fmtNum(s.slCount)}</strong></div>
+        <div class="adminStat"><span>Expired</span><strong>${fmtNum(s.expiredCount)}</strong></div>
+        <div class="adminStat"><span>Open</span><strong>${fmtNum(s.openCount)}</strong></div>
+        <div class="adminStat"><span>Win Rate</span><strong>${s.winRate!=null?fmtPct(s.winRate):"n/a"}</strong></div>
+        <div class="adminStat"><span>Average ROI</span><strong>${s.averageRoiPct!=null?s.averageRoiPct.toFixed(1)+"%":"-"}</strong></div>
+        <div class="adminStat"><span>Avg Time to TP</span><strong>${fmtDuration(s.averageTimeToTpSeconds)}</strong></div>
+    `;
+
+}
+
+// Failure Analysis (Admin V3 Section 7) - headlines (top losing/
+// winning reason, best/worst wallet category, most/least profitable
+// token pattern) + 4 real bar charts.
+
+function barRowCeo(label, count, max){
+
+    const pct = max > 0 ? Math.min(100, (count/max)*100) : 0;
+
+    return `
+        <div class="adminBarRow">
+            <div class="adminBarLabel"><span>${label}</span><strong>${count}</strong></div>
+            <div class="adminBarTrack"><div class="adminBarFill" style="width:${pct}%"></div></div>
         </div>
     `;
 
-    const falseMissedCard = `
-        <h4 style="margin-top:18px;">False BUY / Missed BUY / Accuracy</h4>
-        <div class="adminGrid4">
-            <div class="adminStat"><span>False BUY</span><strong>${fmtNum(statistics.falseBuyCount)}</strong></div>
-            <div class="adminStat"><span>Missed BUY</span><strong>${fmtNum(statistics.missedBuyCount)}</strong></div>
+}
+
+function renderFailureAnalysisCeo(f){
+
+    document.getElementById("ceoFailureHeadlines").innerHTML = `
+        <div class="ceoSignalCard avoid">
+            <span class="ceoSignalLabel">Top Losing Reason</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.mostCommonLosingReason ? f.mostCommonLosingReason.reason : "n/a"}</span>
+            <span class="ceoSignalPct">${f.mostCommonLosingReason ? fmtNum(f.mostCommonLosingReason.count) + " occurrences" : "No losses yet"}</span>
         </div>
-        <div class="adminTableWrap" style="margin-top:12px;">
+        <div class="ceoSignalCard strongbuy">
+            <span class="ceoSignalLabel">Top Winning Reason</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.mostCommonWinningReason ? f.mostCommonWinningReason.reason : "n/a"}</span>
+            <span class="ceoSignalPct">${f.mostCommonWinningReason ? fmtNum(f.mostCommonWinningReason.count) + " occurrences" : "No wins with a reason yet"}</span>
+        </div>
+        <div class="ceoSignalCard buy">
+            <span class="ceoSignalLabel">Best Wallet Category</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.bestWalletCategory ? f.bestWalletCategory.key : "n/a"}</span>
+            <span class="ceoSignalPct">${f.bestWalletCategory ? fmtPct(f.bestWalletCategory.winRate) + ` win rate (n=${f.bestWalletCategory.sampleSize})` : "Not enough sample yet"}</span>
+        </div>
+        <div class="ceoSignalCard hold">
+            <span class="ceoSignalLabel">Worst Wallet Category</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.worstWalletCategory ? f.worstWalletCategory.key : "n/a"}</span>
+            <span class="ceoSignalPct">${f.worstWalletCategory ? fmtPct(f.worstWalletCategory.winRate) + ` win rate (n=${f.worstWalletCategory.sampleSize})` : "Not enough sample yet"}</span>
+        </div>
+        <div class="ceoSignalCard strongbuy">
+            <span class="ceoSignalLabel">Most Profitable Token Pattern</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.mostProfitableTokenPattern ? f.mostProfitableTokenPattern.key : "n/a"}</span>
+            <span class="ceoSignalPct">${f.mostProfitableTokenPattern ? fmtPct(f.mostProfitableTokenPattern.winRate) + ` win rate (n=${f.mostProfitableTokenPattern.sampleSize})` : "Not enough sample yet"}</span>
+        </div>
+        <div class="ceoSignalCard avoid">
+            <span class="ceoSignalLabel">Most Dangerous Token Pattern</span>
+            <span class="ceoSignalCount" style="font-size:16px;">${f.mostDangerousTokenPattern ? f.mostDangerousTokenPattern.key : "n/a"}</span>
+            <span class="ceoSignalPct">${f.mostDangerousTokenPattern ? fmtPct(f.mostDangerousTokenPattern.winRate) + ` win rate (n=${f.mostDangerousTokenPattern.sampleSize})` : "Not enough sample yet"}</span>
+        </div>
+        <div class="ceoSignalCard buy">
+            <span class="ceoSignalLabel">False BUY</span>
+            <span class="ceoSignalCount">${fmtNum(f.falseBuyCount)}</span>
+            <span class="ceoSignalPct">STRONG BUY/BUY that didn't hit target</span>
+        </div>
+        <div class="ceoSignalCard hold">
+            <span class="ceoSignalLabel">Missed BUY</span>
+            <span class="ceoSignalCount">${fmtNum(f.missedBuyCount)}</span>
+            <span class="ceoSignalPct">HOLD that would have hit target anyway</span>
+        </div>
+    `;
+
+    const maxFailure = Math.max(1, ...f.failureAnalysis.map(r => r.count));
+
+    document.getElementById("ceoFailureReasons").innerHTML = f.failureAnalysis.length
+
+        ? f.failureAnalysis.map(r => barRowCeo(r.reason, r.count, maxFailure)).join("")
+
+        : `<p class="adminNote">No losing predictions in this period yet.</p>`;
+
+    const maxWin = Math.max(1, ...f.winAnalysis.map(r => r.count));
+
+    document.getElementById("ceoWinningReasons").innerHTML = f.winAnalysis.length
+
+        ? f.winAnalysis.map(r => barRowCeo(r.reason, r.count, maxWin)).join("")
+
+        : `<p class="adminNote">No TP-hit predictions with a recorded reason yet (older TP closures predate this analysis).</p>`;
+
+    const maxCat = Math.max(1, ...f.walletCategoryLosses.map(r => r.count));
+
+    document.getElementById("ceoWalletCategoryLosses").innerHTML = f.walletCategoryLosses.length
+
+        ? f.walletCategoryLosses.map(r => barRowCeo(r.category, r.count, maxCat)).join("")
+
+        : `<p class="adminNote">No losing predictions in this period yet.</p>`;
+
+    const maxPattern = Math.max(1, ...f.tokenPatternLosses.map(r => r.count));
+
+    document.getElementById("ceoTokenPatternLosses").innerHTML = f.tokenPatternLosses.length
+
+        ? f.tokenPatternLosses.map(r => barRowCeo(r.pattern, r.count, maxPattern)).join("")
+
+        : `<p class="adminNote">No losing predictions in this period yet.</p>`;
+
+    document.getElementById("ceoConfidenceCalibration").innerHTML = `
+        <table class="adminTable">
+            <thead><tr><th>Confidence Band</th><th>Predictions</th><th>TP</th><th>SL</th><th>Win Rate</th></tr></thead>
+            <tbody>
+            ${f.confidenceCalibration.map(b => `
+                <tr>
+                    <td>${b.label}</td>
+                    <td>${fmtNum(b.predictionCount)}</td>
+                    <td>${fmtNum(b.tpCount)}</td>
+                    <td>${fmtNum(b.slCount)}</td>
+                    <td>${b.winRate!=null?fmtPct(b.winRate):"n/a"}</td>
+                </tr>
+            `).join("")}
+            </tbody>
+        </table>
+    `;
+
+}
+
+// =====================================
+// WALLET PERFORMANCE (Admin V3 Section 5) - category tabs + copy button
+// =====================================
+
+let activeWalletCategory = null;
+
+function renderCategoryTabs(categories){
+
+    const el = document.getElementById("ceoCategoryTabs");
+
+    const allCategories = ["All", ...categories];
+
+    el.innerHTML = allCategories.map(c => `<button data-category="${c}" class="${(activeWalletCategory||"All")===c?"active":""}">${c}</button>`).join("");
+
+    el.querySelectorAll("button").forEach(btn => {
+
+        btn.onclick = async () => {
+
+            activeWalletCategory = btn.dataset.category === "All" ? null : btn.dataset.category;
+
+            el.querySelectorAll("button").forEach(b => b.classList.remove("active"));
+
+            btn.classList.add("active");
+
+            await renderWalletPerformanceCeo(activeWalletCategory);
+
+            renderExportButtons();
+
+        };
+
+    });
+
+}
+
+function shortAddr(addr){ return `${addr.slice(0,4)}...${addr.slice(-4)}`; }
+
+async function renderWalletPerformanceCeo(category){
+
+    const el = document.getElementById("ceoWalletPerformance");
+
+    el.innerHTML = `<p class="adminNote">Loading...</p>`;
+
+    try{
+
+        const data = await adminFetch(`/admin/ceo/wallet-performance${buildFilterParams(category ? { category, limit: 20 } : { limit: 20 })}`);
+
+        if(!data.wallets.length){
+
+            el.innerHTML = `<p class="adminNote">No wallets found for this category/period${data.error ? ` - ${data.error}` : ""}.</p>`;
+
+            return;
+
+        }
+
+        el.innerHTML = `
             <table class="adminTable">
-                <caption>Accuracy by Recommendation Tier</caption>
-                <thead><tr><th>Tier</th><th>Sample</th><th>Accuracy</th></tr></thead>
+                <thead><tr>
+                    <th>Rank</th><th>Wallet</th><th>Category</th><th>Prediction Count</th>
+                    <th>TP</th><th>SL</th><th>Open</th>
+                    <th>Win Rate</th><th>Average ROI</th><th>Total ROI (P&amp;L USD)</th>
+                </tr></thead>
                 <tbody>
-                ${statistics.accuracyByTier.map(t=>`<tr><td>${t.recommendation}</td><td>${fmtNum(t.sampleSize)}</td><td>${t.accuracy!=null?fmtPct(t.accuracy):"n/a"}</td></tr>`).join("")}
+                ${data.wallets.map(w => `
+                    <tr>
+                        <td>${w.rank}</td>
+                        <td><span title="${w.walletAddress}">${shortAddr(w.walletAddress)}</span>
+                            <button class="adminActionBtn" style="padding:2px 6px;font-size:10px;" data-copy="${w.walletAddress}">Copy</button>
+                        </td>
+                        <td>${w.category}</td>
+                        <td>${fmtNum(w.predictionCount)}</td>
+                        <td>${fmtNum(w.tpCount)}</td>
+                        <td>${fmtNum(w.slCount)}</td>
+                        <td>${fmtNum(w.openCount)}</td>
+                        <td>${fmtPct(w.winRate)}</td>
+                        <td>${w.averageRoiPct!=null?w.averageRoiPct.toFixed(1)+"%":"-"}</td>
+                        <td>$${fmtNum(w.totalRealizedProfitUsd, 2)}</td>
+                    </tr>
+                `).join("")}
                 </tbody>
             </table>
-        </div>
-    `;
+        `;
 
-    const confidenceTable = `
-        <div class="adminTableWrap" style="margin-top:12px;">
-            <table class="adminTable">
-                <caption>Confidence Calibration</caption>
-                <thead><tr><th>Confidence Band</th><th>Predictions</th><th>Win Rate</th><th>Avg ROI</th></tr></thead>
-                <tbody>
-                ${statistics.confidenceCalibration.map(b=>`<tr><td>${b.label}</td><td>${fmtNum(b.predictionCount)}</td><td>${b.winRate!=null?fmtPct(b.winRate):"n/a"}</td><td>${b.averageRoiPct!=null?b.averageRoiPct.toFixed(2)+"%":"-"}</td></tr>`).join("")}
-                </tbody>
-            </table>
-        </div>
-    `;
+        el.querySelectorAll("[data-copy]").forEach(btn => {
 
-    const failureTable = `
-        <div class="adminTableWrap" style="margin-top:12px;">
-            <table class="adminTable">
-                <caption>Failure Analysis (why TP was not reached)</caption>
-                <thead><tr><th>Reason</th><th>Count</th></tr></thead>
-                <tbody>
-                ${statistics.failureAnalysis.length ? statistics.failureAnalysis.map(f=>`<tr><td>${f.reason}</td><td>${fmtNum(f.count)}</td></tr>`).join("") : '<tr><td colspan="2">No closed non-TP predictions in this range yet.</td></tr>'}
-                </tbody>
-            </table>
-        </div>
-    `;
+            btn.onclick = () => {
 
-    el.innerHTML = summaryCards + strongBuyCards + falseMissedCard + confidenceTable + failureTable;
+                navigator.clipboard.writeText(btn.dataset.copy);
+
+                const original = btn.textContent;
+
+                btn.textContent = "Copied!";
+
+                setTimeout(() => { btn.textContent = original; }, 1200);
+
+            };
+
+        });
+
+        const exportEl = document.querySelector('.ceoExportBtns[data-section="wallet-performance"]');
+
+        if(exportEl) exportEl.dataset.extra = JSON.stringify(category ? { category, limit: 20 } : { limit: 20 });
+
+    }
+    catch(e){
+
+        el.innerHTML = `<p class="adminNote">Failed to load: ${e.message}</p>`;
+
+    }
+
+}
+
+// =====================================
+// EXPORT (Admin V3 Section 10) - CSV + genuine XLSX on every table,
+// wired onto any .ceoExportBtns[data-section] container present.
+// =====================================
+
+function exportUrl(section, format, extra = {}){
+
+    const params = new URLSearchParams({ section, format, ...extra });
+
+    if(predictionDateFilter.from) params.set("from", predictionDateFilter.from);
+
+    if(predictionDateFilter.to) params.set("to", predictionDateFilter.to);
+
+    return `${BASE_URL}/admin/ceo/export?${params.toString()}`;
+
+}
+
+async function downloadExport(url){
+
+    const res = await fetch(url, { headers: { "X-Admin-Key": getAdminKey() } });
+
+    if(!res.ok){ alert(`Export failed (HTTP ${res.status})`); return; }
+
+    const blob = await res.blob();
+
+    const disposition = res.headers.get("Content-Disposition") || "";
+
+    const match = disposition.match(/filename="(.+)"/);
+
+    const filename = match ? match[1] : "export";
+
+    const link = document.createElement("a");
+
+    link.href = URL.createObjectURL(blob);
+
+    link.download = filename;
+
+    document.body.appendChild(link);
+
+    link.click();
+
+    link.remove();
+
+    URL.revokeObjectURL(link.href);
+
+}
+
+function renderExportButtons(){
+
+    document.querySelectorAll(".ceoExportBtns[data-section]").forEach(el => {
+
+        const section = el.dataset.section;
+
+        el.innerHTML = `
+            <button class="adminActionBtn" data-fmt="csv">Export CSV</button>
+            <button class="adminActionBtn" data-fmt="xlsx">Export Excel</button>
+        `;
+
+        el.querySelectorAll("button").forEach(btn => {
+
+            btn.onclick = () => downloadExport(exportUrl(section, btn.dataset.fmt, el.dataset.extra ? JSON.parse(el.dataset.extra) : {}));
+
+        });
+
+    });
 
 }
 
@@ -860,6 +1267,14 @@ function renderPredValidationSummary(summary, strongBuy, statistics){
 // statistics and the Analytics wallet rankings - never the whole
 // page - with the current date filter applied to every one of them.
 // This is what both the Apply button and the Quick buttons call.
+
+// The ONE function every global-date-filter interaction calls
+// (Apply button, quick buttons, wallet category tabs indirectly) -
+// refreshes every section that depends on the shared filter: Result
+// Summary, Signal Summary, Strong Buy, Failure Analysis, Confidence
+// Calibration, Wallet Performance, AI Engine Advisor, and the legacy
+// Analytics leaderboards. Never touches System/Token/Engine Config/
+// Engine Evolution, which don't depend on the date filter.
 
 async function loadPredictionAndAnalytics(){
 
@@ -869,17 +1284,31 @@ async function loadPredictionAndAnalytics(){
 
     try{
 
-        const [summary, strongBuy, statistics] = await Promise.all([
+        const [summary, strongBuy, statistics, signalSummary, categories] = await Promise.all([
 
             publicFetch(`/validation/predictions/summary${buildFilterParams()}`),
 
             publicFetch(`/validation/predictions/strong-buy${buildFilterParams()}`),
 
-            publicFetch(`/validation/predictions/statistics${buildFilterParams()}`)
+            publicFetch(`/validation/predictions/statistics${buildFilterParams()}`),
+
+            adminFetch(`/admin/ceo/signal-summary${buildFilterParams()}`),
+
+            adminFetch("/admin/ceo/wallet-categories")
 
         ]);
 
-        renderPredValidationSummary(summary, strongBuy, statistics);
+        renderPredValidationSummary(summary);
+
+        renderStrongBuyCeo(strongBuy);
+
+        renderFailureAnalysisCeo(statistics);
+
+        renderSignalSummary(signalSummary);
+
+        renderCategoryTabs(categories.categories);
+
+        await renderWalletPerformanceCeo(activeWalletCategory);
 
     }
     catch(e){
@@ -888,9 +1317,13 @@ async function loadPredictionAndAnalytics(){
 
     }
 
+    await loadEngineAdvisor();
+
     const legacyPredictions = await adminFetch("/admin/predictions/summary").catch(() => ({ horizons: [] }));
 
     await renderAnalytics(legacyPredictions);
+
+    renderExportButtons();
 
     if(window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 

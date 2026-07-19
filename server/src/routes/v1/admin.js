@@ -35,8 +35,12 @@ router.post("/admin/tokens/:address/refresh", controller.refreshToken);
 router.post("/admin/tokens/:address/reanalyze", controller.reanalyzeToken);
 router.delete("/admin/tokens/:address/cache", controller.deleteTokenCache);
 
-// CEO Dashboard (Admin Dashboard V2) - business-facing, separate from
-// the engineering routes above. See services/ceoDashboardService.js.
+// Business-facing analytics (formerly a separate "CEO Dashboard" page -
+// Admin V3 merged that page into admin.html/js/admin.js; the backend
+// route prefix "/admin/ceo/*" is kept as-is, unrenamed, per Admin V3's
+// own "don't rename existing endpoints" rule - it's an internal path,
+// not a user-facing concept, and every one of these already works).
+// See services/ceoDashboardService.js.
 
 router.get("/admin/ceo/engine-status", ceoController.getEngineStatus);
 router.get("/admin/ceo/signal-summary", ceoController.getSignalSummary);
@@ -46,6 +50,7 @@ router.get("/admin/ceo/failure-analysis", ceoController.getFailureAnalysis);
 router.get("/admin/ceo/wallet-performance", ceoController.getWalletPerformance);
 router.get("/admin/ceo/wallet-categories", ceoController.getWalletCategories);
 router.get("/admin/ceo/recommendations", ceoController.getRecommendations);
+router.get("/admin/ceo/engine-advisor", ceoController.getEngineAdvisor);
 router.get("/admin/ceo/engine-history", ceoController.getEngineHistory);
 router.get("/admin/ceo/export", ceoController.exportTable);
 

@@ -146,6 +146,26 @@ async function getEngineHistory(req, res, next){
 
 }
 
+// Admin V3 - structured advisor (reason/currentValue/recommendedValue/
+// expectedImprovement/confidence per advisory). Additive - does not
+// replace getRecommendations/GET /admin/ceo/recommendations, which
+// stays exactly as it was for backward compatibility.
+
+async function getEngineAdvisor(req, res, next){
+
+    try{
+
+        const range = parseDateRange(req.query);
+
+        if(!range.valid) return sendError(res, 400, "Invalid query parameters", range.error);
+
+        sendSuccess(res, ceoDashboardService.getEngineAdvisor(range));
+
+    }
+    catch(err){ next(err); }
+
+}
+
 // Section 10 - GET /admin/ceo/export?section=X&format=csv|xlsx&...
 // Every table on the CEO Dashboard maps to one `section` key here -
 // see ceoDashboardService.getExportableSections() for the real list.
@@ -213,6 +233,7 @@ module.exports = {
     getWalletPerformance,
     getWalletCategories,
     getRecommendations,
+    getEngineAdvisor,
     getEngineHistory,
     exportTable
 

@@ -22,6 +22,7 @@ const validationMetricsService = require("./validationMetricsService");
 const predictionMetricsService = require("./predictionMetricsService");
 const intelligenceEngine = require("./intelligenceEngine");
 const tradePlanService = require("./tradePlanService");
+const productionEngineResolver = require("./productionEngineResolver");
 const dexscreenerClient = require("../collectors/dexscreener/dexscreenerClient");
 const dexscreenerTransformer = require("./dexscreenerTransformer");
 
@@ -180,7 +181,18 @@ function deleteTokenCache(address){
 
 function getEngineConfig(){
 
+    const activeVersion = productionEngineResolver.getActiveVersion();
+    const activeMeta = productionEngineResolver.REGISTRY[activeVersion];
+
     return {
+
+        productionVersion: {
+            active: activeVersion,
+            status: activeMeta.status,
+            engineName: activeMeta.engineShortName,
+            exitStrategy: activeMeta.exitStrategyShortName,
+            promotedAt: activeMeta.promotedAt
+        },
 
         actionTiers: scoringConfig.actionTiers,
 

@@ -1445,6 +1445,13 @@ function renderEngineConfig(c){
 
     const html =
 
+        kvTable(`Current Active Engine: ${c.productionVersion.active === "production_v2" ? "Production_V2" : "Production_V1"}`, {
+            "Engine": c.productionVersion.engineName,
+            "Exit Strategy": c.productionVersion.exitStrategy,
+            "Status": c.productionVersion.status,
+            "Promoted At": c.productionVersion.promotedAt || "n/a"
+        }) +
+
         kvTable("Action Tiers (real 4-tier system: STRONG BUY / BUY / HOLD / AVOID)", c.actionTiers) +
 
         kvTable("Confidence Formula", c.confidence) +

@@ -16,6 +16,7 @@ const insertStmt = db.prepare(`
         wallet_summary_json, trade_plan_json,
         target_price, target_market_cap, stop_loss_price, stop_loss_market_cap,
         prediction_horizon_seconds,
+        engine_version, engine_name, exit_strategy,
         status, current_price, current_market_cap, current_roi_pct,
         mfe_pct, mae_pct, time_alive_seconds, last_checked_at
     ) VALUES (
@@ -25,6 +26,7 @@ const insertStmt = db.prepare(`
         @walletSummaryJson, @tradePlanJson,
         @targetPrice, @targetMarketCap, @stopLossPrice, @stopLossMarketCap,
         @predictionHorizonSeconds,
+        @engineVersion, @engineName, @exitStrategy,
         'OPEN', @entryPrice, @entryMarketCap, 0,
         0, 0, 0, CURRENT_TIMESTAMP
     )

@@ -29,7 +29,7 @@ const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository")
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
 const predictionHistoryRepository = require("../repositories/predictionHistoryRepository");
 const predictionTimelineRepository = require("../repositories/predictionTimelineRepository");
-const intelligenceEngine = require("./intelligenceEngine");
+const productionEngineResolver = require("./productionEngineResolver");
 const tradePlanService = require("./tradePlanService");
 
 function toSqliteTimestamp(date){
@@ -70,7 +70,12 @@ function createNewPredictions(){
 
     if(!tokens.length) return { created: 0, scanned: 0 };
 
-    const signals = intelligenceEngine.analyzeTokens(tokens);
+    // Which engine actually drives real predictions is decided entirely by
+    // config/productionVersionRegistry.js - see productionEngineResolver.js.
+    const activeEngine = productionEngineResolver.getActiveEngine();
+    const activeVersion = productionEngineResolver.getActiveVersion();
+    const activeVersionMeta = productionEngineResolver.REGISTRY[activeVersion];
+    const signals = activeEngine.analyzeTokens(tokens);
 
     let created = 0;
 
@@ -91,7 +96,7 @@ function createNewPredictions(){
 
         if(!readiness.ready) return;
 
-        const riskBands = tradePlanService.buildRiskBands(token, signal);
+        const riskBands = activeEngine.buildRiskBands(token, signal);
 
         if(!riskBands) return;
 
@@ -131,7 +136,13 @@ function createNewPredictions(){
 
             stopLossMarketCap: riskBands.stopLoss.marketCap,
 
-            predictionHorizonSeconds: config.defaultHorizonSeconds
+            predictionHorizonSeconds: config.defaultHorizonSeconds,
+
+            engineVersion: activeVersion,
+
+            engineName: activeVersionMeta.engineShortName,
+
+            exitStrategy: activeVersionMeta.exitStrategyShortName
 
         });
 

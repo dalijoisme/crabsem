@@ -46,6 +46,59 @@ function runMigrations(){
 
         const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
 
+        // A migration that rebuilds a table another table has a real
+        // FOREIGN KEY REFERENCES on (e.g. dropping/recreating
+        // prediction_history while prediction_timeline references it)
+        // cannot run inside the normal single-transaction wrapper below -
+        // SQLite's own docs mandate PRAGMA foreign_keys=OFF be toggled
+        // OUTSIDE any transaction for exactly this case (the pragma is a
+        // documented no-op if changed while a transaction is already
+        // open). Migrations opt into this path with a leading marker
+        // comment; every other migration keeps the original, safer
+        // single-transaction behavior unchanged.
+
+        if(sql.trimStart().startsWith("-- REQUIRES_FK_OFF")){
+
+            db.pragma("foreign_keys = OFF");
+
+            try{
+
+                const applyMigration = db.transaction(() => {
+
+                    db.exec(sql);
+
+                    db.prepare(
+                        "INSERT INTO schema_migrations (filename) VALUES (?)"
+                    ).run(file);
+
+                });
+
+                applyMigration();
+
+            }
+            finally{
+
+                db.pragma("foreign_keys = ON");
+
+                // Real integrity check, not just re-enabling the flag -
+                // if the rebuild left any dangling reference, fail loudly
+                // now rather than silently later.
+                const violations = db.pragma("foreign_key_check");
+
+                if(violations.length){
+
+                    throw new Error(`Migration ${file} left ${violations.length} foreign key violation(s): ${JSON.stringify(violations)}`);
+
+                }
+
+            }
+
+            console.log(`Migration applied (FK-off mode): ${file}`);
+
+            return;
+
+        }
+
         const applyMigration = db.transaction(() => {
 
             db.exec(sql);

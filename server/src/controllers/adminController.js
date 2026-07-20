@@ -69,6 +69,13 @@ async function getPredictionSummary(req, res, next){
 
 }
 
+async function getPredictionThroughput(req, res, next){
+
+    try{ sendSuccess(res, adminService.getPredictionThroughput()); }
+    catch(err){ next(err); }
+
+}
+
 async function refreshToken(req, res, next){
 
     try{
@@ -131,6 +138,8 @@ module.exports = {
     getEngineConfig,
 
     getPredictionSummary,
+
+    getPredictionThroughput,
 
     refreshToken,
 

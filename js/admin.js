@@ -1510,6 +1510,42 @@ function renderPredValidationSummary(summary){
 
 }
 
+// Engine Throughput (Prediction Pipeline Redesign) - real analytics
+// from decision_cycle_log. Proves the "engine looks static" problem is
+// fixed: recommendation changes/upgrades/downgrades are real counts,
+// not zero.
+
+function renderEngineThroughput(t){
+
+    const skipReasonRows = Object.entries(t.last24Hours.skipReasons || {})
+        .sort((a,b) => b[1]-a[1])
+        .map(([reason, count]) => `<tr><td>${reason}</td><td>${fmtNum(count)}</td></tr>`)
+        .join("");
+
+    document.getElementById("engineThroughput").innerHTML = `
+        <div class="adminGrid4">
+            <div class="adminStat"><span>Decisions Created (last hour)</span><strong>${fmtNum(t.lastHour.decisionsCreated)}</strong></div>
+            <div class="adminStat"><span>Decisions Skipped (last hour)</span><strong>${fmtNum(t.lastHour.decisionsSkipped)}</strong></div>
+            <div class="adminStat"><span>Tokens Scanned (last hour)</span><strong>${fmtNum(t.lastHour.tokensScanned)}</strong></div>
+            <div class="adminStat"><span>Average Confidence</span><strong>${t.lastHour.avgConfidence!=null?t.lastHour.avgConfidence.toFixed(1):"-"}</strong></div>
+            <div class="adminStat"><span>Recommendation Changes</span><strong>${fmtNum(t.lastHour.recommendationChanges)}</strong></div>
+            <div class="adminStat"><span>Signal Upgrades</span><strong>${fmtNum(t.lastHour.upgrades)}</strong></div>
+            <div class="adminStat"><span>Signal Downgrades</span><strong>${fmtNum(t.lastHour.downgrades)}</strong></div>
+            <div class="adminStat"><span>Positions Opened</span><strong>${fmtNum(t.lastHour.positionsOpened)}</strong></div>
+            <div class="adminStat"><span>Positions Closed on Reversal</span><strong>${fmtNum(t.lastHour.positionsClosedOnReversal)}</strong></div>
+            <div class="adminStat"><span>Scheduler Cycles (last hour)</span><strong>${fmtNum(t.lastHour.cycleCount)}</strong></div>
+        </div>
+        <div class="adminTableWrap" style="margin-top:16px;">
+            <table class="adminTable">
+                <caption>Skip Reasons (last 24 hours)</caption>
+                <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+                <tbody>${skipReasonRows || `<tr><td colspan="2">No skips recorded yet</td></tr>`}</tbody>
+            </table>
+        </div>
+    `;
+
+}
+
 // Signal Summary (Admin V3 Section 3) - count/percentage/trend per tier.
 
 function trendHtml(trendCount, trendPct){
@@ -2072,6 +2108,8 @@ async function loadPredictionAndAnalytics(){
     await Promise.all([
 
         loadOne(publicFetch(`/validation/predictions/summary${buildFilterParams()}`), renderPredValidationSummary, () => noData("predValidationSummary")),
+
+        loadOne(adminFetch("/admin/predictions/throughput"), renderEngineThroughput, () => noData("engineThroughput")),
 
         loadOne(publicFetch(`/validation/predictions/strong-buy${buildFilterParams()}`), renderStrongBuyCeo, () => noData("ceoStrongBuy")),
 

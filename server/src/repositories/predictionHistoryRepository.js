@@ -1,10 +1,22 @@
 // repositories/predictionHistoryRepository.js - the only place that
-// reads/writes prediction_history. The ENTRY/IMMUTABLE columns are
-// only ever written by insertPrediction() (once, at creation); every
-// other function here either reads, or writes ONLY the
-// status/tracking columns via updateTracking() - never the entry
-// columns. This split is what makes "immutable, never overwritten"
-// a real guarantee instead of just a comment.
+// reads/writes prediction_history.
+//
+// PIPELINE REDESIGN (see server/src/services/predictionValidationService.js
+// for the full picture): prediction_history is now a pure, append-only
+// DECISION LOG - a token can receive as many rows as the trigger-rule
+// engine decides are informative, never gated by "does a row already
+// exist" (the old UNIQUE(token_address) constraint is gone - see
+// migration 017). Position lifecycle (entry/target/stop/TP/SL/MFE/MAE)
+// now lives in trade_positions (tradePositionRepository.js).
+//
+// BACKWARD COMPATIBILITY: every existing read function below
+// (findOpen/findClosed/countsByStatus/etc.) is UNCHANGED and keeps
+// working correctly, because tradePositionRepository.js mirrors its
+// tracking updates back onto the ONE prediction_history row that
+// actually opened a position (via updateTracking(), also unchanged).
+// Decision rows that never open a position simply sit at
+// status='DECISION_ONLY' and are invisible to those position-shaped
+// queries, exactly as intended.
 
 const db = require("../database/connection");
 
@@ -17,6 +29,7 @@ const insertStmt = db.prepare(`
         target_price, target_market_cap, stop_loss_price, stop_loss_market_cap,
         prediction_horizon_seconds,
         engine_version, engine_name, exit_strategy,
+        trigger_reason, changed_from_recommendation, changed_from_confidence,
         status, current_price, current_market_cap, current_roi_pct,
         mfe_pct, mae_pct, time_alive_seconds, last_checked_at
     ) VALUES (
@@ -27,22 +40,33 @@ const insertStmt = db.prepare(`
         @targetPrice, @targetMarketCap, @stopLossPrice, @stopLossMarketCap,
         @predictionHorizonSeconds,
         @engineVersion, @engineName, @exitStrategy,
-        'OPEN', @entryPrice, @entryMarketCap, 0,
+        @triggerReason, @changedFromRecommendation, @changedFromConfidence,
+        @initialStatus, @entryPrice, @entryMarketCap, 0,
         0, 0, 0, CURRENT_TIMESTAMP
     )
-    ON CONFLICT(token_address) DO NOTHING
 `);
 
-// Returns true if a new (immutable, first-ever) prediction was
-// actually created for this token, false if one already existed -
-// the UNIQUE(token_address) constraint is the real enforcement; this
-// return value just tells the caller whether it did anything.
+// ALWAYS inserts now (no ON CONFLICT DO NOTHING - the constraint that
+// clause depended on no longer exists). Returns the new row's id so the
+// caller can link a trade_positions row to it via
+// opened_by_prediction_id, or record it as this token's newest decision
+// in token_last_decision.
+//
+// `initialStatus` defaults to 'DECISION_ONLY' (a pure decision-log
+// entry, no position opened) - the caller passes 'OPEN' explicitly only
+// when this exact decision is also the one opening a real position.
 
 function insertPrediction(row){
 
-    const info = insertStmt.run(row);
+    const info = insertStmt.run({
+        triggerReason: null,
+        changedFromRecommendation: null,
+        changedFromConfidence: null,
+        initialStatus: "DECISION_ONLY",
+        ...row
+    });
 
-    return info.changes > 0;
+    return info.lastInsertRowid;
 
 }
 
@@ -122,11 +146,24 @@ function findById(id){
 
 const TRADING_TIERS = ["STRONG BUY", "BUY"];
 
-function buildWhereClause({ status, recommendation, tradingOnly, from, to } = {}){
+// `excludeDecisionOnly` (pipeline redesign) - functions that predate
+// the decision-log redesign assumed "every row is a position" (status
+// one of OPEN/TP_HIT/SL_HIT/EXPIRED). Position-shaped stat functions
+// (findClosed/findClosedHold/findAllStatuses/countsByStatus) pass this
+// so new decision-only rows (status='DECISION_ONLY' - a recorded
+// opinion that never opened a real position) never silently inflate
+// Win Rate/Open Position counts. General browsing functions
+// (findMany/countMany/countsByRecommendation) deliberately do NOT pass
+// this - an admin browsing the decision timeline should see every
+// decision, position-opening or not.
+
+function buildWhereClause({ status, recommendation, tradingOnly, from, to, excludeDecisionOnly } = {}){
 
     const clauses = [];
 
     const params = {};
+
+    if(excludeDecisionOnly) clauses.push("status != 'DECISION_ONLY'");
 
     if(status){ clauses.push("status = @status"); params.status = status; }
 
@@ -176,7 +213,7 @@ function countMany({ status, recommendation, from, to } = {}){
 
 function countsByStatus({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ recommendation, tradingOnly, from, to });
+    const { where, params } = buildWhereClause({ recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
 
     return db.prepare(`
         SELECT status, COUNT(*) as count FROM prediction_history
@@ -223,7 +260,7 @@ function findEarliestPredictionTime(){
 
 function findAllStatuses({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to });
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
 
     return db.prepare(`SELECT * FROM prediction_history ${where}`).all(params);
 
@@ -231,7 +268,7 @@ function findAllStatuses({ recommendation, tradingOnly, from, to } = {}){
 
 function findClosed({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to });
+    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
 
     // findClosed always means "not OPEN" - folded in here rather than
     // via buildWhereClause's single-value `status` param, since this
@@ -251,7 +288,7 @@ function findClosed({ recommendation, tradingOnly, from, to } = {}){
 
 function findClosedHold({ from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation: "HOLD", from, to });
+    const { where, params } = buildWhereClause({ status: undefined, recommendation: "HOLD", from, to, excludeDecisionOnly: true });
 
     const clauses = [where.replace(/^WHERE /, "") || null, "status != 'OPEN'"].filter(Boolean);
 

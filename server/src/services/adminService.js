@@ -23,6 +23,7 @@ const predictionMetricsService = require("./predictionMetricsService");
 const intelligenceEngine = require("./intelligenceEngine");
 const tradePlanService = require("./tradePlanService");
 const productionEngineResolver = require("./productionEngineResolver");
+const decisionCycleLogRepository = require("../repositories/decisionCycleLogRepository");
 const dexscreenerClient = require("../collectors/dexscreener/dexscreenerClient");
 const dexscreenerTransformer = require("./dexscreenerTransformer");
 
@@ -237,6 +238,55 @@ function getPredictionSummary(){
 }
 
 // =====================================
+// ENGINE THROUGHPUT (Prediction Pipeline Redesign) - real analytics
+// from decision_cycle_log, one row per scheduler cycle. Answers: how
+// many decisions/hour is the engine actually recording, how many are
+// being skipped and why, how much is the recommendation actually
+// changing (proof the "engine looks static" problem is fixed).
+// =====================================
+
+function getPredictionThroughput(){
+
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString().slice(0,19).replace("T"," ");
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0,19).replace("T"," ");
+
+    const lastHour = decisionCycleLogRepository.summarizeSince(oneHourAgo);
+    const last24h = decisionCycleLogRepository.summarizeSince(twentyFourHoursAgo);
+    const skipReasons24h = decisionCycleLogRepository.aggregateSkipReasonsSince(twentyFourHoursAgo);
+    const recentCycles = decisionCycleLogRepository.findRecent(20);
+
+    return {
+        lastHour: {
+            decisionsCreated: lastHour.totalCreated,
+            decisionsSkipped: lastHour.totalSkipped,
+            tokensScanned: lastHour.totalScanned,
+            recommendationChanges: lastHour.totalRecommendationChanges,
+            upgrades: lastHour.totalUpgrades,
+            downgrades: lastHour.totalDowngrades,
+            positionsOpened: lastHour.totalPositionsOpened,
+            positionsClosedOnReversal: lastHour.totalPositionsClosedOnReversal,
+            avgConfidence: lastHour.avgConfidence,
+            cycleCount: lastHour.cycleCount
+        },
+        last24Hours: {
+            decisionsCreated: last24h.totalCreated,
+            decisionsSkipped: last24h.totalSkipped,
+            recommendationChanges: last24h.totalRecommendationChanges,
+            upgrades: last24h.totalUpgrades,
+            downgrades: last24h.totalDowngrades,
+            avgConfidence: last24h.avgConfidence,
+            skipReasons: skipReasons24h
+        },
+        recentCycles: recentCycles.map(c => ({
+            cycleAt: c.cycle_at, scanned: c.scanned, created: c.created, skipped: c.skipped,
+            recommendationChanges: c.recommendation_changes, upgrades: c.upgrades, downgrades: c.downgrades,
+            avgConfidence: c.avg_confidence, durationMs: c.duration_ms
+        }))
+    };
+
+}
+
+// =====================================
 // DASHBOARD (the login-page landing cards) - pure composition of
 // already-existing, already-tested read functions above; no new
 // prediction/validation logic is written here, only displayed.
@@ -310,6 +360,8 @@ module.exports = {
     getEngineConfig,
 
     getPredictionSummary,
+
+    getPredictionThroughput,
 
     getDashboard
 

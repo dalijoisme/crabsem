@@ -31,6 +31,7 @@ router.get("/admin/system", controller.getSystem);
 router.get("/admin/wallets/summary", controller.getWalletsSummary);
 router.get("/admin/engine/config", controller.getEngineConfig);
 router.get("/admin/predictions/summary", controller.getPredictionSummary);
+router.get("/admin/predictions/throughput", controller.getPredictionThroughput);
 
 router.post("/admin/tokens/:address/refresh", controller.refreshToken);
 router.post("/admin/tokens/:address/reanalyze", controller.reanalyzeToken);

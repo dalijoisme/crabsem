@@ -83,6 +83,7 @@ const tokenLastDecisionRepository = require("../repositories/tokenLastDecisionRe
 const decisionCycleLogRepository = require("../repositories/decisionCycleLogRepository");
 const productionEngineResolver = require("./productionEngineResolver");
 const tradePlanService = require("./tradePlanService");
+const qualityGateService = require("./qualityGateService");
 
 function toSqliteTimestamp(date){
     return date.toISOString().slice(0, 19).replace("T", " ");
@@ -101,40 +102,12 @@ function parseSqliteTimestamp(ts){
 // starting points, not validated final values.
 // =====================================
 
-const QUALITY_GATE = {
-    maxRugRatio: 0.70,
-    maxTop10HolderRate: 0.60,
-    maxBundlerMhrWithLowLiquidity: 0.95,
-    lowLiquidityThresholdUsd: 10000,
-    minSerialCreatorCount: 500,
-    maxSerialCreatorOpenRatio: 0.05
-};
-
-function passesQualityGate(token){
-    const trenches = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
-    if(!trenches) return { pass: true }; // no real data to reject on - never fabricate a rejection
-
-    if(trenches.rug_ratio != null && Number(trenches.rug_ratio) > QUALITY_GATE.maxRugRatio){
-        return { pass: false, reason: "REJECTED_RUG_RATIO_EXTREME" };
-    }
-    if(trenches.top_10_holder_rate != null && Number(trenches.top_10_holder_rate) > QUALITY_GATE.maxTop10HolderRate){
-        return { pass: false, reason: "REJECTED_HOLDER_CONCENTRATION_EXTREME" };
-    }
-
-    let raw = {};
-    try{ raw = JSON.parse(trenches.raw_json || "{}"); } catch(e){ /* real field parse failed - never guess, just skip these two checks */ }
-
-    const liquidity = Number(token.liquidity) || 0;
-    if(raw.bundler_mhr != null && Number(raw.bundler_mhr) > QUALITY_GATE.maxBundlerMhrWithLowLiquidity && liquidity < QUALITY_GATE.lowLiquidityThresholdUsd){
-        return { pass: false, reason: "REJECTED_BUNDLER_MANIPULATION_EXTREME" };
-    }
-    if(raw.creator_created_count != null && Number(raw.creator_created_count) > QUALITY_GATE.minSerialCreatorCount &&
-       raw.creator_created_open_ratio != null && Number(raw.creator_created_open_ratio) < QUALITY_GATE.maxSerialCreatorOpenRatio){
-        return { pass: false, reason: "REJECTED_SERIAL_SCAM_CREATOR_PATTERN" };
-    }
-
-    return { pass: true };
-}
+// Quality Gate moved to qualityGateService.js (Prediction Pipeline
+// Live-Recommendation sprint) so tokenQueryService.js's homepage/
+// trending surface can hard-exclude the exact same real rug/
+// manipulation cases as the decision pipeline, instead of drifting out
+// of sync with a second copy of these thresholds.
+const passesQualityGate = qualityGateService.passesQualityGate;
 
 // =====================================
 // TRIGGER-RULE ENGINE - decides whether a re-evaluation is informative
@@ -355,7 +328,8 @@ function evaluateAndRecordDecisions(){
             lastMarketCap: Number(token.market_cap) || null,
             lastVolume1h: token.volume_1h != null ? Number(token.volume_1h) : null,
             lastSmartMoneyScore: signal.breakdown?.participant?.smartMoney?.score ?? null,
-            lastWhaleScore: signal.breakdown?.participant?.whale?.score ?? null
+            lastWhaleScore: signal.breakdown?.participant?.whale?.score ?? null,
+            lastRisk: signal.risk ?? null
         });
 
     });

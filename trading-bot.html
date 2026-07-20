@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+
+<title>CRAB AGENT - Trading Bot</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/dashboard.css">
+<link rel="stylesheet" href="css/admin.css?v=9">
+<link rel="stylesheet" href="css/trading-bot.css?v=1">
+
+</head>
+
+<body>
+
+<div id="adminGate" class="adminGate">
+
+<div class="adminGateCard">
+
+<h2>CRAB AGENT Trading Bot</h2>
+
+<p>This page is for administrators only.</p>
+
+<input type="password" id="adminPassword" placeholder="Enter admin password" autocomplete="off">
+
+<button id="adminLoginBtn" class="primaryBtnAdmin">Enter</button>
+
+<div id="adminGateError" class="adminGateError"></div>
+
+</div>
+
+</div>
+
+<div id="adminApp" class="app adminApp hidden">
+
+<header class="topbar">
+
+<div class="logo">
+
+<img src="images/body.png">
+
+<div>
+
+<h2>CRAB AGENT</h2>
+
+<span>Trading Bot Dashboard</span>
+
+</div>
+
+</div>
+
+<div class="top-right">
+
+<div class="live-status" id="adminLiveStatus">
+
+<span class="live-dot" id="adminLiveDot"></span>
+
+<span id="adminLiveText">LIVE</span>
+
+</div>
+
+<button id="adminRefreshBtn" class="adminRefreshBtn">Refresh Now</button>
+
+<a href="admin.html" class="adminRefreshBtn" style="text-decoration:none; display:inline-flex; align-items:center;">Admin Panel</a>
+
+<button id="adminLogoutBtn" class="adminRefreshBtn">Log Out</button>
+
+</div>
+
+</header>
+
+<nav class="adminNav" id="adminNav">
+
+<a href="#secStatusBar">Status</a>
+<a href="#secConfig">Configuration</a>
+<a href="#secPortfolio">Portfolio</a>
+<a href="#secPositions">Open Positions</a>
+<a href="#secHistory">Trade History</a>
+<a href="#secLog">Live Log</a>
+<a href="#secFuture">Future Integration</a>
+
+</nav>
+
+<div id="adminLoading" class="adminLoading">
+
+Loading real data from the backend...
+
+</div>
+
+<div id="adminContent" class="adminContent hidden">
+
+<section class="adminSection" id="secStatusBar">
+    <div class="ceoSectionHead"><h4>Trading Status</h4></div>
+    <div id="tbStatusBar"></div>
+
+    <div class="tbControlRow" id="tbControlRow">
+        <button id="tbStartBtn" class="tbBtn tbBtnStart">START BOT</button>
+        <button id="tbStopBtn" class="tbBtn tbBtnStop">STOP BOT</button>
+        <button id="tbPauseBtn" class="tbBtn tbBtnPause">PAUSE BOT</button>
+        <button id="tbForceSellBtn" class="tbBtn tbBtnWarn">Force SELL ALL</button>
+        <button id="tbEmergencyBtn" class="tbBtn tbBtnEmergency">EMERGENCY STOP</button>
+    </div>
+    <div id="tbControlMsg" class="tbControlMsg"></div>
+</section>
+
+<section class="adminSection" id="secConfig">
+    <div class="ceoSectionHead"><h4>Bot Configuration</h4></div>
+    <div id="tbConfigForm"></div>
+</section>
+
+<section class="adminSection" id="secPortfolio">
+    <div class="ceoSectionHead"><h4>Portfolio</h4></div>
+    <div id="tbPortfolio"></div>
+</section>
+
+<section class="adminSection" id="secPositions">
+    <div class="ceoSectionHead"><h4>Open Positions</h4></div>
+    <div id="tbPositions"></div>
+</section>
+
+<section class="adminSection" id="secHistory">
+    <div class="ceoSectionHead"><h4>Trade History</h4></div>
+    <div id="tbTrades"></div>
+</section>
+
+<section class="adminSection" id="secLog">
+    <div class="ceoSectionHead"><h4>Live Log</h4></div>
+    <div id="tbLog" class="tbLogFeed"></div>
+</section>
+
+<section class="adminSection" id="secFuture">
+    <div class="ceoSectionHead"><h4>Future Integration</h4></div>
+    <div id="tbFuture" class="ceoSignalGrid"></div>
+</section>
+
+</div>
+
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/tradingBot.js?v=1"></script>
+
+</body>
+</html>

@@ -73,7 +73,17 @@ const BackendAPI = (function(){
 
             try{
 
-                const res = await fetch(url, { signal: controller.signal });
+                // cache: "no-store" (Recommendation Lifecycle redesign) -
+                // this API's data is meant to change from one request to
+                // the next (decay, live exclusion, etc.). Relying on the
+                // server's Cache-Control header alone isn't enough: a
+                // response already cached by the browser BEFORE that
+                // header existed keeps being replayed under its own
+                // original (heuristic) freshness rules regardless of what
+                // the server sends on later requests. Forcing it here
+                // means every fetch actually hits the network, no matter
+                // what got cached in an earlier session.
+                const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
 
                 const json = await res.json().catch(() => null);
 

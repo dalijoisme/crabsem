@@ -882,4 +882,4 @@ function analyzeTokens(tokens){
 
 }
 
-module.exports = { analyzeToken, analyzeTokens, PARTICIPANT_MAX, MARKET_MAX };
+module.exports = { analyzeToken, analyzeTokens, PARTICIPANT_MAX, MARKET_MAX, ageSecondsSince, lifecycleForAge };

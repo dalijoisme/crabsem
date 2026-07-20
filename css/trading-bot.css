@@ -1,0 +1,215 @@
+/* css/trading-bot.css - Trading Bot Dashboard, additive only.
+   Reuses css/dashboard.css's :root tokens (--bg/--panel/--purple/etc.)
+   and css/admin.css's shared components (.adminSection/.adminGrid4/
+   .adminStat/.adminTableWrap/.adminTable/.ceoSectionHead/.ceoSignalGrid) -
+   nothing here redefines those. Only new, page-specific pieces:
+   status bar, control buttons, live log feed, position/trade tables'
+   SELL button and status pills. */
+
+/* ---- Status bar ---- */
+
+.tbStatusGrid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));
+    gap:12px;
+    margin-bottom:16px;
+}
+
+.tbStatusCard{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:14px 16px;
+}
+
+.tbStatusCard .tbLabel{
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--muted);
+    margin-bottom:6px;
+}
+
+.tbStatusCard .tbValue{
+    font-size:16px;
+    font-weight:600;
+    color:var(--text);
+    display:flex;
+    align-items:center;
+    gap:8px;
+}
+
+.tbDot{
+    width:9px;
+    height:9px;
+    border-radius:50%;
+    display:inline-block;
+    flex-shrink:0;
+}
+
+.tbDot.STOPPED{ background:var(--muted); }
+.tbDot.RUNNING{ background:var(--green); box-shadow:0 0 8px var(--green); }
+.tbDot.PAUSED{ background:var(--yellow); box-shadow:0 0 8px var(--yellow); }
+
+/* ---- Control buttons ---- */
+
+.tbControlRow{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-top:18px;
+}
+
+.tbBtn{
+    font-family:inherit;
+    font-size:12.5px;
+    font-weight:700;
+    letter-spacing:.3px;
+    padding:10px 18px;
+    border-radius:8px;
+    border:1px solid var(--border);
+    cursor:pointer;
+    background:var(--panel2);
+    color:var(--text);
+    transition:filter .15s ease, transform .1s ease;
+}
+
+.tbBtn:hover{ filter:brightness(1.15); }
+.tbBtn:active{ transform:translateY(1px); }
+.tbBtn:disabled{ opacity:.45; cursor:not-allowed; filter:none; }
+
+.tbBtnStart{ background:rgba(24,214,123,.15); border-color:rgba(24,214,123,.4); color:var(--green); }
+.tbBtnStop{ background:rgba(141,144,168,.15); border-color:var(--border); color:var(--text); }
+.tbBtnPause{ background:rgba(246,185,59,.15); border-color:rgba(246,185,59,.4); color:var(--yellow); }
+.tbBtnWarn{ background:rgba(246,185,59,.1); border-color:rgba(246,185,59,.3); color:var(--yellow); }
+.tbBtnEmergency{ background:rgba(255,90,90,.15); border-color:rgba(255,90,90,.45); color:var(--red); }
+
+.tbControlMsg{
+    font-size:12.5px;
+    color:var(--muted);
+    margin-top:10px;
+    min-height:16px;
+}
+
+.tbControlMsg.tbMsgError{ color:var(--red); }
+.tbControlMsg.tbMsgOk{ color:var(--green); }
+
+/* ---- Config form ---- */
+
+.tbConfigGrid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+    gap:14px;
+}
+
+.tbConfigField{
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+}
+
+.tbConfigField label{
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--muted);
+}
+
+.tbConfigField input,
+.tbConfigField select{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:9px 11px;
+    color:var(--text);
+    font-family:inherit;
+    font-size:13px;
+}
+
+.tbConfigSaveRow{
+    margin-top:16px;
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+/* ---- Empty states (no mock data - honest, quiet placeholders) ---- */
+
+.tbEmptyState{
+    padding:28px 16px;
+    text-align:center;
+    color:var(--muted);
+    font-size:13px;
+    border:1px dashed var(--border);
+    border-radius:12px;
+}
+
+/* ---- Position / trade tables ---- */
+
+.tbSellBtn{
+    font-size:11px;
+    font-weight:700;
+    padding:5px 12px;
+    border-radius:6px;
+    border:1px solid rgba(255,90,90,.4);
+    background:rgba(255,90,90,.12);
+    color:var(--red);
+    cursor:pointer;
+}
+
+.tbSellBtn:hover{ filter:brightness(1.2); }
+
+.tbPill{
+    display:inline-block;
+    font-size:10px;
+    font-weight:700;
+    text-transform:uppercase;
+    padding:2px 9px;
+    border-radius:999px;
+    letter-spacing:.3px;
+}
+
+.tbPill.tbPos{ background:rgba(24,214,123,.13); color:var(--green); }
+.tbPill.tbNeg{ background:rgba(255,90,90,.13); color:var(--red); }
+.tbPill.tbNeutral{ background:rgba(141,144,168,.16); color:var(--muted); }
+
+/* ---- Live log feed (terminal feel) ---- */
+
+.tbLogFeed{
+    background:#050508;
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:14px 16px;
+    font-family:ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+    font-size:12px;
+    line-height:1.75;
+    max-height:420px;
+    overflow-y:auto;
+}
+
+.tbLogLine{
+    white-space:pre-wrap;
+    word-break:break-word;
+    border-bottom:1px solid rgba(255,255,255,.04);
+    padding:5px 0;
+}
+
+.tbLogLine:last-child{ border-bottom:none; }
+
+.tbLogTag{
+    display:inline-block;
+    font-weight:700;
+    padding:1px 7px;
+    border-radius:5px;
+    margin-right:8px;
+    font-size:10.5px;
+}
+
+.tbLogTag.BUY{ background:rgba(24,214,123,.16); color:var(--green); }
+.tbLogTag.SELL{ background:rgba(139,92,246,.18); color:var(--purple); }
+.tbLogTag.SYSTEM{ background:rgba(90,169,255,.15); color:#5aa9ff; }
+.tbLogTag.ERROR{ background:rgba(255,90,90,.16); color:var(--red); }
+.tbLogTag.WARNING{ background:rgba(246,185,59,.16); color:var(--yellow); }
+.tbLogTag.INFO{ background:rgba(141,144,168,.16); color:var(--muted); }
+
+.tbLogTime{ color:var(--muted); margin-right:8px; }

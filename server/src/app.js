@@ -6,6 +6,31 @@ const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
 
+// Disable Express's default weak ETag generation and force
+// no-store on every /api response (Recommendation Lifecycle redesign,
+// investigating a real report of a rugged token still showing at #1
+// on trending). Root cause: this is a real-time API - every value
+// (recommendation, confidence, decay) is meant to change from one
+// request to the next - but Express enables weak ETags by default,
+// and without an explicit Cache-Control, browsers are free to serve a
+// GET response straight from their own heuristic cache instead of
+// hitting the network again. A user's browser could keep showing an
+// old, since-excluded /trending or /token/:address response long
+// after the server-side fix went live and would have zero way to
+// know it was stale. This was never a live-recommendation-logic bug -
+// it was the transport allowing an old, correct-at-the-time response
+// to be replayed indefinitely.
+
+app.set("etag", false);
+
+app.use((req, res, next) => {
+
+    res.set("Cache-Control", "no-store");
+
+    next();
+
+});
+
 // Wide-open CORS (no allowlist) is fine for local development, but
 // was found unconditional in every environment - see the
 // production-readiness audit. When CORS_ALLOWED_ORIGINS is set (a

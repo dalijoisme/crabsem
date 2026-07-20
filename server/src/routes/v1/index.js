@@ -14,6 +14,7 @@ const walletsRoutes = require("./wallets");
 const userHistoryRoutes = require("./userHistory");
 const adminRoutes = require("./admin");
 const predictionValidationRoutes = require("./predictionValidation");
+const tradingBotRoutes = require("./tradingBot");
 
 const router = express.Router();
 
@@ -28,5 +29,6 @@ router.use(walletsRoutes);
 router.use(userHistoryRoutes);
 router.use(adminRoutes);
 router.use(predictionValidationRoutes);
+router.use(tradingBotRoutes);
 
 module.exports = router;

@@ -99,6 +99,8 @@ function signalColor(action){
 
         "HOLD":"#f5a623",
 
+        "WATCHLIST":"#94a3b8",
+
         "AVOID":"#ff4d4d"
 
     }[action] || "#ff4d4d";
@@ -114,6 +116,8 @@ function signalBadgeText(action){
         "BUY":"✅ BUY",
 
         "HOLD":"👀 HOLD",
+
+        "WATCHLIST":"🕓 WATCHLIST",
 
         "AVOID":"⚠ AVOID"
 
@@ -1049,7 +1053,7 @@ const UI = {
 
         <div style="display:flex; align-items:center; gap:10px; margin:14px 0 4px 0; flex-wrap:wrap;">
 
-            <div style="
+            <div id="detailActionBadge" style="
                 display:inline-block;
                 background:${color};
                 color:white;
@@ -1072,9 +1076,9 @@ const UI = {
 
         </div>
 
-        <div style="font-size:12px;color:#8d90a8;margin-top:8px;">
+        <div id="detailStatsLine" style="font-size:12px;color:#8d90a8;margin-top:8px;">
 
-            Stage ${signal.stage} · Participant ${signal.participantScore}/${signal.participantMax} · Market Health ${signal.marketHealth}/${signal.marketHealthMax} · Confidence ${signal.confidence}%
+            Stage ${signal.stage} · Participant ${signal.participantScore}/${signal.participantMax} · Market Health ${signal.marketHealth}/${signal.marketHealthMax} · Confidence <span id="detailConfidenceValue">${signal.confidence}</span>%
 
         </div>
 
@@ -1118,7 +1122,7 @@ const UI = {
 
                 <span>Risk</span>
 
-                <strong class="${signal.risk==="LOW"?"changedNo":"changedYes"}">${signal.risk}</strong>
+                <strong id="detailRiskValue" class="${signal.risk==="LOW"?"changedNo":"changedYes"}">${signal.risk}</strong>
 
             </div>
 
@@ -1188,7 +1192,7 @@ const UI = {
 
                 <small>Price</small>
 
-                <strong>${formatPrice(token.price)}</strong>
+                <strong id="detailPriceValue">${formatPrice(token.price)}</strong>
 
             </div>
 
@@ -1196,7 +1200,7 @@ const UI = {
 
                 <small>Market Cap</small>
 
-                <strong>${marketCapLabelValue(token)}</strong>
+                <strong id="detailMarketCapValue">${marketCapLabelValue(token)}</strong>
 
             </div>
 
@@ -1204,7 +1208,7 @@ const UI = {
 
                 <small>Liquidity</small>
 
-                <strong>$${format(token.liquidity)}</strong>
+                <strong id="detailLiquidityValue">$${format(token.liquidity)}</strong>
 
             </div>
 
@@ -1448,6 +1452,48 @@ ${(typeof WalletDetect !== "undefined" && WalletDetect.isInWalletBrowser && Wall
 
         box.innerHTML =
             `<div class="monitorRow"><span>Top 10 Holders</span><strong class="changedNo">Temporarily disabled</strong></div>`;
+
+    },
+
+    // =====================================
+    // BACKGROUND DETAIL REFRESH - THE ONLY WAY the open detail panel's
+    // content is ever touched while the same token stays selected (see
+    // dashboard.js's showDetail() - it funnels every caller, including
+    // the 30s background poll, through one guard: same token already
+    // open -> call this and stop, full stop, no exceptions). Patches
+    // only the specific live values via textContent/class writes -
+    // NEVER innerHTML, NEVER on the panel container, NEVER a rebuilt
+    // subtree. renderDetail() builds dozens of interdependent sections
+    // (why-list, confirmations, security, wallet activity, decision
+    // timeline) from one template string; none of that is touched here
+    // by design - it stays exactly as it was when the panel was opened,
+    // which is the only way to guarantee scroll position, focus, and
+    // selection can never be disturbed by a routine poll.
+    // =====================================
+
+    updateDetailValues(token){
+
+        const signal = token.signal;
+
+        const set = (id, text) => { const el = document.getElementById(id); if(el) el.textContent = text; };
+
+        const badge = document.getElementById("detailActionBadge");
+        if(badge){
+            badge.textContent = signal.action;
+            badge.style.background = signalColor(signal.action);
+        }
+
+        set("detailConfidenceValue", signal.confidence);
+
+        const riskEl = document.getElementById("detailRiskValue");
+        if(riskEl){
+            riskEl.textContent = signal.risk;
+            riskEl.className = signal.risk === "LOW" ? "changedNo" : "changedYes";
+        }
+
+        set("detailPriceValue", formatPrice(token.price));
+        set("detailMarketCapValue", marketCapLabelValue(token));
+        set("detailLiquidityValue", "$" + format(token.liquidity));
 
     }
 

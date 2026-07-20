@@ -17,11 +17,11 @@ const upsertStmt = db.prepare(`
     INSERT INTO token_last_decision (
         token_address, last_prediction_id, last_recommendation, last_confidence,
         last_participant_score, last_market_health, last_liquidity, last_market_cap, last_volume_1h,
-        last_smart_money_score, last_whale_score, last_decision_at
+        last_smart_money_score, last_whale_score, last_risk, last_decision_at
     ) VALUES (
         @tokenAddress, @lastPredictionId, @lastRecommendation, @lastConfidence,
         @lastParticipantScore, @lastMarketHealth, @lastLiquidity, @lastMarketCap, @lastVolume1h,
-        @lastSmartMoneyScore, @lastWhaleScore, CURRENT_TIMESTAMP
+        @lastSmartMoneyScore, @lastWhaleScore, @lastRisk, CURRENT_TIMESTAMP
     )
     ON CONFLICT(token_address) DO UPDATE SET
         last_prediction_id = excluded.last_prediction_id,
@@ -34,11 +34,16 @@ const upsertStmt = db.prepare(`
         last_volume_1h = excluded.last_volume_1h,
         last_smart_money_score = excluded.last_smart_money_score,
         last_whale_score = excluded.last_whale_score,
+        last_risk = excluded.last_risk,
         last_decision_at = excluded.last_decision_at
 `);
 
 function upsert(row){
-    upsertStmt.run(row);
+    upsertStmt.run({ lastRisk: null, ...row });
 }
 
-module.exports = { findByToken, upsert };
+function findAll(){
+    return db.prepare("SELECT * FROM token_last_decision").all();
+}
+
+module.exports = { findByToken, upsert, findAll };

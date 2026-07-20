@@ -7,15 +7,34 @@ const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const intelligenceEngine = require("./intelligenceEngine");
 const tradePlanService = require("./tradePlanService");
 const globalSearchService = require("./globalSearchService");
+const liveRecommendationService = require("./liveRecommendationService");
 
-// Attaches a real, freshly-computed signal to a token row. Computed
-// at read time (not stored) so it never goes stale against an old
-// row - every call reads whatever is currently in SQLite across
-// every collected source (see intelligenceEngine.js).
+// Attaches a real signal to a token row: intelligenceEngine still
+// supplies the rich breakdown/reasons/intelligence sections (real,
+// useful per-module detail, computed fresh every call so it never
+// goes stale), but the DECISIVE fields - action, confidence, risk,
+// and whether this token belongs on trending at all - now come from
+// liveRecommendationService, which overlays the SAME decision-log
+// record (token_last_decision) that drives the Decision Timeline,
+// decayed by real elapsed time since it was last reconfirmed. This is
+// what makes the homepage card and the Timeline agree (see the
+// Recommendation Lifecycle redesign report).
 
 function withSignal(token){
 
-    return { ...token, signal: intelligenceEngine.analyzeToken(token) };
+    const baseSignal = intelligenceEngine.analyzeToken(token);
+    const live = liveRecommendationService.resolveLiveRecommendation(token, baseSignal);
+
+    return {
+        ...token,
+        signal: {
+            ...baseSignal,
+            action: live.action,
+            confidence: live.confidence,
+            risk: live.risk
+        },
+        liveState: live
+    };
 
 }
 
@@ -28,7 +47,18 @@ function attachSignals(tokens){
 
     const signals = intelligenceEngine.analyzeTokens(tokens);
 
-    return tokens.map((token, i) => ({ ...token, signal: signals[i] }));
+    return tokens.map((token, i) => {
+
+        const baseSignal = signals[i];
+        const live = liveRecommendationService.resolveLiveRecommendation(token, baseSignal);
+
+        return {
+            ...token,
+            signal: { ...baseSignal, action: live.action, confidence: live.confidence, risk: live.risk },
+            liveState: live
+        };
+
+    });
 
 }
 
@@ -97,13 +127,21 @@ function getTokenByAddress(address){
 // live recommendations; they remain reachable via search/detail with
 // their staleness clearly labeled.
 
-const ACTION_RANK = { "STRONG BUY": 0, "BUY": 1, "HOLD": 2, "AVOID": 3 };
+const ACTION_RANK = { "STRONG BUY": 0, "BUY": 1, "HOLD": 2, "WATCHLIST": 3, "AVOID": 4 };
+
+// Trending-only hard exclusion (Recommendation Lifecycle redesign,
+// Bug #3): a token that fails the Quality Gate, is flagged Dumped/Dead
+// by tokenStatusService's real price-drawdown/age facts, or has fully
+// decayed with no reconfirmation, is never shown as an active
+// recommendation - not just ranked last. It stays fully reachable via
+// /tokens and /token/:address (search/detail), same precedent as the
+// pre-existing ARCHIVED exclusion below.
 
 function rankRecommendations(tokensWithSignal){
 
     return tokensWithSignal
 
-        .filter(t => t.signal.lifecycle !== "ARCHIVED")
+        .filter(t => t.signal.lifecycle !== "ARCHIVED" && !t.liveState?.excludeFromTrending)
 
         .sort((a, b) => {
 
@@ -128,6 +166,22 @@ function getTrending(limit){
     // Pull extra headroom before filtering/sorting: archived tokens
     // get excluded and the sort order changes from the raw SQL order,
     // so a straight LIMIT at the DB layer could under-fill the page.
+    //
+    // ROOT CAUSE FIX (Recommendation Lifecycle redesign, Bug #1): this
+    // used to sort the candidate pool by volume_1h DESC. volume_1h is
+    // a plain column value, written once per collector tick and then
+    // FROZEN the moment a token drops out of the collector's scan (see
+    // gmgnTokenRepository upsert) - so "highest volume_1h" was
+    // dominated by tokens with a large HISTORICAL spike whose row
+    // hadn't been touched in hours, not tokens that are actually live
+    // right now. Measured on the real local DB: sorting by volume_1h
+    // put 320 of the top 400 candidates (80%) into ARCHIVED lifecycle,
+    // starving the real trending list down to ~23 survivors. Sorting
+    // by updated_at DESC instead means the candidate pool is built
+    // from tokens the collector is CURRENTLY tracking first - exactly
+    // "depend on live state, not initial prediction, market freshness"
+    // from the bug report - before rankRecommendations even applies
+    // its own signal-based ordering.
 
     const candidates = gmgnTokenRepository.findMany({
 
@@ -135,7 +189,7 @@ function getTrending(limit){
 
         offset: 0,
 
-        sortColumn: "volume_1h",
+        sortColumn: "updated_at",
 
         direction: "DESC",
 

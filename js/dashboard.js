@@ -1185,9 +1185,34 @@ let detailHistoryPushed = false;
 
 const MOBILE_DETAIL_BREAKPOINT = 1100;
 
+// SINGLE UPDATE PATH for the detail panel (Bug #7/#8 - required after
+// a real-world report that a background full re-render, even with
+// scrollTop restored, still felt like "the page refreshes on me").
+// EVERY caller - a card/search click, session restore, AND the 30s
+// background poll (refreshOpenDetail() below) - goes through this one
+// function. The guard at the top is absolute, no exceptions: if the
+// panel's own dataset marks it as already showing this exact address,
+// this is a REFRESH of an open read, not a new OPEN action - patch the
+// live values in place via UI.updateDetailValues() and stop, before
+// any of the "opening" side effects below (innerHTML replace,
+// scrollTop reset, browser history push, Smart Recall lookup) - all of
+// which would be actively wrong to repeat every 30 seconds.
+
 async function showDetail(token){
 
+    const address = token.token_address;
+
+    if(address && detailContent.dataset.openAddress === address){
+
+        UI.updateDetailValues(token);
+
+        return;
+
+    }
+
     detailContent.innerHTML = UI.renderDetail(token);
+
+    detailContent.dataset.openAddress = address || "";
 
     detailContent.scrollTop=0;
 
@@ -1208,8 +1233,6 @@ async function showDetail(token){
         detailHistoryPushed = true;
 
     }
-
-    const address = token.token_address;
 
     if(address){
 
@@ -1276,6 +1299,55 @@ function closeDetailOverlay(){
     }
 
     sessionStorage.removeItem("crab_selected_coin");
+
+    detailContent.dataset.openAddress = "";
+
+}
+
+// ======================================
+// BACKGROUND DETAIL REFRESH (Bug #7/#8)
+//
+// FIRST ATTEMPT (superseded): compared the grid's full tokenFingerprint
+// and did a full detailContent.innerHTML replace whenever any of it
+// changed - still felt like "the page refreshes on me" in real testing.
+//
+// SECOND ATTEMPT (superseded): patched values in place every tick, but
+// still fell back to a full re-render whenever the recommendation TIER
+// itself changed. Explicitly rejected per requirement: NO full render
+// is acceptable while the same token stays open, no exceptions.
+//
+// FIX: this function no longer contains any render logic of its own at
+// all. It fetches the latest data and hands it to showDetail() - the
+// SAME function a card/search click uses - which is the one place the
+// "already open -> patch only, never re-render" guard lives. One
+// update path, used by every caller, with no separate copy of the
+// decision here that could drift out of sync with it.
+// ======================================
+
+async function refreshOpenDetail(){
+
+    const address = sessionStorage.getItem("crab_selected_coin");
+
+    if(!address) return;
+
+    try{
+
+        const full = await BackendAPI.getToken(address);
+
+        if(sessionStorage.getItem("crab_selected_coin") !== address) return;
+
+        trackRecommendationChanges([full]);
+
+        showDetail(full);
+
+    }
+    catch(err){
+
+        if(err.name === "AbortError") return;
+
+        console.error("Failed to refresh open token detail", err);
+
+    }
 
 }
 
@@ -1439,6 +1511,12 @@ else{
 setInterval(updateLiveMonitoring,1000);
 
 setInterval(()=>{
+
+    // Runs regardless of mode/search state below - a detail panel can
+    // be open no matter what the grid behind it is currently showing,
+    // and reading it is never "not time-critical" the way a background
+    // list tab is.
+    refreshOpenDetail();
 
     if(activeCustomMode) return; // Recently Viewed/Watchlist/Favorites aren't time-critical - manual refresh only (re-click the tab)
 

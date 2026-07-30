@@ -71,6 +71,12 @@ const config = Object.freeze({
     // and "finalized" (slow, unrollbackable).
     SOLANA_COMMITMENT: process.env.SOLANA_COMMITMENT || "confirmed",
 
+    // Trust/UX sprint - which cluster utils/explorerUrl.js links a real
+    // tx_hash to. Purely a link-building label, never passed to
+    // solanaConnectionProvider.js/SOLANA_RPC_URL - changing this does
+    // not change which network transactions actually execute against.
+    SOLANA_CLUSTER: process.env.SOLANA_CLUSTER || "mainnet-beta",
+
     // How long transactionConfirmationService.js polls before giving
     // up and reporting TIMEOUT (not FAILED - see executorStateMachine.js's
     // header comment for why those are deliberately different outcomes).

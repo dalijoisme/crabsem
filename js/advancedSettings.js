@@ -236,8 +236,11 @@ document.getElementById("tbDetailToggleBtn").onclick = (e) => {
 // =====================================
 
 document.getElementById("tbForceSellBtn").onclick = async () => {
-    if(!confirm("Force SELL ALL open positions? (No executor connected yet - this only logs the intent.)")) return;
-    try{ const r = await adminFetch("/tradingbot/force-sell-all", { method: "POST" }); setControlMsg(`Force Sell All requested - ${r.positionsAffected} position(s) affected.`, "tbMsgOk"); }
+    if(!confirm("Force SELL ALL open positions at the current market price? This will attempt to close every open position for real.")) return;
+    try{
+        const r = await adminFetch("/tradingbot/force-sell-all", { method: "POST" });
+        setControlMsg(`Force Sell All completed - ${r.positionsAffected} of ${r.positionsAttempted} open position(s) closed.`, "tbMsgOk");
+    }
     catch(e){ setControlMsg(e.message, "tbMsgError"); }
 };
 document.getElementById("tbEmergencyBtn").onclick = async () => {

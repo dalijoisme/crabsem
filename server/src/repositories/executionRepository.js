@@ -43,6 +43,21 @@ function findByUser(userId, limit){
     return db.prepare("SELECT * FROM executions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?").all(userId, limit || 100);
 }
 
+// Phase 2 (Live Validation & Bottleneck Elimination): real, already-
+// recorded BUY execution failures within a rolling window - the
+// Bottleneck Report's real "Execution Failed" count and the real latest
+// error_message, never a guessed RPC/wallet-error split (see
+// services/tradingBotService.js's own comment on why that split isn't
+// invented).
+function findFailedBuysSince(userId, hours){
+    return db.prepare(`
+        SELECT * FROM executions
+        WHERE user_id = ? AND action = 'BUY' AND status IN ('FAILED', 'TIMEOUT')
+          AND datetime(created_at) >= datetime('now', '-' || ? || ' hours')
+        ORDER BY created_at DESC
+    `).all(userId, hours);
+}
+
 // One non-terminal execution per user at a time - the service layer
 // checks this BEFORE calling insertExecution (same "check, then insert"
 // convention services/walletService.js's generateTradingWallet() already
@@ -139,7 +154,7 @@ function forUser(userId){
 }
 
 module.exports = {
-    insertExecution, findById, findByUser, findActiveByUser, findPendingWithTxHash,
+    insertExecution, findById, findByUser, findActiveByUser, findPendingWithTxHash, findFailedBuysSince,
     transitionExecution,
     insertLog, findLogByExecutionId,
     forUser

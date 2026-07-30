@@ -118,6 +118,15 @@ function profileKeyFor(philosophy){
 // downstream, per-user, by entryGateService.evaluateEntry(). Mirrors
 // services/benchmarkRunner.js's computeProfileSignals inner loop
 // exactly, minus that file's benchmark-only funnel/sightings bookkeeping.
+//
+// Ranking-priority fix (this token's own real acceleration signal was
+// being computed HERE and then thrown away, forcing
+// opportunityPriorityService.js/emiService.js to fall back to reading
+// prediction_history - the STABLE-only house cache - for "how fresh is
+// this candidate," which is meaningless for a profile whose real scoring
+// never touches that table. Carrying signal.acceleration through fixes
+// candidate ORDERING without touching the entry gate, tiers, or
+// candidate count at all - see tradingBotEngine.js's orderCandidates.
 async function computeLiveByAddressForPhilosophy(tokens, philosophy){
 
     const signals = await scoringWorkerPool.scoreTokens(tokens, philosophy);
@@ -132,7 +141,8 @@ async function computeLiveByAddressForPhilosophy(tokens, philosophy){
             liveMap.set(token.token_address, {
                 action: "AVOID", confidence: 0, risk: "HIGH",
                 excludeFromTrending: true, exclusionReason: structural.reason,
-                hasDecision: false, decayFraction: 0, tokenStatus: structural.tokenStatus
+                hasDecision: false, decayFraction: 0, tokenStatus: structural.tokenStatus,
+                acceleration: null
             });
             continue;
         }
@@ -143,7 +153,28 @@ async function computeLiveByAddressForPhilosophy(tokens, philosophy){
             excludeFromTrending: false, exclusionReason: null,
             hasDecision: true, decayFraction: 1,
             participantScore: signal.participantScore, marketHealth: signal.marketHealth,
-            tokenStatus: structural.tokenStatus
+            // Live Decision Center / Signal Center sprint: the max
+            // denominators for the two scores above - fixed engine
+            // constants (config/scoringConfig.js), carried through here so
+            // Position Detail's Confidence Breakdown can recompute
+            // participantPct/marketPct without importing the engine
+            // itself.
+            participantMax: signal.participantMax, marketHealthMax: signal.marketHealthMax,
+            tokenStatus: structural.tokenStatus,
+            acceleration: signal.acceleration,
+            // Trust/UX sprint: the full module-by-module breakdown and
+            // real reasons researchEngineFactory.js already computes -
+            // was being discarded right here, exactly like acceleration
+            // used to be before the ranking-priority fix above. Flows
+            // through entryGateService/tradeManager.openPosition
+            // untouched (live is passed by reference the whole way) so
+            // a real position can finally explain itself later.
+            reasons: signal.reasons, breakdown: signal.breakdown,
+            // Live Decision Center / Signal Center sprint: same shape of
+            // fix, one more time - riskReasons/freshnessPenalty already
+            // computed by researchEngineFactory.js to produce `risk`/
+            // `confidence` themselves, previously discarded right here.
+            riskReasons: signal.riskReasons, freshnessPenalty: signal.freshnessPenalty
         });
 
     }

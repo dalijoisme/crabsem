@@ -15,7 +15,7 @@
 
 <link rel="stylesheet" href="css/dashboard.css">
 <link rel="stylesheet" href="css/admin.css?v=9">
-<link rel="stylesheet" href="css/trading-bot.css?v=2">
+<link rel="stylesheet" href="css/trading-bot.css?v=5">
 
 </head>
 
@@ -85,8 +85,16 @@
 
 <nav class="adminNav" id="adminNav">
 
+<a href="#secDecisionCenter">Live Decision Center</a>
+<a href="#secTargetAchievement">Target Achievement</a>
+<a href="#secMomentumKpi">Momentum KPI</a>
+<a href="#secSelfAudit">Self-Audit</a>
+<a href="#secBottleneckReport">Bottleneck Report</a>
+<a href="#secSystemThroughput">System Throughput</a>
+<a href="#secMissedWinners">Missed Winners</a>
 <a href="#secStatusBar">Status</a>
 <a href="#secStrategyProfile">Strategy</a>
+<a href="#secTradingConfiguration">Trading Configuration</a>
 <a href="#secCustomObjective">AI Advisor</a>
 <a href="#secPortfolio">Portfolio</a>
 <a href="#secPositions">Open Positions</a>
@@ -103,6 +111,41 @@ Loading real data from the backend...
 
 <div id="adminContent" class="adminContent hidden">
 
+<section class="adminSection" id="secDecisionCenter">
+    <div class="ceoSectionHead"><h4>Live Decision Center</h4></div>
+    <div id="tbDecisionCenter"></div>
+</section>
+
+<section class="adminSection" id="secTargetAchievement">
+    <div class="ceoSectionHead"><h4>Target Achievement (last 24 hours)</h4></div>
+    <div id="tbTargetAchievement"></div>
+</section>
+
+<section class="adminSection" id="secMomentumKpi">
+    <div class="ceoSectionHead"><h4>Momentum KPI</h4></div>
+    <div id="tbMomentumKpi"></div>
+</section>
+
+<section class="adminSection" id="secSelfAudit">
+    <div class="ceoSectionHead"><h4>Self-Audit (last 24 hours)</h4></div>
+    <div id="tbSelfAudit"></div>
+</section>
+
+<section class="adminSection" id="secBottleneckReport">
+    <div class="ceoSectionHead"><h4>Bottleneck Report (last 24 hours)</h4></div>
+    <div id="tbBottleneckReport"></div>
+</section>
+
+<section class="adminSection" id="secSystemThroughput">
+    <div class="ceoSectionHead"><h4>System Throughput (last 24 hours)</h4></div>
+    <div id="tbSystemThroughput"></div>
+</section>
+
+<section class="adminSection" id="secMissedWinners">
+    <div class="ceoSectionHead"><h4>Missed Winners</h4></div>
+    <div id="tbMissedWinners"></div>
+</section>
+
 <section class="adminSection" id="secStatusBar">
     <div class="ceoSectionHead"><h4>Bot Status</h4></div>
     <div id="tbStatusBar"></div>
@@ -116,8 +159,13 @@ Loading real data from the backend...
 </section>
 
 <section class="adminSection" id="secStrategyProfile">
-    <div class="ceoSectionHead"><h4>Strategy</h4></div>
+    <div class="ceoSectionHead"><h4>Strategy — AI Decision Engine</h4></div>
     <div id="tbStrategyProfile"></div>
+</section>
+
+<section class="adminSection" id="secTradingConfiguration">
+    <div class="ceoSectionHead"><h4>Trading Configuration</h4></div>
+    <div id="tbTradingConfiguration"></div>
 </section>
 
 <section class="adminSection" id="secCustomObjective">
@@ -128,6 +176,8 @@ Loading real data from the backend...
 <section class="adminSection" id="secPortfolio">
     <div class="ceoSectionHead"><h4>Portfolio</h4></div>
     <div id="tbPortfolio"></div>
+    <div class="ceoSectionHead"><h4>On-Chain Wallet</h4></div>
+    <div id="tbOnChainWallet"></div>
 </section>
 
 <section class="adminSection" id="secPositions">
@@ -149,8 +199,15 @@ Loading real data from the backend...
 
 </div>
 
+<div id="tbPositionDetailOverlay" class="tbDetailOverlay hidden">
+    <div class="tbDetailPanel">
+        <button id="tbDetailCloseBtn" class="tbDetailClose" aria-label="Close">✕</button>
+        <div id="tbPositionDetailContent"></div>
+    </div>
+</div>
+
 <script src="js/config.js"></script>
-<script src="js/tradingBot.js?v=2"></script>
+<script src="js/tradingBot.js?v=9"></script>
 
 </body>
 </html>

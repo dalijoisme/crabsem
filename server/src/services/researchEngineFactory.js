@@ -594,6 +594,12 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     return {
         action, participantScore, participantMax: PARTICIPANT_MAX, marketHealth: marketScore, marketHealthMax: MARKET_MAX,
         confidence, risk, reasons: reasons.length ? reasons : ["No strong participant signal detected yet"],
+        // Live Decision Center / Signal Center sprint: both already computed
+        // above (line ~545/566) to feed `risk`/`confidence` themselves, then
+        // discarded - same "computed then discarded" shape already fixed for
+        // acceleration/breakdown. Purely additive observability fields, read
+        // by no decision logic anywhere in this function.
+        riskReasons, freshnessPenalty,
         breakdown: {
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
             market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))

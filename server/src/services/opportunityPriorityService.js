@@ -48,20 +48,43 @@ function fetchBatchContext(tokens){
     };
 }
 
-function computeFactors(token, historyRows, trenchesEntry){
+// Ranking-priority fix: confidenceVelocity/participantScoreVelocity/
+// triggerHeat were always read from prediction_history - the STABLE-only
+// "house" decision cache (predictionValidationService.js). That's a real
+// signal for a profile whose own scoring writes there, but AGGRESSIVE's
+// real per-cycle scoring never touches that table (scheduler/
+// tradingBotScheduler.js's computeLiveByAddressForPhilosophy is in-memory
+// only) - so for AGGRESSIVE candidates these three factors were silently
+// reading STABLE's stale/unrelated history, or nothing at all, on every
+// single cycle. `acceleration` (this token's own real, already-computed
+// priceAccel/flowAccel/liquidityAccel - researchEngineFactory.js's
+// computeAccelerationSignal, real time-series data, not a new indicator)
+// replaces them when present - undefined for every profile that doesn't
+// set acceleration_overrides, so this is a strict no-op for BALANCED,
+// byte-identical to before.
+function computeFactors(token, historyRows, trenchesEntry, acceleration){
 
     const row0 = historyRows?.[0] ?? null;
     const row1 = historyRows?.[1] ?? null;
 
-    const confidenceVelocity = (row0?.confidence != null && row1?.confidence != null)
-        ? row0.confidence - row1.confidence : 0;
+    const confidenceVelocity = acceleration
+        ? acceleration.priceAccel
+        : (row0?.confidence != null && row1?.confidence != null) ? row0.confidence - row1.confidence : 0;
 
-    const participantScoreVelocity = (row0?.score != null && row1?.score != null)
-        ? row0.score - row1.score : 0;
+    const participantScoreVelocity = acceleration
+        ? acceleration.flowAccel
+        : (row0?.score != null && row1?.score != null) ? row0.score - row1.score : 0;
 
-    const triggerHeat = (row0?.trigger_reason && !COLD_TRIGGER_REASONS.has(row0.trigger_reason)) ? 1 : 0;
+    const triggerHeat = acceleration
+        ? acceleration.liquidityAccel
+        : (row0?.trigger_reason && !COLD_TRIGGER_REASONS.has(row0.trigger_reason)) ? 1 : 0;
 
-    const priceVelocity = Math.abs(safeNumber(token.price_change_5m) ?? 0);
+    // Sign fix, applies regardless of profile: a token whose 5-minute
+    // move is a sharp REVERSAL DOWN was ranking exactly as "hot" as one
+    // still pumping (abs() doesn't care about direction) - the literal
+    // "bought a token that already ran out of steam" failure mode. Only
+    // reward the move that's still working.
+    const priceVelocity = Math.max(0, safeNumber(token.price_change_5m) ?? 0);
 
     const buys = trenchesEntry ? (safeNumber(trenchesEntry.buys_24h) ?? 0) : 0;
     const sells = trenchesEntry ? (safeNumber(trenchesEntry.sells_24h) ?? 0) : 0;
@@ -99,14 +122,19 @@ function applyEmiBump(tier, priorityScore, emiFlag){
 // floor - unchanged). batchContext: fetchBatchContext(tokens)'s result.
 // emiFlagsByAddress: optional Map(token_address -> {accelerating, reason})
 // from services/emiService.js - only ever populated when emi_enabled.
-function rank(tokens, batchContext, emiFlagsByAddress){
+// accelerationByAddress: optional Map(token_address -> acceleration signal
+// | undefined) from tradingBotEngine.js's orderCandidates - only ever
+// populated (non-undefined per token) for a profile with
+// acceleration_overrides set (AGGRESSIVE today).
+function rank(tokens, batchContext, emiFlagsByAddress, accelerationByAddress){
 
     if(!tokens.length) return [];
 
     const factorSets = tokens.map(t => computeFactors(
         t,
         batchContext.historyByToken.get(t.token_address),
-        batchContext.trenchesByToken.get(t.token_address)
+        batchContext.trenchesByToken.get(t.token_address),
+        accelerationByAddress?.get(t.token_address)
     ));
 
     const confidenceVelocityRanks = rankByDescending(factorSets.map(f => f.confidenceVelocity));

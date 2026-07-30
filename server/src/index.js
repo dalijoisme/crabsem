@@ -59,6 +59,7 @@ const validationScheduler = require("./scheduler/validationScheduler");
 const walletScheduler = require("./scheduler/walletScheduler");
 const predictionValidationScheduler = require("./scheduler/predictionValidationScheduler");
 const tradingBotScheduler = require("./scheduler/tradingBotScheduler");
+const missedOpportunityOutcomeScheduler = require("./scheduler/missedOpportunityOutcomeScheduler");
 const abTestScheduler = require("./scheduler/abTestScheduler");
 const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
 const engineVersionService = require("./services/engineVersionService");
@@ -130,6 +131,8 @@ const predictionValidationSchedulerHandle = predictionValidationScheduler.start(
 
 const tradingBotSchedulerHandle = tradingBotScheduler.start();
 
+const missedOpportunityOutcomeSchedulerHandle = missedOpportunityOutcomeScheduler.start();
+
 const abTestSchedulerHandle = abTestScheduler.start();
 
 const benchmarkSchedulerHandle = benchmarkScheduler.start();
@@ -161,6 +164,8 @@ function shutdown(signal){
     predictionValidationSchedulerHandle.stop();
 
     tradingBotSchedulerHandle.stop();
+
+    missedOpportunityOutcomeSchedulerHandle.stop();
 
     abTestSchedulerHandle.stop();
 

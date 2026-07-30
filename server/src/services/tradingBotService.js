@@ -22,10 +22,22 @@
 const db = require("../database/connection");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingWalletRepository = require("../repositories/tradingWalletRepository");
+const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const productionEngineResolver = require("../services/productionEngineResolver");
 const strategyProfileConfig = require("../config/strategyProfileConfig");
 const customObjectiveService = require("./customObjectiveService");
 const onboardingService = require("./onboardingService");
+const tradeManager = require("./tradeManager");
+const walletService = require("./walletService");
+const executionRepository = require("../repositories/executionRepository");
+const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
+const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+const { buildSolanaTxUrl } = require("../utils/explorerUrl");
+// Read-only constants (mismatchPenaltyPerPoint/maxCompletenessPenalty) -
+// Position Detail's Confidence Breakdown recomputes computeConfidence()'s
+// own display-only arithmetic from already-persisted numbers; this never
+// calls the engine or re-scores anything.
+const scoringConfig = require("../config/scoringConfig");
 // Named envConfig, not config - this file already uses `config` as the
 // local variable name for trading_bot_config everywhere else.
 const envConfig = require("../config/env");
@@ -36,9 +48,20 @@ const envConfig = require("../config/env");
 // changed as a side effect of switching strategy_profile. Silently
 // stripped from any incoming payload before it ever reaches the
 // repository, whether or not this request also changes the profile.
+//
+// Trading Configuration sprint: position_size_pct/max_position_size/
+// max_open_positions are DELIBERATELY no longer in this list. The
+// position-sizing audit found these three had no real reason to be
+// profile-owned - they're money-management/risk-sizing choices, not
+// part of the AI's philosophy (which tokens to buy, how to rank them).
+// They're now genuinely user-controlled via updateTradingConfiguration()
+// below, independent of strategy_profile - see TRADING_CONFIG_FIELDS and
+// this file's own updateConfig() for how a profile switch still seeds
+// sensible defaults for a never-customized account without ever
+// clobbering a real user override (trading_config_customized_at).
 const PROFILE_OWNED_FIELDS = [
-    "min_confidence", "min_decay_fraction", "position_size_pct", "max_position_size",
-    "max_open_positions", "cooldown_win_minutes", "cooldown_loss_minutes",
+    "min_confidence", "min_decay_fraction",
+    "cooldown_win_minutes", "cooldown_loss_minutes",
     "cooldown_reversal_minutes", "cooldown_default_minutes",
     "opportunity_priority_enabled", "emi_enabled",
     // Profile-Aware Production V2 refactor: the engine/gate/exit
@@ -53,6 +76,12 @@ const PROFILE_OWNED_FIELDS = [
     // profile-owned as the fields above (see config/strategyProfileConfig.js).
     "acceleration_overrides"
 ];
+
+// Trading Configuration sprint: the fields a strategy-profile switch
+// still SEEDS as real defaults, but only for an account that has never
+// deliberately customized them (trading_bot_config.trading_config_customized_at
+// is null) - see updateConfig()'s own profile-switch branch below.
+const TRADING_CONFIG_DEFAULT_FIELDS = ["position_size_pct", "max_position_size", "max_open_positions"];
 
 function getEngineSnapshot(){
     const activeVersion = productionEngineResolver.getActiveVersion();
@@ -170,7 +199,26 @@ function updateConfig(userId, partial){
     for(const field of PROFILE_OWNED_FIELDS) delete sanitized[field];
 
     if(partial.strategy_profile != null){
-        Object.assign(sanitized, strategyProfileConfig.resolveProfile(partial.strategy_profile));
+        // strategyProfileConfig.resolveProfile() returns an Object.freeze()'d
+        // bundle (shared, immutable) - `delete` on it is a silent no-op in
+        // non-strict mode, so a fresh, mutable clone is required before
+        // stripping any field from it, or a "customized" account would
+        // (a) never actually get the fields stripped, and (b) risk mutating
+        // the shared frozen object if freeze weren't in effect at all.
+        let bundle = strategyProfileConfig.resolveProfile(partial.strategy_profile);
+        // Trading Configuration sprint: a profile switch still seeds
+        // position_size_pct/max_position_size/max_open_positions as real
+        // DEFAULTS for an account that has never deliberately customized
+        // them - but once a Founder has tuned their own numbers
+        // (trading_config_customized_at set), a later profile switch
+        // (chosen for the ranking/philosophy change, not the sizing) must
+        // never silently reset them back to that profile's own defaults.
+        const currentConfig = tradingBotRepository.getConfig(userId);
+        if(currentConfig.trading_config_customized_at){
+            bundle = { ...bundle };
+            for(const field of TRADING_CONFIG_DEFAULT_FIELDS) delete bundle[field];
+        }
+        Object.assign(sanitized, bundle);
     }
 
     const updated = tradingBotRepository.updateConfig(userId, sanitized);
@@ -180,13 +228,132 @@ function updateConfig(userId, partial){
     // stamped only when this request actually contains a real switch.
     if(partial.strategy_profile != null) tradingBotRepository.markStrategySelected(userId);
 
+    // Trading Configuration sprint: stamped whenever this request
+    // genuinely changes any of the now-independent sizing/slot fields -
+    // regardless of which endpoint/caller triggered it, so a later
+    // profile switch correctly knows to preserve them (see above).
+    const tradingConfigFieldsChanged = [...TRADING_CONFIG_DEFAULT_FIELDS, "position_sizing_mode", "fixed_position_size_usd"]
+        .some(field => partial[field] !== undefined);
+    if(tradingConfigFieldsChanged) tradingBotRepository.markTradingConfigCustomized(userId);
+
     tradingBotRepository.insertLog(userId, {
         logType: "SYSTEM",
         message: partial.strategy_profile != null
             ? `Bot configuration updated - Strategy Profile switched to ${partial.strategy_profile}.`
             : "Bot configuration updated."
     });
-    return { ok: true, config: partial.strategy_profile != null ? tradingBotRepository.getConfig(userId) : updated };
+    // Re-fetch whenever a side-stamp (strategy_selected_at or the new
+    // trading_config_customized_at) happened after `updated` was already
+    // read, so the returned config is never one write behind.
+    const needsRefetch = partial.strategy_profile != null || tradingConfigFieldsChanged;
+    return { ok: true, config: needsRefetch ? tradingBotRepository.getConfig(userId) : updated };
+}
+
+// Trading Configuration sprint: the dashboard's real source of truth for
+// "how much capital is available for new trades" - reuses
+// walletService.getRealWalletBalance() (Trust Layer sprint, already
+// proven) for the real on-chain SOL balance/price, never a second GMGN
+// price probe. Falls back to the manually-entered deposit figure
+// (honestly labeled) only when no real wallet/RPC is available - never
+// silently blends the two.
+async function getTradingConfiguration(userId){
+
+    const config = tradingBotRepository.getConfig(userId);
+    const tradingWallet = tradingWalletRepository.findByUserId(userId);
+    const real = await walletService.getRealWalletBalance(userId);
+
+    let walletBalanceUsd = null, walletBalanceSol = null, walletBalanceSource = "UNAVAILABLE";
+    const solUsdPrice = real?.solUsdPrice ?? null;
+
+    if(real && real.solUsd != null){
+        walletBalanceUsd = real.solUsd;
+        walletBalanceSol = real.solAmount;
+        walletBalanceSource = "REAL";
+    }
+    else if(tradingWallet){
+        walletBalanceUsd = tradingWallet.deposited_balance_usd;
+        walletBalanceSource = "MANUAL_DEPOSIT";
+    }
+
+    const tradingAllocationUsd = config.initial_capital;
+    const tradingAllocationSol = solUsdPrice ? tradingAllocationUsd / solUsdPrice : null;
+
+    const reservedUsd = walletBalanceUsd != null ? Math.max(0, walletBalanceUsd - tradingAllocationUsd) : null;
+    const reservedSol = solUsdPrice != null && reservedUsd != null ? reservedUsd / solUsdPrice : null;
+
+    const portfolio = getPortfolio(userId);
+
+    return {
+        walletBalanceUsd, walletBalanceSol, walletBalanceSource,
+        tradingAllocationUsd, tradingAllocationSol,
+        reservedUsd, reservedSol,
+        availableCashUsd: portfolio.availableCash,
+        solUsdPrice,
+        sizing: {
+            mode: config.position_sizing_mode,
+            positionSizePct: config.position_size_pct,
+            fixedPositionSizeUsd: config.fixed_position_size_usd,
+            maxPositionSize: config.max_position_size,
+            maxOpenPositions: config.max_open_positions,
+            minOrderSize: config.min_order_size
+        },
+        customized: Boolean(config.trading_config_customized_at)
+    };
+
+}
+
+// Trading Configuration sprint: the ONE user-facing entry point for the
+// four fields the position-sizing audit found were needlessly
+// profile-owned (plus min_order_size, already free but with no UI
+// before this). Delegates to updateConfig() above for the actual
+// write/stamp/log - never a second config-writing code path - this
+// function's only job is real, specific validation with real error
+// messages for this page.
+function updateTradingConfiguration(userId, partial){
+
+    const errors = [];
+    const patch = {};
+
+    if(partial.positionSizingMode != null){
+        if(!["PERCENT", "FIXED_USD"].includes(partial.positionSizingMode)){
+            errors.push("Position Sizing Mode must be either PERCENT or FIXED_USD.");
+        }
+        else patch.position_sizing_mode = partial.positionSizingMode;
+    }
+    if(partial.positionSizePct != null){
+        const pct = Number(partial.positionSizePct);
+        if(!Number.isFinite(pct) || pct <= 0 || pct > 100) errors.push("Position Size % must be a number between 0 and 100.");
+        else patch.position_size_pct = pct;
+    }
+    if(partial.fixedPositionSizeUsd !== undefined){
+        if(partial.fixedPositionSizeUsd === null) patch.fixed_position_size_usd = null;
+        else{
+            const usd = Number(partial.fixedPositionSizeUsd);
+            if(!Number.isFinite(usd) || usd <= 0) errors.push("Fixed Position Size must be a positive USD amount.");
+            else patch.fixed_position_size_usd = usd;
+        }
+    }
+    if(partial.maxPositionSize != null){
+        const cap = Number(partial.maxPositionSize);
+        if(!Number.isFinite(cap) || cap <= 0) errors.push("Max Position Size must be a positive USD amount.");
+        else patch.max_position_size = cap;
+    }
+    if(partial.maxOpenPositions != null){
+        const slots = Number(partial.maxOpenPositions);
+        if(!Number.isInteger(slots) || slots < 1) errors.push("Max Open Positions must be a whole number of at least 1.");
+        else patch.max_open_positions = slots;
+    }
+    if(partial.minOrderSize != null){
+        const floor = Number(partial.minOrderSize);
+        if(!Number.isFinite(floor) || floor <= 0) errors.push("Min Order Size must be a positive USD amount.");
+        else patch.min_order_size = floor;
+    }
+
+    if(errors.length) return { ok: false, errors };
+    if(!Object.keys(patch).length) return { ok: false, errors: ["No valid Trading Configuration fields were provided."] };
+
+    return updateConfig(userId, patch);
+
 }
 
 // Custom Objective AI Advisor (Constitution clause 7 / Final Spec
@@ -231,8 +398,502 @@ function getPortfolio(userId){
     };
 }
 
+// Trust/UX sprint: getPortfolio() above stays exactly as it is - it's
+// also called synchronously, twice, inside tradingBotEngine.js's own
+// runCycle() hot path (availableCash sizing + the end-of-cycle equity
+// snapshot). Making that shared function async/network-dependent would
+// mean a flaky RPC endpoint could stall the trading loop itself - a
+// strictly worse regression than a dashboard stat being briefly stale.
+// So the real-balance reconciliation is a SEPARATE, additive read: the
+// unchanged ledger (ok to keep being self-reported/ledger-only for the
+// engine's own purposes) plus the real on-chain balance
+// (walletService.getRealWalletBalance, already fails soft), with an
+// explicit, never-fabricated syncDeltaUsd - omitted entirely when the
+// real balance isn't available, never guessed.
+async function getPortfolioReconciliation(userId){
+    const ledger = getPortfolio(userId);
+    const onChain = await walletService.getRealWalletBalance(userId);
+    const syncDeltaUsd = onChain?.solUsd != null ? ledger.equity - onChain.solUsd : null;
+    return { ...ledger, onChain, syncDeltaUsd };
+}
+
+// Live Decision Center sprint: real, already-computed decision-snapshot
+// rows (migration 050) - never a fabricated queue, never the full
+// ~12,000-token scan universe. Malformed/missing reasons_json falls back
+// to an honest empty array, never a guess.
+function mapSnapshotRow(r){
+    let reasons = [];
+    if(r.reasons_json){
+        try{ reasons = JSON.parse(r.reasons_json); }
+        catch(e){ /* malformed - honest empty, never guessed */ }
+    }
+    return {
+        tokenAddress: r.token_address, tokenSymbol: r.token_symbol,
+        action: r.action, confidence: r.confidence, risk: r.risk,
+        tier: r.tier, rank: r.rank, priorityScore: r.priority_score,
+        reasons
+    };
+}
+
+// Live Decision Center: the dashboard's new home view - shows the AI
+// thinking in real time, not just what it already decided. Every field
+// is real: the snapshot table (item above), the last real cycle-summary/
+// Filtering log rows (tradingBotEngine.js's runCycle), and two small,
+// genuinely new health checks (RPC ping, wallet configured) - none of
+// which touch the frozen scoring/ranking engine.
+async function getDecisionCenter(userId){
+
+    const state = tradingBotRepository.getState(userId);
+    const config = tradingBotRepository.getConfig(userId);
+    const snapshot = tradingBotRepository.findDecisionSnapshot(userId);
+
+    // findDecisionSnapshot already orders by rank (BUY/STRONG BUY tier
+    // first, by real leaderboard position), then confidence - so
+    // buyQueue/currentRanking need no re-sorting here.
+    const buyQueue = snapshot.filter(r => r.action === "BUY" || r.action === "STRONG BUY").map(mapSnapshotRow);
+    const waitQueue = snapshot.filter(r => r.action === "HOLD").map(mapSnapshotRow);
+    const avoidSample = snapshot.filter(r => r.action !== "BUY" && r.action !== "STRONG BUY" && r.action !== "HOLD").map(mapSnapshotRow);
+
+    const recentLog = tradingBotRepository.findRecentLog(userId, 10);
+    const cycleLog = recentLog.find(l => l.message.startsWith("Cycle complete:"));
+    const filteringLog = recentLog.find(l => l.message.startsWith("Filtering:"));
+    let filteringMeta = null;
+    if(filteringLog?.meta_json){
+        try{ filteringMeta = JSON.parse(filteringLog.meta_json); }
+        catch(e){ /* malformed - honest null, never guessed */ }
+    }
+
+    // Cycle/Engine status: real, derived from the last cycle-summary log's
+    // own timestamp vs. this user's own scan_interval_seconds - never a
+    // fabricated heartbeat. A 3x grace window absorbs ordinary scheduler
+    // jitter without flip-flopping between ON_SCHEDULE/DELAYED every tick.
+    let cycleStatus = "NO_CYCLE_YET";
+    if(state.status !== "RUNNING") cycleStatus = "STOPPED";
+    else if(cycleLog){
+        const lastCycleAgeSec = (Date.now() - new Date(`${String(cycleLog.created_at).replace(" ", "T")}Z`).getTime()) / 1000;
+        cycleStatus = lastCycleAgeSec <= config.scan_interval_seconds * 3 ? "ON_SCHEDULE" : "DELAYED";
+    }
+
+    // RPC Status: one cheap real ping via the same connection provider the
+    // execution layer already uses - never a fabricated "connected".
+    let rpcStatus = "NOT_CONFIGURED";
+    if(envConfig.SOLANA_RPC_URL){
+        try{
+            const { connectionProvider } = require("./execution");
+            await connectionProvider.getConnection().getSlot();
+            rpcStatus = "CONNECTED";
+        }
+        catch(e){ rpcStatus = "UNAVAILABLE"; }
+    }
+
+    const wallet = await walletService.getStatus(userId);
+    const walletStatus = !wallet.tradingWallet
+        ? "NOT_CONFIGURED"
+        : (wallet.tradingWallet.realBalanceUnavailableReason ? "CONFIGURED_UNVERIFIED" : "CONNECTED");
+
+    const openCount = tradingBotRepository.countOpenPositions(userId);
+    const portfolio = getPortfolio(userId);
+
+    return {
+        botStatus: state.status,
+        cycleStatus,
+        engineStatus: cycleStatus,
+        rpcStatus,
+        walletStatus,
+        lastCycleAt: cycleLog?.created_at ?? null,
+        qualifiedCandidateCount: filteringMeta?.qualifiedCount ?? buyQueue.length,
+        holdCount: filteringMeta?.holdCount ?? null,
+        avoidCount: filteringMeta?.avoidCount ?? null,
+        buyQueue,
+        waitQueue,
+        avoidSample,
+        currentRanking: buyQueue,
+        currentOpportunity: buyQueue[0] ?? null,
+        openSlot: Math.max(0, config.max_open_positions - openCount),
+        remainingCash: portfolio.availableCash
+    };
+
+}
+
+// Missed Winners page (Momentum Validation System sprint, this sprint's
+// own stated top priority): real, SETTLED outcomes only - a still-pending
+// row (outcome not yet evaluated) never appears here, since "Hasil Akhir"
+// must be a real, real number, never a guess or a placeholder "...".
+function getMissedWinners(userId, limit){
+    return tradingBotMissedOpportunityRepository.findEvaluated(userId, limit).map(row => ({
+        tokenAddress: row.token_address,
+        tokenSymbol: row.token_symbol,
+        rankAtSkip: row.rank_at_skip,
+        priorityScoreAtSkip: row.priority_score_at_skip,
+        reason: row.reason,
+        // Phase 2: the same real bottleneck vocabulary the Bottleneck
+        // Report uses, so "kenapa tidak dibeli" reads consistently
+        // everywhere on the dashboard.
+        category: categorizeBottleneckReason(row.reason),
+        priceAtSkip: row.price_at_skip,
+        skippedAt: row.skipped_at,
+        outcomePrice: row.outcome_price,
+        outcomeReturnPct: row.outcome_return_pct,
+        outcomeEvaluatedAt: row.outcome_evaluated_at,
+        hasOutcome: row.outcome_price != null
+    }));
+}
+
+// Self-Comparison (Momentum Validation System sprint): for each real
+// sibling captured at buy time (tradingBotEngine.js's runCycle, same
+// cycle's other real ranked BUY-tier candidates), compute a real,
+// on-demand comparison against a real price baseline/peak from
+// token_price_history - the exact same already-collected time series
+// the Missed Opportunity outcome job reads, never new GMGN polling.
+// Purely observational - never read back into ranking or scoring.
+function computeSiblingComparison(position, siblings){
+    return siblings.map(sib => {
+        const baseline = tokenPriceHistoryRepository.findPriceAtOrAfter(sib.tokenAddress, position.opened_at);
+        if(!baseline || !baseline.price){
+            return { ...sib, outcomeReturnPct: null, outperformed: null, reason: "No real price history collected for this sibling around the same time." };
+        }
+        const range = tokenPriceHistoryRepository.findRangeForToken(sib.tokenAddress, position.opened_at);
+        const peak = range.length ? Math.max(...range.map(r => Number(r.price))) : Number(baseline.price);
+        const outcomeReturnPct = ((peak / Number(baseline.price)) - 1) * 100;
+        return {
+            ...sib,
+            outcomeReturnPct,
+            outperformed: position.mfe_pct != null ? outcomeReturnPct > position.mfe_pct : null
+        };
+    });
+}
+
+// Self-Audit / Performance Report (Momentum Validation System sprint):
+// every real close reason ever written to trading_bot_trades.reason,
+// categorized - zero new engine logic, purely a GROUP BY of already-real
+// data. MOMENTUM_WEAKENING is CRAB's real "took profit" path (TP15 is a
+// floor, not a ceiling, so the position only closes once momentum fails
+// ABOVE the 15% floor) - classified TP when roi_pct >= 15, otherwise a
+// Dynamic-Exit reversal (momentum died before reaching the floor). The
+// `_NO_REAL_BALANCE` suffix (a different, pre-existing case: "we decided
+// to sell but there was nothing there") is stripped before categorizing,
+// so it's never double-counted as its own bucket.
+function categorizeCloseReason(rawReason, roiPct){
+    const reason = String(rawReason).replace(/_NO_REAL_BALANCE$/, "");
+    if(reason === "STOP_LOSS") return "SL";
+    if(reason === "REVERSAL") return "DYNAMIC_EXIT";
+    if(reason === "MOMENTUM_WEAKENING") return (roiPct ?? 0) >= 15 ? "TP" : "DYNAMIC_EXIT";
+    if(reason === "SELL_MANUAL") return "MANUAL";
+    if(reason === "SELL_EXTERNAL") return "EXTERNAL";
+    if(reason.startsWith("RUG_DETECTED")) return "RUG";
+    return "OTHER";
+}
+
+// Phase 2 (Live Validation & Bottleneck Elimination): every real reason
+// trading_bot_missed_opportunity.reason can now contain (entryGateService's
+// own real rejection reasons, tradeManager.openPosition's own real
+// post-eligibility failures, and the two new loop-break "never got a
+// turn" reasons), mapped into the Founder's own bottleneck vocabulary -
+// zero new engine logic, purely a categorization of already-real data.
+// RPC Error / Wallet Error are deliberately NOT mapped here - those
+// already have a real, dedicated home in the `executions` table (see
+// getBottleneckReport below), never guessed from this table's reasons.
+function categorizeBottleneckReason(rawReason){
+    const reason = String(rawReason);
+    if(reason === "MAX_OPEN_POSITIONS_REACHED" || reason === "SLOT_FULL_BEFORE_TURN") return "OPEN_SLOT_FULL";
+    if(reason === "INSUFFICIENT_AVAILABLE_CASH" || reason === "CASH_EXHAUSTED_BEFORE_TURN") return "TRADING_BALANCE_HABIS";
+    if(reason.startsWith("QUALITY_GATE_") || reason === "REENTRY_STRUCTURAL_RED_FLAG" || reason === "NO_RISK_BANDS_AVAILABLE") return "RISK_REJECTED";
+    if(reason === "CONFIDENCE_BELOW_FLOOR") return "ENTRY_GATE_REJECTED";
+    if(reason === "ALREADY_OPEN_FOR_TOKEN") return "ALREADY_HOLDING_SIMILAR_POSITION";
+    if(reason.startsWith("COOLDOWN_ACTIVE_")) return "COOLDOWN";
+    if(reason === "DECISION_TOO_STALE" || reason === "NO_REAL_PRICE") return "OPPORTUNITY_EXPIRED";
+    if(reason.startsWith("EXECUTION_")) return "EXECUTION_FAILED";
+    return "OTHER";
+}
+
+// Self-Audit (this sprint's mandated 24h automatic report) / Performance
+// Report - computed live, on every request, over a real rolling window
+// (the proven datetime('now', '-N hours') convention, not a stored daily
+// snapshot - see the plan's own note on why that's deferred). Every
+// number is real; Entry Timing Score-style metrics needing new
+// qualify-time/sightings history stay the honest "Collecting Data" state
+// getMomentumKpi already established.
+function getSelfAudit(userId, hours = 24){
+
+    const logRows = tradingBotRepository.findLogSince(userId, hours);
+    let scanned = 0, qualified = 0;
+    for(const row of logRows){
+        if(!row.meta_json) continue;
+        let meta;
+        try{ meta = JSON.parse(row.meta_json); }
+        catch(e){ continue; /* malformed - skip this row's contribution, never guess */ }
+        if(row.message.startsWith("Cycle complete:") && meta.scanned != null) scanned += meta.scanned;
+        if(row.message.startsWith("Filtering:") && meta.qualifiedCount != null) qualified += meta.qualifiedCount;
+    }
+
+    const bought = tradingBotRepository.countPositionsOpenedSince(userId, hours);
+    const trades = tradingBotRepository.findTradesClosedSince(userId, hours);
+    const closed = trades.length;
+
+    const counts = { TP: 0, SL: 0, DYNAMIC_EXIT: 0, MANUAL: 0, EXTERNAL: 0, RUG: 0, OTHER: 0 };
+    for(const t of trades) counts[categorizeCloseReason(t.reason, t.roi_pct)]++;
+
+    const durations = trades.map(t => t.duration_seconds).filter(d => d != null);
+    const avgHoldingTimeSeconds = durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
+
+    const rankValues = tradingBotRepository.findRankAtEntryValuesSince(userId, hours);
+    const avgEntryRank = rankValues.length ? rankValues.reduce((s, r) => s + r.rankAtEntry, 0) / rankValues.length : null;
+
+    // Phase 2 (Live Validation & Bottleneck Elimination): real, windowed
+    // Average Entry Delay and Missed Winner count - "dalam N jam" needs
+    // both scoped to the same real window, not the all-time figures.
+    const entryDelayValues = tradingBotRepository.findEntryDelayValuesSince(userId, hours);
+    const avgEntryDelaySeconds = entryDelayValues.length
+        ? entryDelayValues.reduce((s, r) => s + r.delaySeconds, 0) / entryDelayValues.length
+        : null;
+    const missedWinnerCount = tradingBotMissedOpportunityRepository.countEvaluatedSince(userId, hours);
+
+    return {
+        windowHours: hours,
+        scanned, qualified, bought, closed,
+        tp: counts.TP, sl: counts.SL, dynamicExit: counts.DYNAMIC_EXIT,
+        manual: counts.MANUAL, external: counts.EXTERNAL, rug: counts.RUG, other: counts.OTHER,
+        avgHoldingTimeSeconds,
+        avgEntryRank,
+        avgEntryDelaySeconds,
+        missedWinnerCount
+    };
+
+}
+
+// System Throughput (Phase 2: Live Validation & Bottleneck Elimination) -
+// real, windowed measures of how much the bot is actually doing, not
+// just what it decided. Average Queue Length and Average Candidate Per
+// Cycle are documented here as the SAME underlying number (the real
+// qualifiedCount already written into every cycle's "Filtering: ..." log
+// row) under the phase's two different names - not two separate metrics
+// pretending to be independent.
+function getSystemThroughput(userId, hours = 24){
+
+    const elapsedHours = Math.max(hours, 1 / 60);
+
+    const opensSince = tradingBotRepository.countPositionsOpenedSince(userId, hours);
+    const trades = tradingBotRepository.findTradesClosedSince(userId, hours);
+
+    const openPositionPerHour = opensSince / elapsedHours;
+    const closePositionPerHour = trades.length / elapsedHours;
+
+    const durations = trades.map(t => t.duration_seconds).filter(d => d != null);
+    const avgPositionDurationSeconds = durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
+
+    // Real per-cycle samples (migration 054) - null/empty for any window
+    // that predates this Phase-2 instrumentation, never guessed.
+    const samples = tradingBotRepository.findThroughputSamplesSince(userId, hours);
+    const avgSimultaneousPosition = samples.length
+        ? samples.reduce((s, r) => s + (r.openPositionCount ?? 0), 0) / samples.length
+        : null;
+    const avgIdleCash = samples.length
+        ? samples.reduce((s, r) => s + (r.availableCash ?? 0), 0) / samples.length
+        : null;
+
+    // Capital Utilization - real, from getPortfolio()'s own already-
+    // computed fields at read time, no new tracking.
+    const portfolio = getPortfolio(userId);
+    const capitalUtilizationPct = portfolio.equity > 0 ? (portfolio.openPositionValue / portfolio.equity) * 100 : null;
+
+    // Average Queue Length / Average Candidate Per Cycle - both the real
+    // qualifiedCount already written into every cycle's own "Filtering: ..."
+    // log row (tradingBotEngine.js's runCycle), averaged over the window.
+    const logRows = tradingBotRepository.findLogSince(userId, hours);
+    let qualifiedSum = 0, cycleCount = 0;
+    for(const row of logRows){
+        if(!row.meta_json) continue;
+        let meta;
+        try{ meta = JSON.parse(row.meta_json); }
+        catch(e){ continue; }
+        if(row.message.startsWith("Filtering:") && meta.qualifiedCount != null){
+            qualifiedSum += meta.qualifiedCount;
+            cycleCount++;
+        }
+    }
+    const avgCandidatePerCycle = cycleCount ? qualifiedSum / cycleCount : null;
+
+    return {
+        windowHours: hours,
+        openPositionPerHour,
+        closePositionPerHour,
+        avgSimultaneousPosition,
+        avgPositionDurationSeconds,
+        capitalUtilizationPct,
+        avgIdleCash,
+        avgQueueLength: avgCandidatePerCycle,
+        avgCandidatePerCycle
+    };
+
+}
+
+// Bottleneck Report (Phase 2: Live Validation & Bottleneck Elimination) -
+// the exact shape the phase describes: real counts, then real cause
+// percentages. Computed live on every request, same reasoning as
+// getSelfAudit (no stored/stale snapshot). Never concludes a bottleneck
+// "is" the problem - just reports the real numbers; the phase explicitly
+// reserves that judgment for the Founder.
+function getBottleneckReport(userId, hours = 24){
+
+    const audit = getSelfAudit(userId, hours);
+    const openPosition = tradingBotRepository.countOpenPositions(userId); // real, current snapshot - not window-bound, since a position opened before the window can still be open now
+
+    const missedRows = tradingBotMissedOpportunityRepository.findAllSince(userId, hours);
+    const categoryCounts = {};
+    for(const row of missedRows){
+        const category = categorizeBottleneckReason(row.reason);
+        categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+    }
+    const totalMissed = missedRows.length;
+    const causes = Object.entries(categoryCounts).map(([category, count]) => ({
+        category,
+        count,
+        pct: totalMissed ? Math.round((count / totalMissed) * 1000) / 10 : 0
+    })).sort((a, b) => b.count - a.count);
+
+    // Execution Failed / RPC / Wallet errors: real, already-recorded BUY
+    // execution failures - never guessed from this table's text, the
+    // real error_message is surfaced directly instead.
+    const failedExecutions = executionRepository.findFailedBuysSince(userId, hours);
+    const latestExecutionError = failedExecutions.length ? {
+        status: failedExecutions[0].status,
+        message: failedExecutions[0].error_message,
+        at: failedExecutions[0].created_at
+    } : null;
+
+    return {
+        windowHours: hours,
+        qualified: audit.qualified,
+        bought: audit.bought,
+        openPosition,
+        closed: audit.closed,
+        missedWinner: audit.missedWinnerCount,
+        totalMissedOpportunities: totalMissed,
+        causes,
+        executionFailureCount: failedExecutions.length,
+        latestExecutionError
+    };
+
+}
+
+// Target Achievement summary (Phase 2's own explicit deliverable): the
+// Founder's four questions, each answered with the real number already
+// computed above - never a "yes"/"no" verdict from CRAB itself. The
+// phase explicitly reserves that judgment for the Founder; this only
+// ever assembles real data, it never concludes.
+function getTargetAchievementSummary(userId, hours = 24){
+
+    const throughput = getSystemThroughput(userId, hours);
+    const kpi = getMomentumKpi(userId);
+    const audit = getSelfAudit(userId, hours);
+
+    return {
+        windowHours: hours,
+        manyOpenPositions: { openPositionPerHour: throughput.openPositionPerHour, bought: audit.bought },
+        manyClosePositions: { closePositionPerHour: throughput.closePositionPerHour, closed: audit.closed },
+        fastEntry: { avgEntryDelaySeconds: audit.avgEntryDelaySeconds },
+        noMomentumLoss: { avgTimeToPeakSeconds: kpi.avgTimeToPeakSeconds, avgHoldingTimeSeconds: audit.avgHoldingTimeSeconds }
+    };
+
+}
+
+// Momentum KPI sprint: measures whether Momentum Hunter is genuinely
+// getting faster at catching momentum over time. Momentum Validation
+// System sprint (Sprint 5) added real Average Entry Delay (candidate
+// sightings, migration 052) and Average Time To Peak (mfe_at, migration
+// 048/051) - both computed here now. Entry Timing Score, Momentum
+// Capture Score, Late Entry %, and Missed Opportunity % still need
+// design decisions (a defensible denominator, a scoring formula) this
+// sprint didn't resolve - left explicitly null with a reason, never a
+// fabricated score.
+function getMomentumKpi(userId){
+
+    const trades = tradingBotRepository.findAllTradesChronological(userId);
+
+    if(!trades.length){
+        return {
+            totalTrades: 0,
+            avgHoldingTimeSeconds: null,
+            tradesPerHour: null,
+            closesPerHour: null,
+            avgRankAtEntry: null,
+            avgTimeToSellSeconds: null,
+            avgTimeToSellSampleSize: 0,
+            avgEntryDelaySeconds: null, avgTimeToPeakSeconds: null,
+            entryTimingScore: null, momentumCaptureScore: null, lateEntryPct: null, missedOpportunityPct: null,
+            deferredMetricsReason: "Entry Timing/Momentum Capture Score and Missed Opportunity % need a scoring design this sprint didn't resolve - deferred, not fabricated."
+        };
+    }
+
+    const durations = trades.map(t => t.duration_seconds).filter(d => d != null);
+    const avgHoldingTimeSeconds = durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
+
+    // Real historical throughput since the first-ever trade - does not
+    // exclude STOPPED/PAUSED downtime (a real, if imperfect, measure;
+    // never a fabricated one).
+    const firstOpenedAt = new Date(`${String(trades[0].opened_at).replace(" ", "T")}Z`).getTime();
+    const lastClosedAt = new Date(`${String(trades[trades.length - 1].closed_at).replace(" ", "T")}Z`).getTime();
+    const elapsedHours = Math.max((lastClosedAt - firstOpenedAt) / 3600000, 1 / 60);
+    const tradesPerHour = trades.length / elapsedHours;
+    const closesPerHour = trades.length / elapsedHours; // every trade row IS a close
+
+    const rankValues = tradingBotRepository.findRankAtEntryValues(userId);
+    const avgRankAtEntry = rankValues.length
+        ? rankValues.reduce((s, r) => s + r.rankAtEntry, 0) / rankValues.length
+        : null;
+
+    // Average Time To Sell (LIVE only) - real on-chain confirmation
+    // latency (completed_at - created_at) for the execution that closed
+    // each trade, via close_execution_id (migration 046). Simulation
+    // trades have no close_execution_id - correctly excluded, never
+    // counted as zero latency.
+    const execDurationsSec = [];
+    for(const t of trades){
+        if(t.close_execution_id == null) continue;
+        const exec = executionRepository.findById(userId, t.close_execution_id);
+        if(!exec || !exec.completed_at) continue;
+        const ms = new Date(`${String(exec.completed_at).replace(" ", "T")}Z`).getTime() - new Date(`${String(exec.created_at).replace(" ", "T")}Z`).getTime();
+        if(Number.isFinite(ms) && ms >= 0) execDurationsSec.push(ms / 1000);
+    }
+    const avgTimeToSellSeconds = execDurationsSec.length ? execDurationsSec.reduce((s, d) => s + d, 0) / execDurationsSec.length : null;
+
+    // Average Entry Delay (Momentum Validation System sprint): real, only
+    // for positions opened after the candidate-sightings table (migration
+    // 052) started recording - a position with no matching sighting row
+    // (e.g. Opportunity Priority was off that cycle, or it predates this
+    // sprint) is correctly excluded, never counted as zero delay.
+    const entryDelayValues = tradingBotRepository.findEntryDelayValues(userId);
+    const avgEntryDelaySeconds = entryDelayValues.length
+        ? entryDelayValues.reduce((s, r) => s + r.delaySeconds, 0) / entryDelayValues.length
+        : null;
+
+    // Average Time To Peak (Momentum Validation System sprint): real,
+    // from mfe_at - only positions that ever recorded a real positive
+    // excursion have one.
+    const timeToPeakValues = tradingBotRepository.findTimeToPeakValues(userId);
+    const avgTimeToPeakSeconds = timeToPeakValues.length
+        ? timeToPeakValues.reduce((s, r) => s + r.delaySeconds, 0) / timeToPeakValues.length
+        : null;
+
+    return {
+        totalTrades: trades.length,
+        avgHoldingTimeSeconds,
+        tradesPerHour,
+        closesPerHour,
+        avgRankAtEntry,
+        avgTimeToSellSeconds,
+        avgTimeToSellSampleSize: execDurationsSec.length, // 0 = no real LIVE closes yet - shown as "N/A (simulation)" by the caller, not a fake zero
+        avgEntryDelaySeconds,
+        avgTimeToPeakSeconds,
+        entryTimingScore: null, momentumCaptureScore: null, lateEntryPct: null, missedOpportunityPct: null,
+        deferredMetricsReason: "Entry Timing/Momentum Capture Score and Missed Opportunity % need a scoring design this sprint didn't resolve - deferred, not fabricated."
+    };
+
+}
+
 function getOpenPositions(userId){
     return tradingBotRepository.findOpenPositions(userId).map(p => ({
+        id: p.id,
         tokenAddress: p.token_address,
         tokenSymbol: p.token_symbol,
         entryPrice: p.entry_price,
@@ -243,6 +904,121 @@ function getOpenPositions(userId){
         exitStrategy: p.exit_strategy,
         status: p.status
     }));
+}
+
+// Position-detail view (Trust/UX sprint): entirely real, already-
+// persisted data - no re-scoring, no reconstruction. breakdown_json is
+// only ever non-null for a position opened after migration 047's fix;
+// older rows honestly report no breakdown rather than a fake one.
+function getPositionDetail(userId, id){
+
+    const position = tradingBotRepository.findPositionById(userId, id);
+    if(!position) return null;
+
+    let parsed = null;
+    if(position.breakdown_json){
+        try{ parsed = JSON.parse(position.breakdown_json); }
+        catch(e){ /* malformed/legacy data - fall through to the honest "no breakdown" state below, never guess */ }
+    }
+
+    // Live Decision Center / Signal Center sprint: Strength/Weakness are
+    // not a new derivation - `reasons` (participant/market modules'
+    // positive signals) and the newly-exposed `riskReasons` (their
+    // negative/risk signals) already ARE these two things; this just
+    // gives them the honest, investor-facing names.
+    const strength = parsed?.reasons ?? [];
+    const weakness = parsed?.riskReasons ?? [];
+
+    // Confidence Breakdown: read-only re-derivation of computeConfidence()'s
+    // own arithmetic (researchEngineFactory.js) from numbers already
+    // persisted in breakdown_json - never a re-score, never a new formula.
+    // null wholesale when the underlying scores weren't persisted (legacy
+    // pre-migration rows), never a guessed breakdown.
+    let confidenceBreakdown = null;
+    if(parsed?.participantScore != null && parsed?.marketHealth != null && parsed?.participantMax && parsed?.marketHealthMax){
+        const participantPct = parsed.participantScore / parsed.participantMax;
+        const marketPct = parsed.marketHealth / parsed.marketHealthMax;
+        const mismatch = Math.abs(participantPct - marketPct) * 100;
+        const c = scoringConfig.confidence;
+        confidenceBreakdown = {
+            participantPct: Math.round(participantPct * 1000) / 10,
+            marketPct: Math.round(marketPct * 1000) / 10,
+            mismatchPenalty: Math.round(mismatch * c.mismatchPenaltyPerPoint * 100) / 100,
+            freshnessPenalty: parsed.freshnessPenalty ?? null
+        };
+    }
+
+    // Flow: the acceleration signal's own flow-pace component (real
+    // smart-money+KOL buy-rate data, researchEngineFactory.js's
+    // computeAccelerationSignal) - null (never fabricated) for any profile
+    // that doesn't compute acceleration, same honest fallback Position
+    // Detail's acceleration display already uses.
+    const flow = parsed?.acceleration?.flowAccel ?? null;
+    const liquidity = parsed?.breakdown?.market?.liquidity ?? null;
+
+    // Timeline (real trade row joined via migration 049's position_id FK -
+    // null for a still-OPEN position, or one closed before that migration
+    // existed, never guessed from token_address/opened_at instead).
+    const trade = tradingBotRepository.findTradeByPositionId(userId, id);
+
+    // Self-Comparison (Momentum Validation System sprint): real siblings
+    // captured at buy time, each enriched on-demand with a real
+    // comparative outcome - never a stored background job, never
+    // fabricated for a position that has no real siblings_json.
+    let siblings = [];
+    if(position.siblings_json){
+        try{ siblings = computeSiblingComparison(position, JSON.parse(position.siblings_json)); }
+        catch(e){ /* malformed/legacy data - honest empty, never guessed */ }
+    }
+
+    return {
+        id: position.id,
+        tokenAddress: position.token_address,
+        tokenSymbol: position.token_symbol,
+        entryPrice: position.entry_price,
+        currentPrice: position.current_price,
+        roiPct: position.current_price != null ? ((position.current_price / position.entry_price) - 1) * 100 : null,
+        sizeUsd: position.size_usd,
+        confidence: position.confidence,
+        exitStrategy: position.exit_strategy,
+        targetPrice: position.target_price,
+        stopLossPrice: position.stop_loss_price,
+        mfePct: position.mfe_pct,
+        maePct: position.mae_pct,
+        status: position.status,
+        risk: position.risk,
+        rankAtEntry: position.rank_at_entry,
+        priorityScoreAtEntry: position.priority_score_at_entry,
+        breakdown: parsed?.breakdown ?? null,
+        reasons: parsed?.reasons ?? [],
+        acceleration: parsed?.acceleration ?? null,
+        hasBreakdown: Boolean(parsed),
+        strength,
+        weakness,
+        confidenceBreakdown,
+        flow,
+        liquidity,
+        siblings,
+        // Timeline: BUY -> +5% -> +10% -> Highest/Reversal -> Lowest ->
+        // Current -> Exit -> Sell. mfeAt/maeAt/crossed_Npct_at honestly
+        // null ("not recorded") for any position opened/tracked before
+        // the relevant migration added them - never a guessed timestamp.
+        // "Reversal" is deliberately the SAME timestamp as "Highest" -
+        // by construction, the last new peak IS the reversal-start
+        // moment for whatever decline follows it, not a separate event.
+        timeline: {
+            buy: { at: position.opened_at, price: position.entry_price },
+            crossed5pct: { at: position.crossed_5pct_at ?? null },
+            crossed10pct: { at: position.crossed_10pct_at ?? null },
+            highest: { pct: position.mfe_pct, at: position.mfe_at ?? null },
+            reversal: { at: position.mfe_at ?? null },
+            lowest: { pct: position.mae_pct, at: position.mae_at ?? null },
+            current: position.status === "OPEN" ? { price: position.current_price } : null,
+            exit: trade ? { price: trade.exit_price, reason: trade.reason } : null,
+            sell: position.status === "CLOSED" ? { at: position.closed_at } : null
+        }
+    };
+
 }
 
 function getTrades(userId, limit){
@@ -257,6 +1033,10 @@ function getTrades(userId, limit){
         reason: t.reason,
         engineVersion: t.engine_version,
         txHash: t.tx_hash,
+        // Real explorer link when a real hash exists - historical NULL
+        // rows (every trade before this sprint's fix) honestly stay
+        // null, never backfilled/guessed.
+        txExplorerUrl: buildSolanaTxUrl(t.tx_hash, envConfig.SOLANA_CLUSTER),
         openedAt: t.opened_at,
         closedAt: t.closed_at
     }));
@@ -353,15 +1133,81 @@ function pauseBot(userId){
     return { ok: true, state: updated };
 }
 
-function forceSellAll(userId){
+// Trust/UX sprint: the same "what price does a real closeIfDue see"
+// source tradeManager.js's own closeIfDue uses (token feed price, then
+// the position's own last-tracked price, then its entry price) - never a
+// new/different price source for a user-triggered sell than the bot's
+// own automatic one.
+function currentPriceFor(position){
+    const token = gmgnTokenRepository.getTokenByAddress(position.token_address);
+    return (token && Number(token.price)) || position.current_price || position.entry_price;
+}
+
+// Was a no-op stub (logged "would be closed", never actually closed
+// anything) - fixed to reuse the exact same tradeManager.finalizeClose()
+// every automatic close already goes through, never a second close
+// implementation. Sequential, not Promise.all: only one non-terminal
+// execution per user is allowed at a time (executions table's own
+// unique index, services/execution/executionService.js) - real LIVE
+// sells for the same wallet must run one at a time.
+async function forceSellAll(userId){
+
     const open = tradingBotRepository.findOpenPositions(userId);
+
+    if(!open.length){
+        tradingBotRepository.insertLog(userId, { logType: "SYSTEM", message: "Force Sell All requested - there are no open positions to close." });
+        return { ok: true, positionsAffected: 0, positionsAttempted: 0 };
+    }
+
+    const state = tradingBotRepository.getState(userId);
+    const config = tradingBotRepository.getConfig(userId);
+
+    // Lazy require - tradingBotEngine.js already requires this file at
+    // top level, so a top-level require here would be circular.
+    const liveOptions = state.mode === "LIVE" ? require("./tradingBotEngine").buildLiveExecutionOptions(userId) : null;
+
+    const tradeManagerForUser = tradeManager.createTradeManager(tradingBotRepository.forUser(userId), liveOptions);
+
+    let closedCount = 0;
+    for(const position of open){
+        const result = await tradeManagerForUser.finalizeClose(position, currentPriceFor(position), "SELL_MANUAL", config);
+        if(result.closed) closedCount++;
+    }
+
     tradingBotRepository.insertLog(userId, {
         logType: "SYSTEM",
-        message: open.length
-            ? `Force Sell All requested - ${open.length} open position(s) would be closed (no executor connected - no real order can be placed yet).`
-            : "Force Sell All requested - there are no open positions to close."
+        message: `Force Sell All completed - ${closedCount} of ${open.length} open position(s) closed.`
     });
-    return { ok: true, positionsAffected: open.length };
+
+    return { ok: true, positionsAffected: closedCount, positionsAttempted: open.length };
+
+}
+
+// Real per-position manual sell (Trust/UX sprint) - reuses the exact
+// same finalizeClose() path forceSellAll/the bot's own automatic close
+// already use, scoped to exactly one position this user actually owns
+// and still has open.
+async function sellPosition(userId, positionId){
+
+    const position = tradingBotRepository.findOpenPositionById(userId, positionId);
+    if(!position) return { ok: false, status: 404, error: "Not found", details: "No open position with that id for this account." };
+
+    const state = tradingBotRepository.getState(userId);
+    const config = tradingBotRepository.getConfig(userId);
+
+    const liveOptions = state.mode === "LIVE" ? require("./tradingBotEngine").buildLiveExecutionOptions(userId) : null;
+
+    const tradeManagerForUser = tradeManager.createTradeManager(tradingBotRepository.forUser(userId), liveOptions);
+    const result = await tradeManagerForUser.finalizeClose(position, currentPriceFor(position), "SELL_MANUAL", config);
+
+    return {
+        ok: true,
+        closed: Boolean(result.closed),
+        retrying: Boolean(result.retrying),
+        reason: result.reason ?? null,
+        roiPct: result.roiPct ?? null
+    };
+
 }
 
 function emergencyStop(userId){
@@ -398,8 +1244,9 @@ function setAllocation(userId, allocationPct){
 }
 
 module.exports = {
-    getStatusBar, getConfig, updateConfig,
-    getPortfolio, getOpenPositions, getTrades, getLog, getEquityCurve,
-    startBot, stopBot, pauseBot, forceSellAll, emergencyStop, setMode,
+    getStatusBar, getConfig, updateConfig, getTradingConfiguration, updateTradingConfiguration,
+    getPortfolio, getPortfolioReconciliation, getOpenPositions, getPositionDetail, getTrades, getLog, getEquityCurve,
+    getDecisionCenter, getMomentumKpi, getMissedWinners, getSelfAudit, getSystemThroughput, getBottleneckReport, getTargetAchievementSummary,
+    startBot, stopBot, pauseBot, forceSellAll, sellPosition, emergencyStop, setMode,
     analyzeCustomObjective, setAllocation
 };

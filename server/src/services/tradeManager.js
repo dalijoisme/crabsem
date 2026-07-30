@@ -62,10 +62,19 @@ function createTradeManager(repository, liveOptions = null){
 
     async function openPosition(token, live, config, availableCash){
 
-        const sizeUsd = Math.min(
-            config.max_position_size,
-            availableCash * (config.position_size_pct / 100)
-        );
+        // Trading Configuration sprint: position sizing is now a Founder-
+        // controlled money-management choice, independent of strategy
+        // profile (see services/tradingBotService.js's PROFILE_OWNED_FIELDS/
+        // updateTradingConfiguration) - percent-of-balance (the original,
+        // still the default) or a fixed USD amount. Either way, still
+        // capped by the same real max_position_size ceiling and floored by
+        // the same real min_order_size check below - nothing about WHICH
+        // token gets bought or WHEN changes, only how much.
+        const rawSizeUsd = config.position_sizing_mode === "FIXED_USD"
+            ? config.fixed_position_size_usd
+            : availableCash * (config.position_size_pct / 100);
+
+        const sizeUsd = Math.min(config.max_position_size, rawSizeUsd);
 
         if(sizeUsd < config.min_order_size) return { opened: false, reason: "INSUFFICIENT_AVAILABLE_CASH" };
 
@@ -116,6 +125,34 @@ function createTradeManager(repository, liveOptions = null){
 
         }
 
+        // Trust/UX sprint: real, already-computed decision evidence for
+        // this exact BUY - persisted once, here, so a position can
+        // explain itself later (position-detail view) without ever
+        // re-scoring or guessing. `live.breakdown` is only ever present
+        // when the scheduler's own liveMap carried it through (every
+        // profile today) - null for any caller whose signal stub never
+        // set it (benchmark/ab-test), same optional-with-null-default
+        // pattern as `acceleration` above.
+        //
+        // Live Decision Center / Signal Center sprint: riskReasons/
+        // freshnessPenalty folded into the same blob - both already in
+        // `live` by this point (scheduler carries them through
+        // unmodified), needed so Confidence/Risk Breakdown can be
+        // reconstructed later without re-scoring.
+        const breakdownJson = live.breakdown
+            ? JSON.stringify({
+                breakdown: live.breakdown, reasons: live.reasons || [], acceleration: live.acceleration ?? null,
+                riskReasons: live.riskReasons || [], freshnessPenalty: live.freshnessPenalty ?? null,
+                // Live Decision Center / Signal Center sprint: the real
+                // aggregate scores/denominators behind `confidence` -
+                // already computed to produce it, never persisted before -
+                // so Position Detail's Confidence Breakdown can recompute
+                // participantPct/marketPct later without re-scoring.
+                participantScore: live.participantScore ?? null, participantMax: live.participantMax ?? null,
+                marketHealth: live.marketHealth ?? null, marketHealthMax: live.marketHealthMax ?? null
+            })
+            : null;
+
         const positionId = repository.insertPosition({
             tokenAddress: token.token_address,
             tokenSymbol: token.symbol,
@@ -129,7 +166,23 @@ function createTradeManager(repository, liveOptions = null){
             stopLossPrice: riskBands.stopLoss.price,
             stopLossMarketCap: riskBands.stopLoss.marketCap,
             lastVolume1h: token.volume_1h != null ? Number(token.volume_1h) : null,
-            executionId
+            executionId,
+            breakdownJson,
+            // Live Decision Center sprint: this cycle's own real
+            // Opportunity Priority rank (tradingBotEngine.js's
+            // orderCandidates), attached onto `live` right before this
+            // function was called - undefined (persisted as null, never
+            // a fabricated 0) whenever Opportunity Priority is off.
+            rankAtEntry: live.rankAtEntry ?? null,
+            priorityScoreAtEntry: live.priorityScoreAtEntry ?? null,
+            risk: live.risk ?? null,
+            // Momentum Validation System sprint (Self-Comparison): this
+            // cycle's other real ranked BUY-tier candidates, attached onto
+            // `live` right before this function was called - purely
+            // observational (never read back into ranking/scoring), null
+            // whenever Opportunity Priority was off or no other candidate
+            // existed this cycle.
+            siblingsJson: live.siblings?.length ? JSON.stringify(live.siblings) : null
         });
 
         const kind = executionId ? "Real" : "Virtual";
@@ -144,7 +197,17 @@ function createTradeManager(repository, liveOptions = null){
 
     }
 
-    async function finalizeClose(position, exitPrice, reason, config){
+    // options.skipBalanceCheck (Trust/UX sprint): set only by
+    // closeIfDue()'s own external-sell detection below, which has
+    // ALREADY confirmed the real balance is zero this exact cycle -
+    // skips straight past the balance-check + real-SELL-execution
+    // branch (there is nothing left to sell, and no real execution to
+    // attribute this close to; the sell already happened outside CRAB
+    // entirely) and closes with `reason` verbatim, never the
+    // `_NO_REAL_BALANCE` suffix reserved for "we decided to sell but
+    // there was nothing there," a different, pre-existing case just
+    // below.
+    async function finalizeClose(position, exitPrice, reason, config, options = {}){
 
         const roiPct = ((exitPrice / position.entry_price) - 1) * 100;
         const feeUsd = position.size_usd * ((config.fee_pct || FEE_PCT_DEFAULT) / 100) * 2; // entry + exit
@@ -159,7 +222,7 @@ function createTradeManager(repository, liveOptions = null){
         let closeExecutionId = null;
         let txHash = null;
 
-        if(liveOptions){
+        if(liveOptions && !options.skipBalanceCheck){
 
             const balance = await liveOptions.balanceService.getSplTokenBalance(liveOptions.walletPublicKey, position.token_address);
             const sellAmountBaseUnits = Number(balance.amountRaw);
@@ -198,6 +261,7 @@ function createTradeManager(repository, liveOptions = null){
             }
 
             closeExecutionId = result.executionId;
+            txHash = result.txHash ?? null;
 
         }
 
@@ -210,7 +274,7 @@ function createTradeManager(repository, liveOptions = null){
 
         });
 
-        const kind = closeExecutionId ? "Real" : "Virtual";
+        const kind = closeExecutionId ? "Real" : (options.skipBalanceCheck ? "Detected External" : "Virtual");
         repository.insertLog({
             logType: "SELL",
             tokenSymbol: position.token_symbol,
@@ -230,9 +294,45 @@ function createTradeManager(repository, liveOptions = null){
         const maePctNow = Math.min(position.mae_pct || 0, roiSoFarPct);
         const volume1hNow = token.volume_1h != null ? Number(token.volume_1h) : position.last_volume_1h;
 
+        // Live Decision Center / Signal Center sprint: record WHEN a new
+        // peak/trough excursion is reached (Position Detail's timeline
+        // "Highest"/"Lowest" stage). Only stamp a fresh timestamp on an
+        // actual new extreme this call - otherwise forward the position's
+        // existing mfe_at/mae_at unchanged, since updatePositionTracking
+        // writes exactly what it's given every cycle (never re-derives).
+        const mfeAt = mfePctNow > (position.mfe_pct || 0) ? new Date().toISOString() : (position.mfe_at ?? null);
+        const maeAt = maePctNow < (position.mae_pct || 0) ? new Date().toISOString() : (position.mae_at ?? null);
+
+        // Momentum Validation System sprint: same "stamp only on a
+        // genuine first crossing, otherwise forward unchanged" pattern -
+        // records the lifecycle timeline's +5%/+10% stages. "Reversal" is
+        // deliberately not a separate timestamp here - mfe_at (above) IS
+        // the reversal-start moment for whatever decline follows it.
+        const crossed5pctAt = mfePctNow >= 5 && (position.mfe_pct || 0) < 5 ? new Date().toISOString() : (position.crossed_5pct_at ?? null);
+        const crossed10pctAt = mfePctNow >= 10 && (position.mfe_pct || 0) < 10 ? new Date().toISOString() : (position.crossed_10pct_at ?? null);
+
         repository.updatePositionTracking(position.id, {
-            currentPrice: currentPriceNow, mfePct: mfePctNow, maePct: maePctNow, lastVolume1h: volume1hNow
+            currentPrice: currentPriceNow, mfePct: mfePctNow, maePct: maePctNow, lastVolume1h: volume1hNow,
+            mfeAt, maeAt, crossed5pctAt, crossed10pctAt
         });
+
+        // External-sell detection (Trust/UX sprint): if the user sold
+        // this token directly on GMGN (or any other wallet interface)
+        // outside CRAB entirely, nothing before this ever noticed - the
+        // position sat OPEN forever. Reuses the exact same real balance
+        // check finalizeClose() already makes at decided-close time,
+        // just moved earlier and made unconditional. Exit price is
+        // explicitly an ESTIMATE (last known market price at the moment
+        // CRAB noticed) since the real fill already happened elsewhere
+        // and CRAB never saw it. LIVE-only, by construction - SIMULATION
+        // never sets liveOptions, so this is a zero-cost, zero-risk
+        // no-op for every non-LIVE user.
+        if(liveOptions){
+            const heldBalance = await liveOptions.balanceService.getSplTokenBalance(liveOptions.walletPublicKey, token.token_address);
+            if(!Number(heldBalance.amountRaw) || Number(heldBalance.amountRaw) <= 0){
+                return finalizeClose(position, currentPriceNow, "SELL_EXTERNAL", config, { skipBalanceCheck: true });
+            }
+        }
 
         // Re-verify the Quality Gate on every held position, every cycle -
         // a rug that manifests as a rug-ratio/holder-concentration spike

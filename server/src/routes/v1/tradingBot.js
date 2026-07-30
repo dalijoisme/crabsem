@@ -22,11 +22,26 @@ router.get("/tradingbot/status", controller.getStatus);
 router.get("/tradingbot/config", controller.getConfig);
 router.put("/tradingbot/config", controller.updateConfig);
 
+// Trading Configuration sprint - separate from Strategy Profile
+// (/config above): position sizing/max open positions are now
+// Founder-controlled, independent of which AI profile is active.
+router.get("/tradingbot/trading-configuration", controller.getTradingConfiguration);
+router.put("/tradingbot/trading-configuration", controller.updateTradingConfiguration);
+
+router.get("/tradingbot/decision-center", controller.getDecisionCenter);
 router.get("/tradingbot/portfolio", controller.getPortfolio);
 router.get("/tradingbot/positions", controller.getPositions);
+router.get("/tradingbot/positions/:id", controller.getPositionDetail);
+router.post("/tradingbot/positions/:id/sell", controller.sellPosition);
 router.get("/tradingbot/trades", controller.getTrades);
 router.get("/tradingbot/log", controller.getLog);
 router.get("/tradingbot/equity-curve", controller.getEquityCurve);
+router.get("/tradingbot/momentum-kpi", controller.getMomentumKpi);
+router.get("/tradingbot/missed-winners", controller.getMissedWinners);
+router.get("/tradingbot/self-audit", controller.getSelfAudit);
+router.get("/tradingbot/system-throughput", controller.getSystemThroughput);
+router.get("/tradingbot/bottleneck-report", controller.getBottleneckReport);
+router.get("/tradingbot/target-achievement", controller.getTargetAchievementSummary);
 
 router.post("/tradingbot/start", controller.start);
 router.post("/tradingbot/stop", controller.stop);

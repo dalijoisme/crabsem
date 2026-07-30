@@ -1,0 +1,15 @@
+{
+  "methodology": "Ground truth computed from token_price_history (independent, always-on collector, not part of the tournament simulation) for the exact window 2026-07-20 02:08:00 to 03:09:00. A token 'pumped' if peak price >= 10% above its first observed price in the window. Precision/Recall computed only against tokens for which token_price_history had at least 2 real ticks in the window (most flagged tokens, especially legacy/stale ones from cycle 1, had no ticks and are excluded, not counted as negatives).",
+  "windowStart": "2026-07-20 02:08:00",
+  "windowEnd": "2026-07-20 03:09:00",
+  "tokensWithPriceTicks": 473,
+  "tokensWithGroundTruthComputable": 408,
+  "tokensPumped10pct": 124,
+  "results": {
+    "production": { "flaggedTotal": 329, "flaggedWithGroundTruth": 72, "truePositive": 19, "falsePositive": 53, "falseNegative": 105, "precisionPct": 26.4, "recallPct": 15.3 },
+    "mh_tp10": { "flaggedTotal": 933, "flaggedWithGroundTruth": 129, "truePositive": 61, "falsePositive": 68, "falseNegative": 63, "precisionPct": 47.3, "recallPct": 49.2 },
+    "mh_tp15": { "flaggedTotal": 933, "flaggedWithGroundTruth": 129, "truePositive": 61, "falsePositive": 68, "falseNegative": 63, "precisionPct": 47.3, "recallPct": 49.2 },
+    "mh_partial": { "flaggedTotal": 933, "flaggedWithGroundTruth": 129, "truePositive": 61, "falsePositive": 68, "falseNegative": 63, "precisionPct": 47.3, "recallPct": 49.2 }
+  },
+  "note": "The three Momentum Hunter variants share identical precision/recall because entry quality is a property of the ENTRY engine (Momentum Hunter's scoring), not the exit strategy - this is expected and correct, not an error."
+}

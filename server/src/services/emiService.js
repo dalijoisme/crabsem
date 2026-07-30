@@ -50,7 +50,17 @@ function priceAcceleration(token){
     return change5m > 0 && (change5m * 12) > change1h;
 }
 
-function signalAcceleration(historyRows){
+// Ranking-priority fix: this used to read prediction_history.trigger_reason -
+// the STABLE-only house cache - for "was there a fresh signal recently,"
+// which is meaningless for a profile whose real scoring never writes
+// there (see opportunityPriorityService.js's own computeFactors fix for
+// the full explanation). When a real per-cycle acceleration signal is
+// available (acceleration_overrides set - AGGRESSIVE today), use its own
+// gatePassed - the SAME real price/flow evidence that already governs
+// whether AGGRESSIVE's entry gate itself accepts this token this cycle,
+// not a second, differently-sourced answer to the same question.
+function signalAcceleration(historyRows, acceleration){
+    if(acceleration) return Boolean(acceleration.gatePassed);
     const row0 = historyRows?.[0] ?? null;
     if(!row0?.trigger_reason || COLD_TRIGGER_REASONS.has(row0.trigger_reason)) return false;
     const ageMinutes = minutesSince(row0.prediction_time, false);
@@ -61,8 +71,10 @@ function signalAcceleration(historyRows){
 // batchContext.trenchesByToken.get(token.token_address) - the SAME map
 // opportunityPriorityService.js already fetched this cycle, never a
 // second query. historyRows: batchContext.historyByToken.get(...) -
-// same reuse.
-function classify(token, trenchesEntry, historyRows){
+// same reuse. acceleration: optional, this token's real per-cycle
+// acceleration signal (undefined for every profile except one with
+// acceleration_overrides set).
+function classify(token, trenchesEntry, historyRows, acceleration){
 
     const tokenAgeMinutes = resolveTokenAgeMinutes(token, trenchesEntry);
 
@@ -70,7 +82,7 @@ function classify(token, trenchesEntry, historyRows){
     if(tokenAgeMinutes > MAX_AGE_MINUTES) return { accelerating: false, reason: "TOO_MATURE" };
 
     const priceAccel = priceAcceleration(token);
-    const signalAccel = signalAcceleration(historyRows);
+    const signalAccel = signalAcceleration(historyRows, acceleration);
 
     if(priceAccel && signalAccel) return { accelerating: true, reason: "SIGNAL_AND_PRICE_ACCELERATION" };
     if(priceAccel) return { accelerating: true, reason: "PRICE_ACCELERATION_ONLY" };
@@ -80,14 +92,17 @@ function classify(token, trenchesEntry, historyRows){
 }
 
 // tokens: BUY Candidate list. batchContext: opportunityPriorityService.fetchBatchContext(tokens)'s
-// result - reused, not re-fetched. Returns Map(token_address -> {accelerating, reason}).
-function classifyMany(tokens, batchContext){
+// result - reused, not re-fetched. accelerationByAddress: optional Map
+// from tradingBotEngine.js - see classify()'s own doc above. Returns
+// Map(token_address -> {accelerating, reason}).
+function classifyMany(tokens, batchContext, accelerationByAddress){
     const map = new Map();
     for(const token of tokens){
         map.set(token.token_address, classify(
             token,
             batchContext.trenchesByToken.get(token.token_address),
-            batchContext.historyByToken.get(token.token_address)
+            batchContext.historyByToken.get(token.token_address),
+            accelerationByAddress?.get(token.token_address)
         ));
     }
     return map;

@@ -48,7 +48,7 @@ async function generateTradingWallet(req, res, next){
 
 async function status(req, res, next){
     try{
-        sendSuccess(res, walletService.getStatus(req.user.id));
+        sendSuccess(res, await walletService.getStatus(req.user.id));
     }
     catch(err){ next(err); }
 }

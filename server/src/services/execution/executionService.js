@@ -223,7 +223,13 @@ function createExecutionService({ repository, connectionProvider, signingService
         }
         machine.transition(STATES[confirmation.outcome], meta);
 
-        return { executionId, outcome: confirmation.outcome };
+        // txHash (Trust/UX sprint): `signature` was always real and in
+        // scope here - it just never left this function, so
+        // tradeManager.js's own `txHash` variable stayed permanently
+        // null even after a real, confirmed trade. Every existing caller
+        // already destructures only {executionId, outcome}, so this is
+        // additive.
+        return { executionId, outcome: confirmation.outcome, txHash: signature };
 
     }
 

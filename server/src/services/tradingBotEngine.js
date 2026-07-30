@@ -45,6 +45,8 @@ const opportunityPriorityService = require("./opportunityPriorityService");
 const emiService = require("./emiService");
 const tradeManager = require("./tradeManager");
 const entryGateService = require("./entryGateService");
+const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
+const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 
 // tokens/liveByAddress are computed by scheduler/tradingBotScheduler.js
 // (ONCE per tick, shared across every user - see runCycle() below) and
@@ -72,6 +74,18 @@ const entryGateService = require("./entryGateService");
 //      unchanged.
 //   3. neither - unchanged default order (gmgnTokenRepository.getAllTokens()'s
 //      own ORDER BY market_cap DESC).
+//
+// Live Decision Center / Signal Center sprint: returns
+// { orderedTokens, rankInfoByAddress } instead of a bare array - the
+// ORDER itself is byte-identical to before in every path (same
+// computation, same result array), rankInfoByAddress is purely additive:
+// a Map(token_address -> {rank, priorityScore, tier, combinedRank}),
+// populated only in the Opportunity Priority path (empty Map otherwise -
+// an honestly-absent rank downstream, never a fabricated one). This is
+// opportunityPriorityService.rank()'s own already-computed output,
+// previously discarded one line after being built (kept only
+// `r.token`) - same "computed then discarded" shape already fixed for
+// acceleration/breakdown.
 function orderCandidates(tokens, liveByAddress, botConfig){
 
     if(botConfig.opportunity_priority_enabled){
@@ -93,11 +107,30 @@ function orderCandidates(tokens, liveByAddress, botConfig){
 
         const batchContext = opportunityPriorityService.fetchBatchContext(buyCandidates);
 
+        // Ranking-priority fix: this cycle's own real acceleration signal
+        // (computed once already, per token, by the scoring pass that
+        // decided BUY/STRONG BUY in the first place - see
+        // scheduler/tradingBotScheduler.js's computeLiveByAddressForPhilosophy)
+        // is only ever present for a profile that sets acceleration_overrides
+        // (AGGRESSIVE today). undefined for every other profile, so
+        // opportunityPriorityService/emiService fall back to their existing
+        // prediction_history-based factors unchanged - BALANCED's ordering
+        // is untouched by this.
+        const accelerationByAddress = new Map(
+            buyCandidates.map(t => [t.token_address, liveByAddress.get(t.token_address)?.acceleration])
+        );
+
         const emiFlags = botConfig.emi_enabled
-            ? emiService.classifyMany(buyCandidates, batchContext)
+            ? emiService.classifyMany(buyCandidates, batchContext, accelerationByAddress)
             : null;
 
-        const ranked = opportunityPriorityService.rank(buyCandidates, batchContext, emiFlags);
+        const ranked = opportunityPriorityService.rank(buyCandidates, batchContext, emiFlags, accelerationByAddress);
+
+        const rankInfoByAddress = new Map(
+            ranked.map((r, i) => [r.token.token_address, {
+                rank: i, priorityScore: r.priorityScore, tier: r.tier, combinedRank: r.combinedRank
+            }])
+        );
 
         // Non-BUY tokens are appended, unordered relative to each other -
         // they will all be skipped in the loop below regardless of
@@ -105,15 +138,15 @@ function orderCandidates(tokens, liveByAddress, botConfig){
         // relative order has no observable effect. Kept in the list so
         // skipReasons tallying below is unchanged from before this
         // milestone.
-        return [...ranked.map(r => r.token), ...rest];
+        return { orderedTokens: [...ranked.map(r => r.token), ...rest], rankInfoByAddress };
 
     }
 
     if(botConfig.execution_mode === "HIGH_THROUGHPUT"){
-        return tradingBotCandidateFilter.rankCandidates(tokens);
+        return { orderedTokens: tradingBotCandidateFilter.rankCandidates(tokens), rankInfoByAddress: new Map() };
     }
 
-    return tokens;
+    return { orderedTokens: tokens, rankInfoByAddress: new Map() };
 
 }
 
@@ -188,7 +221,7 @@ async function runCycle(userId, tokens, liveByAddress){
     const botConfig = tradingBotRepository.getConfig(userId);
     const byAddress = new Map(tokens.map(t => [t.token_address, t]));
 
-    const orderedTokens = orderCandidates(tokens, liveByAddress, botConfig);
+    const { orderedTokens, rankInfoByAddress } = orderCandidates(tokens, liveByAddress, botConfig);
 
     // Per-user gate/manager, bound to THIS user's own scoped repository -
     // the exact same forParticipant()-style seam
@@ -217,18 +250,79 @@ async function runCycle(userId, tokens, liveByAddress){
     const portfolio = tradingBotService.getPortfolio(userId);
     let availableCash = portfolio.availableCash;
 
+    // Momentum Validation System sprint (Self-Comparison): this cycle's
+    // own real ranked BUY-tier list - already fully computed by
+    // orderCandidates/rankInfoByAddress above, captured once here so any
+    // BUY made below can record its real siblings (who else was ranked,
+    // same cycle) without re-deriving anything. Purely observational -
+    // never read back into ranking/scoring, only ever serialized onto a
+    // position for later display.
+    const buyTierCandidates = orderedTokens.filter(t => rankInfoByAddress.has(t.token_address));
+
+    // Phase 2 (Live Validation & Bottleneck Elimination): real, data-backed
+    // "Ranking Rejected" - a ranked BUY-tier candidate that never even got
+    // a turn because a higher-ranked one already consumed the last open
+    // slot/cash this cycle. Tracked here (never touching WHICH tokens are
+    // eligible or their order) so it can be recorded once, after the loop,
+    // for whichever real candidates were never reached.
+    const visitedTokenAddresses = new Set();
+    let breakReason = null;
+
     for(const token of orderedTokens){
 
-        if(openCount >= botConfig.max_open_positions) break;
-        if(availableCash < botConfig.min_order_size) break;
+        if(openCount >= botConfig.max_open_positions){ breakReason = "SLOT_FULL_BEFORE_TURN"; break; }
+        if(availableCash < botConfig.min_order_size){ breakReason = "CASH_EXHAUSTED_BEFORE_TURN"; break; }
+
+        visitedTokenAddresses.add(token.token_address);
 
         const live = liveByAddress.get(token.token_address);
+        // Live Decision Center / Signal Center sprint: this cycle's own
+        // real rank (from orderCandidates' rankInfoByAddress, above) -
+        // attached onto the SAME `live` object entryGateService passes
+        // through unmodified as `evaluation.live`, same pattern
+        // breakdown/acceleration already use. undefined (never a
+        // fabricated 0) when Opportunity Priority is off this cycle.
+        const rankInfo = rankInfoByAddress.get(token.token_address);
+        if(rankInfo){
+            live.rankAtEntry = rankInfo.rank;
+            live.priorityScoreAtEntry = rankInfo.priorityScore;
+            // Momentum Validation System sprint: real "how long has CRAB
+            // been eyeing this token" history - bounded to the same small
+            // real BUY-tier set rankInfo already gates on, never the
+            // full scan universe.
+            tradingBotCandidateSightingsRepository.recordSighting(userId, {
+                tokenAddress: token.token_address, tokenSymbol: token.symbol, entryPrice: token.price
+            });
+        }
         const evaluation = entryGateForUser.evaluateEntry(token, live, botConfig, openCount);
 
         if(!evaluation.eligible){
             skipped++;
             skipReasons[evaluation.reason] = (skipReasons[evaluation.reason] || 0) + 1;
+            // Missed Opportunity sprint priority: only for tokens that
+            // genuinely cleared the BUY/STRONG BUY action tier (rankInfo
+            // truthy) - never for NOT_A_BUY_TIER_*/HARD_EXCLUDED_*/
+            // NO_ENGINE_DECISION_YET rejections, which would otherwise
+            // make this table grow by the full scan size instead of the
+            // small real qualified-candidate count.
+            if(rankInfo){
+                tradingBotMissedOpportunityRepository.upsertPending(userId, {
+                    tokenAddress: token.token_address, tokenSymbol: token.symbol,
+                    rankAtSkip: rankInfo.rank, priorityScoreAtSkip: rankInfo.priorityScore,
+                    reason: evaluation.reason, priceAtSkip: token.price
+                });
+            }
             continue;
+        }
+
+        if(rankInfo){
+            live.siblings = buyTierCandidates
+                .filter(t => t.token_address !== token.token_address)
+                .map(t => ({
+                    tokenAddress: t.token_address, tokenSymbol: t.symbol,
+                    rank: rankInfoByAddress.get(t.token_address).rank,
+                    priorityScore: rankInfoByAddress.get(t.token_address).priorityScore
+                }));
         }
 
         const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
@@ -241,8 +335,37 @@ async function runCycle(userId, tokens, liveByAddress){
         else{
             skipped++;
             skipReasons[result.reason] = (skipReasons[result.reason] || 0) + 1;
+            // Phase 2: openPosition's own post-eligibility failures
+            // (cash/price/risk-bands/execution) were never persisted
+            // before - only entryGateService's rejections were. Same
+            // real rank already in scope, same bounded gate (rankInfo
+            // truthy - this token already cleared the BUY/STRONG BUY tier).
+            if(rankInfo){
+                tradingBotMissedOpportunityRepository.upsertPending(userId, {
+                    tokenAddress: token.token_address, tokenSymbol: token.symbol,
+                    rankAtSkip: rankInfo.rank, priorityScoreAtSkip: rankInfo.priorityScore,
+                    reason: result.reason, priceAtSkip: token.price
+                });
+            }
         }
 
+    }
+
+    // Phase 2: any real ranked BUY-tier candidate the loop above never
+    // even reached (it broke on slot/cash exhaustion first) - the real,
+    // data-backed "Ranking Rejected" case. Never a fabricated reason -
+    // only recorded when the loop genuinely broke early, and only for
+    // candidates genuinely never visited this cycle.
+    if(breakReason){
+        for(const token of buyTierCandidates){
+            if(visitedTokenAddresses.has(token.token_address)) continue;
+            const rankInfo = rankInfoByAddress.get(token.token_address);
+            tradingBotMissedOpportunityRepository.upsertPending(userId, {
+                tokenAddress: token.token_address, tokenSymbol: token.symbol,
+                rankAtSkip: rankInfo.rank, priorityScoreAtSkip: rankInfo.priorityScore,
+                reason: breakReason, priceAtSkip: token.price
+            });
+        }
     }
 
     // Equity snapshot at the END of the cycle (after this cycle's own
@@ -251,7 +374,77 @@ async function runCycle(userId, tokens, liveByAddress){
     // portfolio value read at the top of this cycle (Sprint A Goal 1:
     // the real equity curve tradingBotService.getPortfolio()'s
     // maxDrawdownPct depends on).
-    tradingBotRepository.insertEquitySnapshot(userId, tradingBotService.getPortfolio(userId).equity);
+    //
+    // Phase 2 (System Throughput): openCount/availableCash are this
+    // exact cycle's own final real values (already tracked through the
+    // buy loop above) - carried onto the same snapshot row so Average
+    // Simultaneous Position / Average Idle Cash need no second query.
+    tradingBotRepository.insertEquitySnapshot(userId, tradingBotService.getPortfolio(userId).equity, openCount, availableCash);
+
+    // Live Decision Center sprint: a bounded snapshot of what THIS cycle
+    // actually saw - liveByAddress/rankInfoByAddress are both real,
+    // already-computed per-token decisions that otherwise vanish the
+    // moment this function returns (structurally-excluded/dead-dumped
+    // tokens, hasDecision:false, are skipped entirely - genuinely
+    // uninteresting noise, not a real candidate). Every real BUY/STRONG
+    // BUY tier token is kept (already a small, gated set - the actual
+    // "qualified candidates", never the full scan universe); HOLD/AVOID
+    // are further capped to a small top-N sample for visibility, ordered
+    // by their own already-computed confidence (never a new score).
+    // Replaces this user's entire snapshot every cycle - bounded by
+    // however many rows this produces, never by `scanned`.
+    const qualifiedRows = [], holdCandidates = [], avoidCandidates = [];
+    for(const token of tokens){
+        const live = liveByAddress.get(token.token_address);
+        if(!live || !live.hasDecision) continue;
+        const rankInfo = rankInfoByAddress.get(token.token_address);
+        const row = {
+            tokenAddress: token.token_address, tokenSymbol: token.symbol,
+            action: live.action, confidence: live.confidence, risk: live.risk,
+            tier: rankInfo?.tier ?? null, rank: rankInfo?.rank ?? null, priorityScore: rankInfo?.priorityScore ?? null,
+            reasons: live.reasons?.length ? live.reasons : (live.exclusionReason ? [live.exclusionReason] : [])
+        };
+        if(live.action === "BUY" || live.action === "STRONG BUY") qualifiedRows.push(row);
+        else if(live.action === "HOLD") holdCandidates.push(row);
+        else avoidCandidates.push(row);
+    }
+    holdCandidates.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+    const waitRows = holdCandidates.slice(0, 20);
+    const avoidRows = avoidCandidates.slice(0, 5);
+    tradingBotRepository.replaceDecisionSnapshot(userId, [...qualifiedRows, ...waitRows, ...avoidRows]);
+
+    // Trust/UX sprint: the scheduler already console.log's this exact
+    // summary server-side (scheduler/tradingBotScheduler.js) - nothing
+    // before this ever reached the dashboard's own Activity Log, so
+    // Scanner/Filtering/Ranking/Monitor were invisible to the user
+    // entirely. One row per cycle, not one per scanned token - bounded
+    // by TIME (~5,760/day at a 15s interval), never by the ~12,000-token
+    // scan size, which is what a per-token log would cost instead.
+    tradingBotRepository.insertLog(userId, {
+        logType: "SYSTEM",
+        message: `Cycle complete: scanned ${scanned}, opened ${opened}, closed ${closed}, skipped ${skipped}.`,
+        meta: { scanned, opened, closed, skipped, skipReasons }
+    });
+
+    // Live Decision Center sprint: two more real, per-cycle SYSTEM rows -
+    // Filtering and Ranking - still bounded by cycle count (not token
+    // count), same convention as the cycle-summary row above. Both
+    // derived purely from data already computed above in this same
+    // cycle, never a new computation.
+    tradingBotRepository.insertLog(userId, {
+        logType: "SYSTEM",
+        message: `Filtering: ${qualifiedRows.length} qualified (BUY/STRONG BUY) of ${scanned} scanned.`,
+        meta: { qualifiedCount: qualifiedRows.length, holdCount: holdCandidates.length, avoidCount: avoidCandidates.length, scanned }
+    });
+
+    const topCandidate = qualifiedRows.find(r => (rankInfoByAddress.get(r.tokenAddress)?.rank ?? null) === 0);
+    tradingBotRepository.insertLog(userId, {
+        logType: "SYSTEM",
+        message: topCandidate
+            ? `Ranking: top candidate is ${topCandidate.tokenSymbol || topCandidate.tokenAddress.slice(0, 8)} at rank #1 (priority ${topCandidate.priorityScore}).`
+            : "Ranking: no ranked BUY-tier candidate this cycle.",
+        meta: { topCandidate: topCandidate ? { tokenAddress: topCandidate.tokenAddress, tokenSymbol: topCandidate.tokenSymbol, priorityScore: topCandidate.priorityScore } : null }
+    });
 
     return { scanned, opened, closed, skipped, skipReasons };
 
@@ -261,4 +454,13 @@ async function runCycle(userId, tokens, liveByAddress){
 // Spec section 18 regression test (tradingBotEngine.test.js) - a pure
 // function, unaffected by the multi-tenancy refactor above, no other
 // module in this codebase calls it directly.
-module.exports = { runCycle, orderCandidates };
+//
+// buildLiveExecutionOptions is exported for tradingBotService.js's
+// forceSellAll()/sellPosition() (Trust/UX sprint) - a user-triggered
+// manual sell needs the exact same Founder-Wallet-gated liveOptions
+// bundle this file's own runCycle() already builds, never a second
+// construction of it. Required lazily from tradingBotService.js (not a
+// top-level require there) since this file already requires
+// tradingBotService.js itself - a top-level require in the other
+// direction would be circular.
+module.exports = { runCycle, orderCandidates, buildLiveExecutionOptions };

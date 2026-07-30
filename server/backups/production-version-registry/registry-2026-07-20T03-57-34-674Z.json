@@ -1,0 +1,41 @@
+{
+  "exportedAt": "2026-07-20T03:57:34.676Z",
+  "activeVersion": "production_v2",
+  "registry": {
+    "production_v1": {
+      "status": "LEGACY",
+      "engineShortName": "Original Production",
+      "exitStrategyShortName": "Native Dynamic",
+      "engine": "Original Production (server/src/services/intelligenceEngine.js, unmodified)",
+      "exitStrategy": "Native Dynamic (per-signal target/stop from server/src/services/tradePlanService.js)",
+      "description": "Original conservative production engine - participant/market weighted scoring with an earliness discount on momentum that has already moved.",
+      "rollback": true,
+      "purpose": "Rollback candidate",
+      "promotedAt": null,
+      "retiredAt": "2026-07-20"
+    },
+    "production_v2": {
+      "status": "ACTIVE",
+      "engineShortName": "Momentum Hunter",
+      "exitStrategyShortName": "Fixed TP15",
+      "engine": "Momentum Hunter (server/src/services/researchEngineFactory.js, philosophy key 'momentumHunter')",
+      "exitStrategy": "Fixed Take Profit 15% (native dynamic Stop Loss retained)",
+      "description": "Validated successor after the Engine League tournament (6 hours, 24 philosophies x 8 exit strategies, 192 shadow portfolios) and the Real Capital Validation Tournament (1 hour, cash-constrained real-account model, 1%/1% buy/sell fees, no leverage). See server/research-archive/ for the full, permanently-archived data behind this decision.",
+      "rollback": true,
+      "purpose": "Default production engine",
+      "promotedAt": "2026-07-20",
+      "retiredAt": null,
+      "referenceConfig": {
+        "initialCapital": 100,
+        "positionSizePctOfCash": 0.2,
+        "maxPositionSizeUsd": 100,
+        "maxOpenPositions": 5,
+        "onePositionPerToken": true,
+        "buyFeePct": 0.01,
+        "sellFeePct": 0.01,
+        "slippagePct": 0.01,
+        "mode": "LIVE"
+      }
+    }
+  }
+}

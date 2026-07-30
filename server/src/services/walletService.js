@@ -39,6 +39,10 @@ const config = require("../config/env");
 const userWalletRepository = require("../repositories/userWalletRepository");
 const tradingWalletRepository = require("../repositories/tradingWalletRepository");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
+// Safe as a top-level require - pure math plus one function taking
+// gmgnClient as a parameter, no requires of its own, so no circular-
+// dependency risk (unlike ./execution below, which requires this file).
+const { getSolUsdPrice, LAMPORTS_PER_SOL } = require("./execution/usdToSolConverter");
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes - short-lived, per the plan
 
@@ -231,12 +235,75 @@ function importTradingWallet(userId, secretKeyInput){
 
 }
 
-function getStatus(userId){
+// Trust/UX sprint: the real on-chain counterpart to depositedBalanceUsd
+// above, which is a self-reported figure only ever set by a manual
+// deposit call, never synced to the chain (the exact gap a real trade
+// already exposed - dashboard said $67, the real wallet held $11.71).
+// Reuses balanceValidationService/usdToSolConverter exactly as already
+// proven at sell-time and pre-buy-sufficiency-time - no new RPC
+// integration. Fails soft on every real-world gap (no RPC configured, a
+// GMGN price-quote hiccup) - a dashboard read must never throw just
+// because a network call it triggered had a bad moment; it returns an
+// honest unavailableReason instead of a fabricated number.
+async function getRealWalletBalance(userId){
+
+    const trading = tradingWalletRepository.findByUserId(userId);
+    if(!trading) return null;
+
+    if(!config.SOLANA_RPC_URL){
+        return { publicKey: trading.public_key, solLamports: null, solAmount: null, solUsdPrice: null, solUsd: null, unavailableReason: "SOLANA_RPC_URL is not configured" };
+    }
+
+    // Required lazily - services/execution/index.js requires this file
+    // (walletService.js) itself, so a top-level require here would be
+    // circular. Same convention services/tradingBotEngine.js's own
+    // buildLiveExecutionOptions() already uses for the identical reason.
+    const { balanceService, gmgnClient } = require("./execution");
+
+    let solLamports;
+    try{
+        solLamports = await balanceService.getNativeSolBalanceLamports(trading.public_key);
+    }
+    catch(e){
+        return { publicKey: trading.public_key, solLamports: null, solAmount: null, solUsdPrice: null, solUsd: null, unavailableReason: `RPC balance read failed: ${e.message}` };
+    }
+
+    const solAmount = solLamports / LAMPORTS_PER_SOL;
+
+    // The lamports figure above is already real and final regardless of
+    // what happens next - a failed USD price probe only ever nulls out
+    // the USD conversion, never the real balance itself.
+    let solUsdPrice = null, solUsd = null;
+    try{
+        solUsdPrice = await getSolUsdPrice(gmgnClient, trading.public_key);
+        solUsd = solAmount * solUsdPrice;
+    }
+    catch(e){ /* price probe failed - solLamports/solAmount above are still real and returned */ }
+
+    return { publicKey: trading.public_key, solLamports, solAmount, solUsdPrice, solUsd, unavailableReason: null };
+
+}
+
+// Async as of the Trust/UX sprint (was sync) - its one real caller
+// (controllers/ownerWalletController.js's status handler) is already an
+// async Express handler; nothing else in the codebase calls
+// walletService.getStatus() (confirmed by grep), so this has no
+// hot-path/trading-engine impact.
+async function getStatus(userId){
     const owner = userWalletRepository.findByUserId(userId);
     const trading = tradingWalletRepository.findByUserId(userId);
+    const realBalance = trading ? await getRealWalletBalance(userId) : null;
     return {
         ownerWallet: owner ? { address: owner.wallet_address, verified: Boolean(owner.verified_at) } : null,
-        tradingWallet: trading ? { publicKey: trading.public_key, depositedBalanceUsd: trading.deposited_balance_usd } : null
+        tradingWallet: trading ? {
+            publicKey: trading.public_key,
+            depositedBalanceUsd: trading.deposited_balance_usd,
+            realSolBalanceLamports: realBalance?.solLamports ?? null,
+            realSolAmount: realBalance?.solAmount ?? null,
+            realSolUsdPrice: realBalance?.solUsdPrice ?? null,
+            realSolUsd: realBalance?.solUsd ?? null,
+            realBalanceUnavailableReason: realBalance?.unavailableReason ?? null
+        } : null
     };
 }
 
@@ -312,6 +379,6 @@ function withdrawFunds(userId, amountUsd){
 
 module.exports = {
     connectWallet, issueOwnershipChallenge, verifyOwnership,
-    generateTradingWallet, importTradingWallet, getStatus, depositFunds, withdrawFunds,
+    generateTradingWallet, importTradingWallet, getStatus, getRealWalletBalance, depositFunds, withdrawFunds,
     decryptSecretKey
 };

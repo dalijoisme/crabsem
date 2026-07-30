@@ -1,0 +1,100 @@
+{
+  "exportedAt": "2026-07-20T03:57:34.678Z",
+  "engineConfig": {
+    "productionVersion": {
+      "active": "production_v2",
+      "status": "ACTIVE",
+      "engineName": "Momentum Hunter",
+      "exitStrategy": "Fixed TP15",
+      "promotedAt": "2026-07-20"
+    },
+    "actionTiers": {
+      "strongBuy": 80,
+      "buy": 62,
+      "hold": 35
+    },
+    "safetyVeto": {
+      "isHoneypot": true,
+      "minLiquidityUsd": 2000,
+      "minBackingRatio": 0.01,
+      "minHolders": 15
+    },
+    "confidence": {
+      "participantWeight": 0.6,
+      "marketWeight": 0.4,
+      "mismatchPenaltyPerPoint": 0.15,
+      "maxCompletenessPenalty": 25,
+      "min": 15,
+      "max": 99
+    },
+    "risk": {
+      "mediumAtRiskReasonCount": 1,
+      "highAtRiskReasonCount": 4
+    },
+    "participantWeights": {
+      "accumulation": 20,
+      "smartMoney": 18,
+      "kol": 12,
+      "whale": 10,
+      "developer": 10,
+      "sniperQuality": 8,
+      "bundleQuality": 7,
+      "insiderQuality": 5,
+      "walletQuality": 5,
+      "walletProfitability": 5
+    },
+    "marketWeights": {
+      "liquidity": 30,
+      "security": 30,
+      "holderDistribution": 15,
+      "volume": 10,
+      "priceStability": 15
+    },
+    "structuralValidation": {
+      "downtrend1hPct": -10,
+      "recentDump5mPct": -8,
+      "structuralBreakdownDrawdown": 0.5,
+      "netDistributionUsd": -500,
+      "distributingSubScoreFraction": 0.25,
+      "penaltyPerFlag": 15,
+      "maxPenalty": 45
+    },
+    "freshness": {
+      "lifecycle": {
+        "activeMaxAgeSeconds": 300,
+        "watchlistMaxAgeSeconds": 3600
+      },
+      "confidencePenalty": {
+        "maxPenalty": 20,
+        "fullPenaltyAfterSeconds": 3600
+      }
+    },
+    "tradePlan": {
+      "entryZone": {
+        "minBandPct": 2,
+        "maxBandPct": 15,
+        "momentumScaleFactor": 0.12
+      },
+      "target": {
+        "maxTargetPct": 60,
+        "downtrendPct": -10,
+        "downtrendTargetFactor": 0.5
+      },
+      "stopLoss": {
+        "baseStopPct": 12,
+        "highRiskStopPct": 7,
+        "lowConfidenceWidenPct": 6,
+        "lowConfidenceThreshold": 35,
+        "lowLiquidityUsdThreshold": 10000,
+        "lowLiquidityWidenPct": 5,
+        "lowVolumeRatioThreshold": 0.05,
+        "lowVolumeWidenPct": 4,
+        "maxStopPct": 35
+      },
+      "readiness": {
+        "minConfidence": 30,
+        "minParticipantModulesWithData": 2
+      }
+    }
+  }
+}

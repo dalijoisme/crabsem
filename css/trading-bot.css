@@ -203,8 +203,6 @@
 
 .tbLogLine:last-child{ border-bottom:none; }
 
-.tbLogLive{ color:var(--muted); font-style:italic; }
-
 .tbLogTag{
     display:inline-block;
     font-weight:700;
@@ -320,3 +318,172 @@
     font-size:12.5px;
     color:var(--yellow);
 }
+
+/* ---- Position Detail (Trust/UX sprint) - built entirely from real,
+   already-persisted data (services/tradingBotService.js's
+   getPositionDetail); an honest "no breakdown recorded" state shows for
+   any position opened before this feature existed, never a fake one. ---- */
+
+.tbDetailOverlay{
+    position:fixed;
+    inset:0;
+    background:rgba(5,7,12,0.72);
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:40px 16px;
+    z-index:200;
+    overflow-y:auto;
+}
+
+.tbDetailOverlay.hidden{ display:none; }
+
+.tbDetailPanel{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:24px;
+    max-width:640px;
+    width:100%;
+    position:relative;
+}
+
+.tbDetailClose{
+    position:absolute;
+    top:14px;
+    right:14px;
+    background:none;
+    border:none;
+    color:var(--muted);
+    font-size:18px;
+    cursor:pointer;
+    line-height:1;
+}
+
+.tbDetailClose:hover{ color:var(--text); }
+
+.tbDetailPanel h3{
+    margin:0 0 4px;
+    font-size:17px;
+}
+
+.tbDetailPanel .tbDetailSub{
+    color:var(--muted);
+    font-size:12.5px;
+    margin-bottom:18px;
+}
+
+.tbDetailPanel h4{
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--muted);
+    margin:18px 0 8px;
+}
+
+.tbReasonList{
+    margin:0;
+    padding-left:18px;
+    font-size:13px;
+    line-height:1.7;
+}
+
+.tbModuleBar{
+    display:grid;
+    grid-template-columns:140px 1fr 60px;
+    align-items:center;
+    gap:10px;
+    font-size:12.5px;
+    margin-bottom:6px;
+}
+
+.tbModuleBarTrack{
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:6px;
+    height:8px;
+    overflow:hidden;
+}
+
+.tbModuleBarFill{
+    height:100%;
+    background:var(--purple);
+}
+
+.tbPositionRow{ cursor:pointer; }
+.tbPositionRow:hover{ background:rgba(255,255,255,0.03); }
+
+/* ---- Position Detail timeline (Live Decision Center / Signal Center
+   sprint): BUY -> Highest -> Lowest -> Current -> Exit -> Sell, real
+   stages only - a stage that never happened (no Exit/Sell yet on an OPEN
+   position) is simply omitted, never rendered as a fake placeholder. ---- */
+
+.tbTimeline{
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+    margin-bottom:10px;
+}
+
+.tbTimelineStage{
+    display:grid;
+    grid-template-columns:90px 1fr 110px;
+    align-items:center;
+    gap:10px;
+    font-size:12.5px;
+    padding:7px 10px;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:8px;
+}
+
+.tbTimelineLabel{ font-weight:700; color:var(--text); }
+.tbTimelineDetail{ color:var(--text); }
+.tbTimelineAt{ color:var(--muted); text-align:right; font-size:11.5px; }
+
+/* ---- Live Decision Center (Live Decision Center sprint) - the AI
+   thinking in real time: real bounded BUY/WAIT/AVOID queues, never the
+   full scan universe. ---- */
+
+.tbDecisionMeta{
+    font-size:12.5px;
+    color:var(--muted);
+    margin:12px 0 16px;
+}
+
+.tbQueueGrid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));
+    gap:14px;
+}
+
+.tbQueueCol{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:14px 16px;
+}
+
+.tbQueueCol h4{
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.4px;
+    color:var(--muted);
+    margin:0 0 10px;
+}
+
+.tbCandidateRow{
+    display:grid;
+    grid-template-columns:70px 78px 46px 1fr;
+    align-items:center;
+    gap:8px;
+    font-size:12px;
+    padding:7px 0;
+    border-bottom:1px solid rgba(255,255,255,.04);
+}
+
+.tbCandidateRow:last-child{ border-bottom:none; }
+
+.tbCandidateSymbol{ font-weight:700; color:var(--text); }
+.tbCandidateConfidence{ color:var(--muted); text-align:right; }
+.tbCandidateReasons{ color:#8b96a5; font-size:11.5px; }

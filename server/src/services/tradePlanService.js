@@ -145,7 +145,14 @@ function assessTradePlanReadiness(signal){
 // thinness widens the stop independently of the engine's own risk
 // label - each one a genuine input, not decoration.
 
-function buildRiskBands(token, signal){
+// stopLossOverrides (Strategy Profile refactor, optional, trailing):
+// { baseStopPct, highRiskStopPct, maxStopPct } - a partial object;
+// any field it omits falls back to config/tradePlanConfig.js's own
+// value exactly as before. Entry-zone/target formulas are untouched -
+// only the stop-loss distance is profile-tunable.
+function buildRiskBands(token, signal, stopLossOverrides){
+
+    const stopLossConfig = stopLossOverrides ? { ...config.stopLoss, ...stopLossOverrides } : config.stopLoss;
 
     const currentMc = Number(token.market_cap) || null;
 
@@ -186,7 +193,7 @@ function buildRiskBands(token, signal){
 
     const targetMc = currentMc * (1 + targetPct / 100);
 
-    let stopPct = signal.risk === "HIGH" ? config.stopLoss.highRiskStopPct : config.stopLoss.baseStopPct;
+    let stopPct = signal.risk === "HIGH" ? stopLossConfig.highRiskStopPct : stopLossConfig.baseStopPct;
 
     if(signal.confidence < config.stopLoss.lowConfidenceThreshold) stopPct += config.stopLoss.lowConfidenceWidenPct;
 
@@ -211,7 +218,7 @@ function buildRiskBands(token, signal){
 
     }
 
-    stopPct = Math.min(config.stopLoss.maxStopPct, stopPct);
+    stopPct = Math.min(stopLossConfig.maxStopPct, stopPct);
 
     const stopMc = currentMc * (1 - stopPct / 100);
 

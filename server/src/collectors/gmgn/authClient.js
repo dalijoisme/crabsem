@@ -11,6 +11,21 @@
 
 const { buildAuthQuery, buildMessage, detectAlgorithm, sign } = require("./signer");
 
+// ROOT CAUSE FIX (collector-staleness investigation): every request
+// below used to have no timeout at all - Node's built-in fetch waits
+// indefinitely by default. A single slow/hung GMGN response could stall
+// an `await fetch(...)` for minutes, and since
+// scheduler/gmgnTrendingScheduler.js runs all 7 collectors SEQUENTIALLY
+// inside one tick (never overlapping - see its `isRunning` guard), one
+// stuck call anywhere in this file stalled the entire batch, which is
+// exactly what produced the multi-minute gaps observed in
+// gmgn_tokens.updated_at (verified against real timestamps, not
+// inferred). 15s is generous versus this endpoint's normal real-world
+// latency (a few hundred ms) while bounding the worst case to a small
+// multiple of the scheduler's own 30s tick interval, instead of
+// unbounded.
+const REQUEST_TIMEOUT_MS = 15000;
+
 function buildUrl(base, query){
 
     const params = new URLSearchParams();
@@ -31,6 +46,34 @@ function buildUrl(base, query){
     }
 
     return `${base}?${params.toString()}`;
+
+}
+
+// Wraps a bare timeout abort into the same GmgnAuthError shape every
+// other failure in this file already throws, so
+// scheduler/gmgnTrendingScheduler.js's per-collector catch (and the
+// health monitoring reading its recorded lastError - see
+// getCollectorHealth() there) sees one consistent, readable message
+// ("GET /v1/market/rank timed out after 15000ms") instead of a bare
+// AbortError with no endpoint context.
+async function fetchWithTimeout(url, options, method, subPath){
+
+    try{
+
+        return await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+
+    }
+    catch(err){
+
+        if(err.name === "TimeoutError" || err.name === "AbortError"){
+
+            throw new GmgnAuthError(`${method} ${subPath} timed out after ${REQUEST_TIMEOUT_MS}ms`, {});
+
+        }
+
+        throw err;
+
+    }
 
 }
 
@@ -115,7 +158,7 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
 
         const bodyStr = body !== null ? JSON.stringify(body) : undefined;
 
-        const res = await fetch(url, { method, headers, body: bodyStr });
+        const res = await fetchWithTimeout(url, { method, headers, body: bodyStr }, method, subPath);
 
         return parseResponse(method, subPath, res);
 
@@ -153,7 +196,7 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
 
         };
 
-        const res = await fetch(url, { method, headers, body: bodyStr || undefined });
+        const res = await fetchWithTimeout(url, { method, headers, body: bodyStr || undefined }, method, subPath);
 
         return parseResponse(method, subPath, res);
 
@@ -226,6 +269,69 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
     async function getGasPrice(chain){
 
         return authExistRequest("GET", "/v1/trade/gas_price", { chain });
+
+    }
+
+    // GET /v1/trade/quote - real-time swap quote (price, route, fee,
+    // blockhash/expiry scaffold). API-key-only auth ("exist") - verified
+    // live against the real endpoint (Sprint 2 planning). Params are
+    // exactly what the live API required by trial, not guessed: chain,
+    // input_token, output_token, from_address, input_amount, slippage.
+
+    async function getSwapQuote(chain, { inputToken, outputToken, fromAddress, inputAmount, slippage }){
+
+        return authExistRequest("GET", "/v1/trade/quote", {
+
+            chain,
+
+            input_token: inputToken,
+
+            output_token: outputToken,
+
+            from_address: fromAddress,
+
+            input_amount: inputAmount,
+
+            slippage
+
+        });
+
+    }
+
+    // POST /v1/trade/swap - executes a real swap. Signed auth (requires
+    // GMGN_PRIVATE_KEY). Params match GMGN's own official reference
+    // client's SwapParams type exactly (read verbatim from
+    // github.com/GMGNAI/gmgn-skills/blob/main/src/client/OpenApiClient.ts
+    // during the Sprint 2 investigation, not guessed) - `chain` and
+    // `from_address` plus whatever of the optional fields the caller
+    // supplies are sent as the POST body.
+    //
+    // CONFIRMED from that same source (the entire swap() method there is
+    // a one-line authSignedRequest call, no local transaction handling
+    // anywhere in the file): GMGN signs and broadcasts server-side. This
+    // function only ever sends parameters - it never builds, signs, or
+    // holds a Solana transaction object. See gmgnSwapTransactionBuilder.js
+    // for how the response (order_id/hash/status) is used.
+
+    async function submitSwap(chain, { fromAddress, inputToken, outputToken, inputAmount, slippage, ...extra }){
+
+        return authSignedRequest("POST", "/v1/trade/swap", {}, {
+
+            chain,
+
+            from_address: fromAddress,
+
+            input_token: inputToken,
+
+            output_token: outputToken,
+
+            input_amount: inputAmount,
+
+            slippage,
+
+            ...extra
+
+        });
 
     }
 
@@ -337,6 +443,10 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
         getSmartMoneyActivity,
 
         getGasPrice,
+
+        getSwapQuote,
+
+        submitSwap,
 
         getCookingStatistics,
 

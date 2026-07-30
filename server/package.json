@@ -11,14 +11,18 @@
     "gmgn:verify-auth": "node src/collectors/gmgn/verifyAuth.js",
     "collect:gmgn-trending": "node src/collectors/gmgn/runTrendingCollector.js",
     "scheduler:gmgn": "node src/scheduler/runGmgnScheduler.js",
-    "scheduler:gmgn-once": "node src/scheduler/runGmgnSchedulerOnce.js"
+    "scheduler:gmgn-once": "node src/scheduler/runGmgnSchedulerOnce.js",
+    "test": "node --test src/services/opportunityPriorityService.test.js src/services/emiService.test.js src/services/tradingBotEngine.test.js src/services/customObjectiveService.test.js src/services/tradingBotService.test.js src/services/entryGateService.test.js src/services/qualityGateService.test.js src/services/tradePlanService.test.js src/services/dynamicExitService.test.js src/services/researchEngineFactory.test.js src/services/strategyProfileTranslator.test.js src/scheduler/tradingBotScheduler.test.js src/services/execution/executorStateMachine.test.js src/services/execution/transactionSigningService.test.js src/services/execution/balanceValidationService.test.js src/services/execution/transactionConfirmationService.test.js src/services/execution/executionService.test.js src/services/execution/founderModeGuard.test.js src/services/execution/executionGuard.test.js src/services/execution/gmgnSwapTransactionBuilder.test.js src/services/execution/usdToSolConverter.test.js"
   },
   "dependencies": {
+    "@solana/web3.js": "^1.98.4",
     "better-sqlite3": "^12.0.0",
+    "bs58": "^4.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

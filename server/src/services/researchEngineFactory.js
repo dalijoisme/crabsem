@@ -190,6 +190,92 @@ function scaleModule(m, factor){
     return { ...m, score: m.score * factor, max: m.max * factor };
 }
 
+// Early Momentum Hunter refactor (Aggressive Strategy Profile): every
+// module above scores an ABSOLUTE, point-in-time state (total $ volume,
+// total holder count, total liquidity $) - none of them measure a rate
+// of change, and priceStability.js actively penalizes it. This computes
+// a genuine RATE-OF-CHANGE signal instead, from real time-series data
+// already being collected (never a fabricated "acceleration score"):
+//   - priceAccel: 5-minute pace (annualized to an hourly rate) outrunning
+//     the trailing 1h pace, same direction - gmgn_tokens.price_change_5m/
+//     price_change_1h, ~99.96% coverage.
+//   - flowAccel: smart-money + KOL buy-$ rate in the recent window vs the
+//     prior window, from gmgn_activity_feed.tx_timestamp - the SAME
+//     activities array smartMoney.js/kol.js already receive, just bucketed
+//     by time instead of summed lifetime. Note: the feed only holds each
+//     token's most recent ~20 trades (see smartMoneyActivity/kolActivity
+//     slicing above), so a token far more active than that will under-
+//     count its true prior-window volume - an honest sample-size caveat,
+//     not a fabricated zero.
+//   - liquidityAccel: current liquidity vs liquidity recentWindowMinutes
+//     ago, from token_price_history's own ~20-40s-resolution snapshots.
+// Deliberately NOT built here (flagged, not faked): buyer/transaction
+// acceleration (gmgn_tokens.volume_5m/buys_5m/sells_5m are populated on
+// well under 1% of live rows - not usable) and whale/holder-count
+// acceleration (gmgn_trenches is overwritten in place, no history
+// retained). Returns null when `accel` (philosophy.acceleration) is
+// absent - Baseline/Stable/Balanced never set it, so this is skipped
+// entirely for them.
+function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, accel){
+
+    if(!accel) return null;
+
+    const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
+    const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
+
+    let priceAccel = 0;
+    if(change5m != null && change1h != null && change5m > 0 && change1h > 0){
+        const pace5m = change5m * 12; // annualize the 5-minute move to an hourly pace
+        if(pace5m > change1h){
+            priceAccel = Math.min(1, (pace5m - change1h) / Math.max(change1h, 1));
+        }
+    }
+
+    const recentWindowMin = accel.recentWindowMinutes ?? 15;
+    const priorWindowMin = accel.priorWindowMinutes ?? 60;
+    const nowSec = Date.now() / 1000;
+    const recentCutoffSec = nowSec - recentWindowMin * 60;
+    const priorCutoffSec = nowSec - priorWindowMin * 60;
+
+    const combinedFlow = [...(smartMoneyActivity || []), ...(kolActivity || [])];
+    function buyUsdInWindow(fromSec, toSec){
+        return combinedFlow
+            .filter(a => a.side === "buy" && a.tx_timestamp >= fromSec && a.tx_timestamp < toSec)
+            .reduce((sum, a) => sum + Number(a.amount_usd || 0), 0);
+    }
+    const recentBuyUsd = buyUsdInWindow(recentCutoffSec, nowSec);
+    const priorBuyUsd = buyUsdInWindow(priorCutoffSec, recentCutoffSec);
+    const recentRatePerMin = recentBuyUsd / recentWindowMin;
+    const priorRatePerMin = priorBuyUsd / Math.max(1, priorWindowMin - recentWindowMin);
+
+    const MIN_RECENT_FLOW_USD = 25; // hygiene floor - a single dust trade shouldn't read as "infinite acceleration"
+    let flowAccel = 0;
+    if(recentBuyUsd >= MIN_RECENT_FLOW_USD){
+        if(priorRatePerMin === 0) flowAccel = 1; // genuinely new buy pressure, nothing before it in the sampled window
+        else flowAccel = Math.max(0, Math.min(1, (recentRatePerMin / priorRatePerMin - 1) / 2)); // 3x prior rate = full credit
+    }
+
+    let liquidityAccel = 0;
+    const currentLiquidity = Number(token.liquidity) || null;
+    const liquidityThen = tokenPriceHistoryRepository.findPriceAtOrAfter(
+        token.token_address,
+        new Date(Date.now() - recentWindowMin * 60000).toISOString().slice(0, 19).replace("T", " ")
+    );
+    if(currentLiquidity != null && liquidityThen?.liquidity > 0){
+        const growth = (currentLiquidity - liquidityThen.liquidity) / liquidityThen.liquidity;
+        if(growth > 0) liquidityAccel = Math.min(1, growth / 0.25); // +25% liquidity growth in the window = full credit
+    }
+
+    const compositeScore = priceAccel * 0.4 + flowAccel * 0.4 + liquidityAccel * 0.2;
+    // Liquidity alone (e.g. a fresh LP add with no real buy/price action yet)
+    // isn't enough to pass the entry gate - real price or flow evidence must
+    // be present. Liquidity still counts toward the scored bonus above.
+    const gatePassed = priceAccel > 0 || flowAccel > 0.3;
+
+    return { priceAccel, flowAccel, liquidityAccel, compositeScore, gatePassed };
+
+}
+
 // =====================================
 // PHILOSOPHY DEFINITIONS - every override is named and justified.
 // Unlisted fields default to production's real values (no change).
@@ -434,7 +520,14 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const participantScoreRaw = combineScore(participantModules, PARTICIPANT_MAX, config.participant.neutralFraction);
     const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules);
     const penalty = Math.min(config.structuralValidation.maxPenalty, structuralRedFlags.length * config.structuralValidation.penaltyPerFlag);
-    const participantScore = Math.max(0, Math.round(participantScoreRaw - penalty));
+
+    // Early Momentum Hunter refactor: absent for every profile except
+    // Aggressive today (philosophy.acceleration undefined -> accelSignal
+    // null -> accelerationBonus 0 -> byte-identical to pre-refactor math).
+    const accelSignal = computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, philosophy.acceleration);
+    const accelerationBonus = accelSignal ? Math.round(PARTICIPANT_MAX * (philosophy.acceleration.maxBonusFraction ?? 0) * accelSignal.compositeScore) : 0;
+
+    const participantScore = Math.max(0, Math.min(PARTICIPANT_MAX, Math.round(participantScoreRaw - penalty) + accelerationBonus));
 
     const reasons = Object.values(participantModules).flatMap(m => m.reasons || []);
     const participantRiskReasons = Object.values(participantModules).flatMap(m => m.riskReasons || []);
@@ -465,6 +558,9 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     else if(Number(marketModules.liquidity.facts?.liquidity ?? token.liquidity ?? 0) < minLiq){ action = "AVOID"; vetoed = true; }
     else if(marketModules.liquidity.facts?.backingRatio != null && marketModules.liquidity.facts.backingRatio < config.safetyVeto.minBackingRatio){ action = "AVOID"; vetoed = true; }
     else if(token.holders != null && Number(token.holders) < config.safetyVeto.minHolders){ action = "AVOID"; vetoed = true; }
+    // Profile-tunable volume floor - no philosophy sets this today (undefined/null),
+    // so this branch is a strict no-op unless a Strategy Profile opts in.
+    else if(philosophy.minVolumeUsd != null && Number(token.volume_1h ?? 0) < philosophy.minVolumeUsd){ action = "AVOID"; vetoed = true; }
 
     const allModules = [...Object.values(participantModules), ...Object.values(marketModules)];
     const freshnessPenalty = computeFreshnessPenalty(marketAgeSeconds);
@@ -484,6 +580,17 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         if(!gatePassed) action = "HOLD";
     }
 
+    // Early Momentum Hunter refactor: "enters BEFORE confirmation" as a
+    // real requirement, not a lower bar on the same static evidence -
+    // a BUY/STRONG BUY tier alone is not sufficient when the philosophy
+    // requires it; real acceleration evidence (price pace or flow pace,
+    // see computeAccelerationSignal) must also be present, or this cycle
+    // is declined (downgraded to HOLD) the same way philosophy.entryGate
+    // declines one above. Absent for every profile except Aggressive.
+    if(philosophy.acceleration?.requireGateForEntry && (action === "BUY" || action === "STRONG BUY")){
+        if(!accelSignal?.gatePassed) action = "HOLD";
+    }
+
     return {
         action, participantScore, participantMax: PARTICIPANT_MAX, marketHealth: marketScore, marketHealthMax: MARKET_MAX,
         confidence, risk, reasons: reasons.length ? reasons : ["No strong participant signal detected yet"],
@@ -491,6 +598,10 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
             market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))
         },
+        // null for every profile except Aggressive today - see
+        // computeAccelerationSignal. Exposed for observability (benchmark
+        // reports, admin panel) - never consumed elsewhere in this function.
+        acceleration: accelSignal ? { ...accelSignal, bonusApplied: accelerationBonus } : null,
         // Minimal intelligence sub-object - only the fields real consumers in the
         // live prediction-creation path (predictionValidationService.js's
         // buildWalletSummary) actually read. NOT the full rich shape
@@ -519,4 +630,22 @@ function buildEngines(){
     }));
 }
 
-module.exports = { buildEngines, preloadContext, PHILOSOPHIES };
+// Profile-aware entry point (Strategy Profile refactor): dynamically
+// merges a caller-supplied override onto a NAMED base philosophy from
+// PHILOSOPHIES, without editing that static array or forking
+// analyzeTokenWithPhilosophy. `override` is optional/partial - any
+// field it omits falls back to the base philosophy's own value, so
+// `override` undefined/null reproduces the base philosophy exactly.
+function analyzeTokensWithOverride(tokens, ctx, baseKey, override){
+    const base = PHILOSOPHIES.find(p => p.key === baseKey);
+    if(!base) throw new Error(`analyzeTokensWithOverride: unknown base philosophy key '${baseKey}'`);
+    const philosophy = !override ? base : {
+        ...base,
+        ...override,
+        weights: { ...(base.weights || {}), ...(override.weights || {}) },
+        tiers: { ...(base.tiers || {}), ...(override.tiers || {}) }
+    };
+    return tokens.map(token => analyzeTokenWithPhilosophy(token, ctx, philosophy));
+}
+
+module.exports = { buildEngines, preloadContext, PHILOSOPHIES, analyzeTokensWithOverride };

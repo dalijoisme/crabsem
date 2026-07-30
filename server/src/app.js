@@ -59,6 +59,12 @@ if(config.NODE_ENV === "production" && !config.CORS_ALLOWED_ORIGINS.length){
 
 }
 
+if(config.NODE_ENV === "production" && config.TRADING_WALLET_ENCRYPTION_KEY === "dev-only-insecure-key-do-not-use-in-production"){
+
+    console.warn("[startup] WARNING: NODE_ENV=production but TRADING_WALLET_ENCRYPTION_KEY is still the dev default - Trading Wallet private keys are NOT securely encrypted.");
+
+}
+
 app.use(cors(corsOptions));
 app.use(express.json());
 

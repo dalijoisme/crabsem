@@ -33,7 +33,58 @@ const config = Object.freeze({
     // no role system yet (explicitly out of scope for this sprint).
     // null (unset) means the admin API is fully disabled rather than
     // silently open - see middleware/adminAuth.js.
-    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || null
+    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || null,
+
+    // Auth + Onboarding sprint - where the frontend is actually served
+    // from, used only to build verification/password-reset links (see
+    // services/emailService.js). null (unset) is a real, honest state:
+    // no real email provider exists yet either (dev-mode stub), so
+    // emailService logs a relative path + token instead of guessing a
+    // wrong origin.
+    FRONTEND_URL: process.env.FRONTEND_URL || null,
+
+    // CRAB User Journey v1 - encrypts the Trading Wallet's private key
+    // at rest (AES-256-GCM, see services/walletService.js) and signs
+    // the short-lived Owner Wallet ownership challenge (HMAC, same
+    // file). Explicitly PLACEHOLDER-GRADE custody: a single server-side
+    // secret, not HSM/KMS-backed - real custody architecture is a named
+    // deliverable of the next sprint (Trading Wallet & Execution
+    // Layer), not this one. Falls back to a fixed, clearly-fake dev
+    // value so local development never silently no-ops - a production
+    // deployment MUST set a real one (see server startup warning
+    // pattern already used for ADMIN_PASSWORD/CORS_ALLOWED_ORIGINS).
+    TRADING_WALLET_ENCRYPTION_KEY: process.env.TRADING_WALLET_ENCRYPTION_KEY || "dev-only-insecure-key-do-not-use-in-production",
+
+    // Execution Layer foundation (Sprint 1) - the RPC endpoint every
+    // services/execution/*.js module reads/writes the chain through
+    // (see services/execution/solanaConnectionProvider.js, the only
+    // place that actually constructs a Connection). null - not a
+    // public-cluster fallback - means the execution layer is disabled/
+    // fails closed, same convention as ADMIN_PASSWORD/GMGN_API_KEY: a
+    // real, non-rate-limited RPC endpoint must be deliberately
+    // configured before any execution-layer code can run at all.
+    SOLANA_RPC_URL: process.env.SOLANA_RPC_URL || null,
+
+    // Confirmation commitment level every read (balance, signature
+    // status) is evaluated against - "confirmed" is the standard
+    // middle ground between "processed" (fast, can still be dropped)
+    // and "finalized" (slow, unrollbackable).
+    SOLANA_COMMITMENT: process.env.SOLANA_COMMITMENT || "confirmed",
+
+    // How long transactionConfirmationService.js polls before giving
+    // up and reporting TIMEOUT (not FAILED - see executorStateMachine.js's
+    // header comment for why those are deliberately different outcomes).
+    EXECUTION_CONFIRMATION_TIMEOUT_MS: Number(process.env.EXECUTION_CONFIRMATION_TIMEOUT_MS) || 60000,
+
+    EXECUTION_CONFIRMATION_POLL_INTERVAL_MS: Number(process.env.EXECUTION_CONFIRMATION_POLL_INTERVAL_MS) || 2000,
+
+    // Founder Mode (Sprint 2) - the one wallet allowed to reach signing/
+    // broadcast while this remains single-user (see
+    // services/execution/founderModeGuard.js). null - not a permissive
+    // default - means Founder Mode fails closed: no wallet may trade
+    // until this is deliberately set to the founder's real Trading
+    // Wallet public key. This lock stays in place until Public Alpha.
+    FOUNDER_WALLET_PUBLIC_KEY: process.env.FOUNDER_WALLET_PUBLIC_KEY || null
 
 });
 

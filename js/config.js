@@ -59,8 +59,7 @@ const CONFIG = {
     // dashboard.js/backendApi.js/admin.js. dashboard.html no longer
     // calls DexScreener directly (js/api.js + js/discovery.js
     // stay loaded on index.html only, unrelated to this).
-    // PRODUCTION URL - do not point this at localhost; the deployed
-    // frontend has no local backend to reach.
+    // Auto-detected below by hostname - never hand-edit this per deploy.
     BACKEND_API_URL: "https://api.crabsem.online/api/v1",
 
     // How often the dashboard polls the backend for fresh
@@ -70,3 +69,14 @@ const CONFIG = {
     BACKEND_REFRESH_INTERVAL: 30000
 
 };
+
+// Environment auto-detection - overrides BACKEND_API_URL above based on
+// where this page is actually being served from, so localhost always
+// talks to the local backend and the deployed site always talks to
+// production with no manual pre-deploy editing. Every consumer
+// (backendApi.js/admin.js/tradingBot.js/benchmark.js) reads
+// CONFIG.BACKEND_API_URL at call time, not at parse time, so this
+// override applies transparently to all of them.
+if(["localhost", "127.0.0.1"].includes(window.location.hostname)){
+    CONFIG.BACKEND_API_URL = "http://localhost:4000/api/v1";
+}

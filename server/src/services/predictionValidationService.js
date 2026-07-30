@@ -82,8 +82,11 @@ const tradePositionRepository = require("../repositories/tradePositionRepository
 const tokenLastDecisionRepository = require("../repositories/tokenLastDecisionRepository");
 const decisionCycleLogRepository = require("../repositories/decisionCycleLogRepository");
 const productionEngineResolver = require("./productionEngineResolver");
+const scoringWorkerPool = require("./scoringWorkerPool");
 const tradePlanService = require("./tradePlanService");
 const qualityGateService = require("./qualityGateService");
+const strategyProfileTranslator = require("./strategyProfileTranslator");
+const strategyProfileConfig = require("../config/strategyProfileConfig");
 
 function toSqliteTimestamp(date){
     return date.toISOString().slice(0, 19).replace("T", " ");
@@ -92,6 +95,46 @@ function toSqliteTimestamp(date){
 function parseSqliteTimestamp(ts){
     return new Date(`${String(ts).replace(" ", "T")}Z`).getTime();
 }
+
+// =====================================
+// COOPERATIVE YIELDING (performance milestone - event-loop starvation
+// fix). This file's three per-record loops (evaluateAndRecordDecisions'
+// per-token loop, updateOpenTradePositions' per-position loop,
+// recordTimelineSnapshots' per-prediction loop) used to run thousands
+// of iterations back-to-back with zero pause, monopolizing the single
+// Node.js event loop for 40-110+ seconds at a time - measured, not
+// hypothesized, blocking the GMGN collector's own timers, the Trading
+// Bot scheduler, and incoming HTTP requests (including the Benchmark
+// Harness's own Admin API) for that entire span.
+//
+// yieldToEventLoop() hands control back via setImmediate() - the
+// event-loop phase that runs right after any pending I/O callbacks,
+// before the next timer tick - so those starved timers/requests get a
+// fair turn. This is scheduling ONLY: every per-record computation, DB
+// read/write, and the ORDER records are processed in is byte-for-byte
+// identical to before - only WHEN control briefly returns to the event
+// loop between whole batches has changed. Production V2
+// (config/scoringConfig.js, services/researchEngineFactory.js,
+// services/productionEngineV2.js) is never touched - the scoring logic
+// itself is unchanged. The single `analyzeTokens(tokens)` call below
+// still runs exactly once per cycle, but (Root Cause Analysis fix) now
+// goes through services/scoringWorkerPool.js, off this thread entirely,
+// instead of the direct synchronous call this comment used to describe -
+// that call was the actual proven source of event-loop starvation this
+// yielding mechanism was designed around; this batch-loop's own
+// yielding remains a real, separate, complementary safeguard for the
+// per-record work below.
+function yieldToEventLoop(){
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+// Deliberately simple, unvalidated starting point (same honest framing
+// as TRIGGERS/QUALITY_GATE elsewhere in this file) - small enough that
+// no single uninterrupted synchronous block should run long enough to
+// be noticeable to a waiting HTTP request, large enough that yielding
+// overhead stays negligible next to real work. See the performance
+// report for the real, measured effect of this value.
+const EVENT_LOOP_YIELD_BATCH_SIZE = 150;
 
 // =====================================
 // QUALITY GATE (Risk Reduction) - hard rejects using ONLY real,
@@ -207,7 +250,7 @@ function buildWalletSummary(signal){
     };
 }
 
-function evaluateAndRecordDecisions(){
+async function evaluateAndRecordDecisions(){
 
     const cycleStartedAt = Date.now();
 
@@ -218,7 +261,31 @@ function evaluateAndRecordDecisions(){
     const activeEngine = productionEngineResolver.getActiveEngine();
     const activeVersion = productionEngineResolver.getActiveVersion();
     const activeVersionMeta = productionEngineResolver.REGISTRY[activeVersion];
-    const signals = activeEngine.analyzeTokens(tokens);
+
+    // Sprint A, Goal 2 (auth/multi-tenancy foundation): trading_bot_config
+    // is now per-user (migration 035) - there is no longer one
+    // unambiguous "the" config to drive this ONE shared decision-log
+    // writer (this cache - token_last_decision/prediction_history - is
+    // genuinely global infrastructure, read by every user's bot
+    // regardless of their own strategy_profile choice, so it can't
+    // itself become per-user without re-keying it, a bigger change
+    // explicitly deferred - see the Sprint A plan). Fixed to a canonical
+    // "house" profile instead: STABLE's translated philosophy is
+    // all-default (see strategyProfileTranslator.js/strategyProfileConfig.js's
+    // own comment), so this is a zero-behavior-change decoupling from
+    // the old singleton read, not a scoring change. Each user's OWN
+    // quality-gate/exit/cooldown/sizing config still applies fully and
+    // independently at their own gate/exit time (services/tradeManager.js's
+    // closeIfDue re-scores live, per-position, per-user) - only the
+    // shared initial candidate discovery is house-wide.
+    const engineParams = strategyProfileTranslator.translate(strategyProfileConfig.resolveProfile("STABLE"));
+    // Root Cause Analysis fix: this used to be a direct, synchronous
+    // activeEngine.analyzeTokens(...) call - the exact multi-second,
+    // zero-yield-point call proven to starve the event loop (and with it
+    // the live GMGN collector) for its entire duration. Routed through
+    // scoringWorkerPool so the heavy scoring pass runs on a separate
+    // thread instead of blocking this one.
+    const signals = await scoringWorkerPool.scoreTokens(tokens, engineParams.philosophy);
 
     let created = 0, skipped = 0, recommendationChanges = 0, upgrades = 0, downgrades = 0;
     let positionsOpened = 0, positionsClosedOnReversal = 0;
@@ -227,23 +294,30 @@ function evaluateAndRecordDecisions(){
 
     const TIER_RANK = { "AVOID": 0, "HOLD": 1, "BUY": 2, "STRONG BUY": 3 };
 
-    tokens.forEach((token, i) => {
+    // Was tokens.forEach((token, i) => {...}) - converted to an indexed
+    // for-loop ONLY so `continue`/await can be used for cooperative
+    // yielding (see EVENT_LOOP_YIELD_BATCH_SIZE below). Every statement
+    // inside, and the order tokens are visited in, is unchanged.
+    for(let i = 0; i < tokens.length; i++){
 
+        const token = tokens[i];
         const signal = signals[i];
         const last = tokenLastDecisionRepository.findByToken(token.token_address);
 
-        const quality = passesQualityGate(token);
+        const quality = passesQualityGate(token, engineParams.qualityGateOverrides);
         if(!quality.pass){
             skipped++;
             skipReasons[quality.reason] = (skipReasons[quality.reason] || 0) + 1;
-            return;
+            if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
+            continue;
         }
 
         const trigger = evaluateTriggers(signal, token, last);
         if(!trigger.fire){
             skipped++;
             skipReasons[trigger.reason] = (skipReasons[trigger.reason] || 0) + 1;
-            return;
+            if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
+            continue;
         }
 
         // Same readiness gate as before - gates whether a real trade
@@ -251,7 +325,7 @@ function evaluateAndRecordDecisions(){
         // decision. Unchanged from the pre-redesign behavior: HOLD can
         // pass this, AVOID never does.
         const readiness = tradePlanService.assessTradePlanReadiness(signal);
-        const riskBands = readiness.ready ? activeEngine.buildRiskBands(token, signal) : null;
+        const riskBands = readiness.ready ? activeEngine.buildRiskBands(token, signal, engineParams.exitOverrides) : null;
 
         const existingOpenPosition = tradePositionRepository.findOpenForToken(token.token_address);
 
@@ -332,7 +406,9 @@ function evaluateAndRecordDecisions(){
             lastRisk: signal.risk ?? null
         });
 
-    });
+        if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
+
+    }
 
     decisionCycleLogRepository.insertCycle({
         scanned: tokens.length, created, skipped,
@@ -495,23 +571,29 @@ function evaluatePosition(position){
 
 }
 
-function updateOpenTradePositions(){
+async function updateOpenTradePositions(){
 
     const open = tradePositionRepository.findOpen();
 
     let updated = 0, closed = 0;
 
-    for(const position of open){
+    for(let i = 0; i < open.length; i++){
+
+        const position = open[i];
 
         const tracking = evaluatePosition(position);
 
-        if(!tracking) continue;
+        if(tracking){
 
-        tradePositionRepository.updateTracking(position, tracking);
+            tradePositionRepository.updateTracking(position, tracking);
 
-        updated++;
+            updated++;
 
-        if(tracking.status !== "OPEN") closed++;
+            if(tracking.status !== "OPEN") closed++;
+
+        }
+
+        if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
 
     }
 
@@ -526,13 +608,15 @@ function updateOpenTradePositions(){
 // regardless of whether a position was opened for it.
 // =====================================
 
-function recordTimelineSnapshots(){
+async function recordTimelineSnapshots(){
 
     const predictions = predictionHistoryRepository.findAllLite();
 
     let recorded = 0;
 
-    for(const p of predictions){
+    for(let i = 0; i < predictions.length; i++){
+
+        const p = predictions[i];
 
         const existingHorizons = predictionTimelineRepository.findExistingHorizons(p.id);
 
@@ -566,20 +650,33 @@ function recordTimelineSnapshots(){
 
         }
 
+        if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
+
     }
 
     return { recorded };
 
 }
 
-function runCycle(){
+async function runCycle(){
 
     const t0 = Date.now();
-    const createResult = evaluateAndRecordDecisions();
-    const updateResult = updateOpenTradePositions();
-    const timelineResult = recordTimelineSnapshots();
+    const createResult = await evaluateAndRecordDecisions();
+    const t1 = Date.now();
+    const updateResult = await updateOpenTradePositions();
+    const t2 = Date.now();
+    const timelineResult = await recordTimelineSnapshots();
+    const t3 = Date.now();
 
-    return { createResult, updateResult, timelineResult, durationMs: Date.now() - t0 };
+    return {
+        createResult, updateResult, timelineResult,
+        durationMs: t3 - t0,
+        phaseDurationsMs: {
+            evaluateAndRecordDecisions: t1 - t0,
+            updateOpenTradePositions: t2 - t1,
+            recordTimelineSnapshots: t3 - t2
+        }
+    };
 
 }
 

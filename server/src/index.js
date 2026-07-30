@@ -58,8 +58,31 @@ const gmgnScheduler = require("./scheduler/gmgnTrendingScheduler");
 const validationScheduler = require("./scheduler/validationScheduler");
 const walletScheduler = require("./scheduler/walletScheduler");
 const predictionValidationScheduler = require("./scheduler/predictionValidationScheduler");
+const tradingBotScheduler = require("./scheduler/tradingBotScheduler");
+const abTestScheduler = require("./scheduler/abTestScheduler");
+const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
 const engineVersionService = require("./services/engineVersionService");
+const { executionService } = require("./services/execution");
 const app = require("./app");
+
+// Execution Layer foundation (Sprint 1) - read-only truth recovery for
+// any real transaction left at SUBMITTED/CONFIRMING by a previous
+// process that crashed or was restarted mid-flight (see
+// services/execution/executionService.js's reconcilePendingExecutions()
+// header for why this is recovery, not a retry). Runs once per process
+// start, not on a timer/cron. Fire-and-forget at startup, same as every
+// other step below - a rejection here must not prevent the API/schedulers
+// from coming up, so it's logged, not thrown.
+
+executionService.reconcilePendingExecutions()
+    .then((results) => {
+        if(results.length){
+            console.log(`[startup] Execution layer reconciliation: resolved ${results.length} pending execution(s) from a previous run.`, results);
+        }
+    })
+    .catch((err) => {
+        console.error("[startup] Execution layer reconciliation failed (continuing startup regardless):", err.message);
+    });
 
 // CEO Dashboard (Section 9, Engine Improvement History) - records a
 // real snapshot the first time this process starts up running a
@@ -105,6 +128,12 @@ const walletSchedulerHandle = walletScheduler.start();
 
 const predictionValidationSchedulerHandle = predictionValidationScheduler.start();
 
+const tradingBotSchedulerHandle = tradingBotScheduler.start();
+
+const abTestSchedulerHandle = abTestScheduler.start();
+
+const benchmarkSchedulerHandle = benchmarkScheduler.start();
+
 const server = app.listen(config.PORT, () => {
 
     console.log(`[startup] API ready - CRAB AGENT server listening on port ${config.PORT}`);
@@ -130,6 +159,12 @@ function shutdown(signal){
     walletSchedulerHandle.stop();
 
     predictionValidationSchedulerHandle.stop();
+
+    tradingBotSchedulerHandle.stop();
+
+    abTestSchedulerHandle.stop();
+
+    benchmarkSchedulerHandle.stop();
 
     // Previously never closed the shared better-sqlite3 connection,
     // relying on process exit to release the file handle - in WAL

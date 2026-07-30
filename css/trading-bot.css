@@ -133,6 +133,13 @@
     gap:12px;
 }
 
+.tbConfigHint{
+    margin-top:12px;
+    font-size:12px;
+    line-height:1.5;
+    color:#8b96a5;
+}
+
 /* ---- Empty states (no mock data - honest, quiet placeholders) ---- */
 
 .tbEmptyState{
@@ -196,6 +203,8 @@
 
 .tbLogLine:last-child{ border-bottom:none; }
 
+.tbLogLive{ color:var(--muted); font-style:italic; }
+
 .tbLogTag{
     display:inline-block;
     font-weight:700;
@@ -213,3 +222,101 @@
 .tbLogTag.INFO{ background:rgba(141,144,168,.16); color:var(--muted); }
 
 .tbLogTime{ color:var(--muted); margin-right:8px; }
+
+/* ---- Strategy Profile (Constitution v1.0 / Final Spec section 02) ---- */
+
+.tbProfileGrid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+    gap:14px;
+}
+
+.tbProfileCard{
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:16px;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+}
+
+.tbProfileCard.tbProfileActive{
+    border-color:var(--green);
+    box-shadow:0 0 0 1px var(--green) inset;
+}
+
+.tbProfileName{ font-size:15px; font-weight:700; color:var(--text); }
+.tbProfileGoal{ font-size:12.5px; line-height:1.5; color:var(--muted); flex-grow:1; }
+
+/* ---- Settings menu (header) ---- */
+
+.tbSettingsMenu{
+    position:relative;
+}
+
+.tbSettingsDropdown{
+    position:absolute;
+    top:calc(100% + 6px);
+    right:0;
+    background:var(--panel2);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:6px;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+    min-width:170px;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+    z-index:20;
+}
+
+.tbSettingsDropdown.hidden{ display:none; }
+
+.tbSettingsItem{
+    font-family:inherit;
+    font-size:13px;
+    text-align:left;
+    text-decoration:none;
+    background:none;
+    border:none;
+    color:var(--text);
+    padding:9px 10px;
+    border-radius:7px;
+    cursor:pointer;
+}
+
+.tbSettingsItem:hover{ background:rgba(255,255,255,.06); }
+
+/* ---- Collapsible technical detail (Advanced Settings) ---- */
+
+.tbDetailToggle{
+    font-family:inherit;
+    font-size:12.5px;
+    font-weight:600;
+    background:none;
+    border:none;
+    color:var(--purple);
+    cursor:pointer;
+    padding:0;
+    text-decoration:underline;
+}
+
+/* ---- Custom Objective (Constitution clause 7 / Final Spec section 05) ---- */
+
+.tbExplanationList{
+    margin:10px 0 0;
+    padding-left:18px;
+    font-size:12.5px;
+    line-height:1.7;
+    color:#8b96a5;
+}
+
+.tbAckRow{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-top:14px;
+    font-size:12.5px;
+    color:var(--yellow);
+}

@@ -13,7 +13,7 @@ const learnService = require("../services/learnService");
 
 let isRunning = false;
 
-function runOnce(){
+async function runOnce(){
 
     if(isRunning){
 
@@ -29,7 +29,7 @@ function runOnce(){
 
     try{
 
-        const result = predictionValidationService.runCycle();
+        const result = await predictionValidationService.runCycle();
 
         const durationMs = Date.now() - startedAt;
 
@@ -37,7 +37,7 @@ function runOnce(){
 
             `[prediction-validation-scheduler] created=${result.createResult.created}/${result.createResult.scanned} scanned, ` +
             `open checked=${result.updateResult.checked} updated=${result.updateResult.updated} closed=${result.updateResult.closed}, ` +
-            `timeline recorded=${result.timelineResult.recorded} (${durationMs}ms)`
+            `timeline recorded=${result.timelineResult.recorded} (${durationMs}ms, phases=${JSON.stringify(result.phaseDurationsMs)})`
 
         );
 

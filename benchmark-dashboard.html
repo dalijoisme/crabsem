@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+
+<title>CRAB AGENT - Benchmark Harness</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/dashboard.css">
+<link rel="stylesheet" href="css/admin.css?v=9">
+<link rel="stylesheet" href="css/benchmark.css?v=1">
+
+</head>
+
+<body>
+
+<div id="adminGate" class="adminGate">
+
+<div class="adminGateCard">
+
+<h2>CRAB AGENT Benchmark Harness</h2>
+
+<p>This page is for administrators only.</p>
+
+<input type="password" id="adminPassword" placeholder="Enter admin password" autocomplete="off">
+
+<button id="adminLoginBtn" class="primaryBtnAdmin">Enter</button>
+
+<div id="adminGateError" class="adminGateError"></div>
+
+</div>
+
+</div>
+
+<div id="adminApp" class="app adminApp hidden">
+
+<header class="topbar">
+
+<div class="logo">
+
+<img src="images/body.png">
+
+<div>
+
+<h2>CRAB AGENT</h2>
+
+<span>Benchmark Harness</span>
+
+</div>
+
+</div>
+
+<div class="top-right">
+
+<div class="live-status" id="adminLiveStatus">
+
+<span class="live-dot" id="adminLiveDot"></span>
+
+<span id="adminLiveText">LIVE</span>
+
+</div>
+
+<button id="adminRefreshBtn" class="adminRefreshBtn">Refresh Now</button>
+
+<a href="trading-bot.html" class="adminRefreshBtn" style="text-decoration:none; display:inline-flex; align-items:center;">Trading Bot</a>
+
+<button id="adminLogoutBtn" class="adminRefreshBtn">Log Out</button>
+
+</div>
+
+</header>
+
+<nav class="adminNav" id="adminNav">
+
+<a href="#secHealth">Health</a>
+<a href="#secProfiles">Profiles</a>
+<a href="#secStartRun">Start Run</a>
+<a href="#secRunsList">Runs</a>
+<a href="#secRunDetail">Run Detail</a>
+
+</nav>
+
+<div id="adminLoading" class="adminLoading">
+
+Loading real data from the backend...
+
+</div>
+
+<div id="adminContent" class="adminContent hidden">
+
+<section class="adminSection" id="secHealth">
+    <div class="ceoSectionHead"><h4>System Health</h4></div>
+    <div id="bhHealth"></div>
+</section>
+
+<section class="adminSection" id="secProfiles">
+    <div class="ceoSectionHead"><h4>Benchmark Profiles</h4></div>
+    <p class="bhHint">Profiles are the config-only extensibility point - adding a new one here never requires a code change or deploy.</p>
+    <div id="bhProfilesList"></div>
+    <div class="bhNewProfileForm">
+        <div class="bhFormRow">
+            <div class="tbConfigField"><label for="bhNewProfileName">Name</label><input type="text" id="bhNewProfileName" placeholder="CONFIDENCE_68"></div>
+            <div class="tbConfigField"><label for="bhNewProfileDesc">Description</label><input type="text" id="bhNewProfileDesc" placeholder="Confidence floor raised to 68"></div>
+        </div>
+        <div class="tbConfigField">
+            <label for="bhNewProfileConfig">Config (JSON)</label>
+            <textarea id="bhNewProfileConfig" rows="4" placeholder='{"min_confidence":68,"min_decay_fraction":0.90,"position_size_pct":15,"max_position_size":150,"max_open_positions":7,"cooldown_win_minutes":7,"cooldown_loss_minutes":30,"cooldown_reversal_minutes":15,"cooldown_default_minutes":10,"opportunity_priority_enabled":1,"emi_enabled":0,"exit_strategy_variant":"dynamicExit","initial_capital":100}'></textarea>
+        </div>
+        <div class="tbConfigSaveRow">
+            <button id="bhCreateProfileBtn" class="tbBtn tbBtnStart">Create Profile</button>
+            <span id="bhProfileMsg" class="tbControlMsg"></span>
+        </div>
+    </div>
+</section>
+
+<section class="adminSection" id="secStartRun">
+    <div class="ceoSectionHead"><h4>Start New Benchmark</h4></div>
+    <div class="tbConfigGrid">
+        <div class="tbConfigField"><label for="bhRunName">Run Name</label><input type="text" id="bhRunName" placeholder="e.g. 1-Hour Comparison"></div>
+        <div class="tbConfigField"><label for="bhRunDuration">Duration (seconds)</label><input type="number" id="bhRunDuration" value="3600" min="60"></div>
+    </div>
+    <div class="tbConfigField">
+        <label>Participants</label>
+        <div id="bhParticipantChoices" class="bhChoiceGrid"></div>
+    </div>
+    <div class="tbConfigSaveRow">
+        <button id="bhStartRunBtn" class="tbBtn tbBtnStart">Start Benchmark</button>
+        <span id="bhStartRunMsg" class="tbControlMsg"></span>
+    </div>
+</section>
+
+<section class="adminSection" id="secRunsList">
+    <div class="ceoSectionHead"><h4>Runs</h4></div>
+    <div id="bhRunsList"></div>
+</section>
+
+<section class="adminSection" id="secRunDetail">
+    <div class="ceoSectionHead"><h4>Run Detail</h4></div>
+    <div id="bhRunDetail"><div class="tbEmptyState">Select a run above to see live equity, open positions, and the ranked report.</div></div>
+</section>
+
+</div>
+
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/benchmark.js?v=1"></script>
+
+</body>
+</html>

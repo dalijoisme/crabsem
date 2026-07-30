@@ -3,16 +3,28 @@
 // directly instead of going through a repository for the raw "is
 // the DB alive" ping.
 //
-// "Scheduler status" is derived from real data (the most recent
-// gmgn_raw_snapshots row), not an in-process flag: the scheduler
-// (npm run scheduler:gmgn) runs as its own long-running process,
-// separate from the API server (npm start) - the API process has no
-// in-memory handle to it, so the only honest signal available here
-// is "how long ago did a collector run actually finish."
+// "Scheduler status" (getSchedulerStatus) is derived from real data
+// (the most recent gmgn_raw_snapshots row) - a reasonable signal on its
+// own for the standalone `npm run scheduler:gmgn` deployment mode,
+// where this API process genuinely has no in-memory handle to the
+// collector. But it only ever reflected ONE collector (the "trending"
+// one that writes gmgn_tokens) - a different collector (launchpad_stats,
+// gas_price, etc.) could fail every tick forever and this alone would
+// never show it (see the collector-staleness investigation).
+//
+// index.js's real entry point runs the scheduler in THIS SAME PROCESS
+// (`npm start`, not the standalone script), so a live, per-collector
+// accessor is available and far more precise than inferring anything
+// from timestamps - collectorHealth/tickHealth below use it. Requiring
+// the scheduler module here has no side effect (it does not call
+// .start()) - safe even under the standalone deployment mode, where it
+// will just honestly report every collector as never having run in
+// THIS process.
 
 const db = require("../database/connection");
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const gmgnSnapshotRepository = require("../repositories/gmgnSnapshotRepository");
+const gmgnTrendingScheduler = require("../scheduler/gmgnTrendingScheduler");
 
 const COLLECTOR_ENDPOINT = "market_rank";
 
@@ -61,13 +73,23 @@ function checkHealth(){
 
     const scheduler = getSchedulerStatus();
 
+    const collectors = gmgnTrendingScheduler.getCollectorHealth();
+
+    const tick = gmgnTrendingScheduler.getTickHealth();
+
+    const unhealthyCollectors = collectors.filter(c => !c.healthy).map(c => c.name);
+
     // Previously hardcoded to "ok" regardless of scheduler.status, so
     // a monitor/orchestrator gating on this one field could never see
     // a degraded collector - see the production-readiness audit.
-    // "stale"/"never_run" both mean real data has stopped flowing in,
-    // which is exactly what a health check exists to surface.
+    // "stale"/"never_run" both mean real data has stopped flowing in.
+    // Now ALSO degraded when a SPECIFIC collector has failed 3+ times in
+    // a row (invisible before - only the "trending" collector's own
+    // freshness ever showed up here) or when a tick is stuck beyond what
+    // a normal batch could ever take (see TICK_STUCK_AFTER_MS).
 
-    const status = scheduler.status === "active" ? "ok" : "degraded";
+    const status = (scheduler.status === "active" && !unhealthyCollectors.length && !tick.stuck)
+        ? "ok" : "degraded";
 
     return {
 
@@ -80,6 +102,12 @@ function checkHealth(){
         tokenCount: gmgnTokenRepository.countTokens(),
 
         scheduler,
+
+        collectors,
+
+        unhealthyCollectors,
+
+        tick,
 
         uptime: process.uptime()
 

@@ -20,6 +20,13 @@ module.exports = {
     // Must comfortably exceed the longest validation horizon (24h -
     // see config/validationConfig.js) plus slack for a delayed
     // evaluator run.
-    tokenPriceHistoryMaxAgeHours: 48
+    tokenPriceHistoryMaxAgeHours: 48,
+
+    // Benchmark Harness Architecture Design Document, "Automatic
+    // cleanup": raw per-tick data (benchmark_positions/trades/statistics)
+    // for COMPLETED/STOPPED runs older than this is pruned - the
+    // distilled, permanent research record (benchmark_reports) is never
+    // pruned, only the bulky row-level detail behind it.
+    benchmarkRawDataMaxAgeHours: 24 * 14
 
 };

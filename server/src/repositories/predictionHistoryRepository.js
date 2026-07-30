@@ -253,6 +253,56 @@ function findEarliestPredictionTime(){
 
 }
 
+// Batch version of "last N decision rows for this token" - one query
+// for a whole cycle's worth of BUY Candidates instead of one query per
+// token (services/opportunityPriorityService.js / services/emiService.js's
+// shared batch context - Final Spec section 03/04: "batch read, tidak
+// ada query per-token"). Window function keeps this a single query
+// regardless of how many tokens are asked for. Returns a Map keyed by
+// token_address -> rows ordered newest-first (row 0 = the same row
+// token_last_decision already snapshots; row 1, if present, is the
+// real prior decision needed to compute a delta).
+
+function findRecentByTokens(tokenAddresses, limit = 2){
+
+    const map = new Map();
+
+    if(!tokenAddresses.length) return map;
+
+    const CHUNK = 400;
+
+    for(let i = 0; i < tokenAddresses.length; i += CHUNK){
+
+        const chunk = tokenAddresses.slice(i, i + CHUNK);
+
+        const placeholders = chunk.map(() => "?").join(",");
+
+        const rows = db.prepare(`
+            WITH ranked AS (
+                SELECT id, token_address, prediction_time, recommendation, score, confidence, trigger_reason,
+                       ROW_NUMBER() OVER (PARTITION BY token_address ORDER BY prediction_time DESC, id DESC) as rn
+                FROM prediction_history
+                WHERE token_address IN (${placeholders})
+            )
+            SELECT id, token_address, prediction_time, recommendation, score, confidence, trigger_reason
+            FROM ranked WHERE rn <= ?
+            ORDER BY token_address, rn ASC
+        `).all(...chunk, limit);
+
+        for(const row of rows){
+
+            if(!map.has(row.token_address)) map.set(row.token_address, []);
+
+            map.get(row.token_address).push(row);
+
+        }
+
+    }
+
+    return map;
+
+}
+
 // Every status (OPEN included), same real filter as findClosed - Admin
 // V3.1's Confidence Calibration fix (Part 9) needs real Expired/Open
 // counts per confidence band alongside TP/SL, which findClosed()
@@ -296,6 +346,27 @@ function findClosedHold({ from, to } = {}){
 
 }
 
+// Read-only, for the Benchmark Harness's hindsight report metrics
+// (Opportunity Capture / False Negative / Recommendation Acceptance
+// Rate - see services/benchmarkReportService.js). Returns each
+// distinct token's EARLIEST BUY/STRONG BUY decision within
+// [fromTimestamp, toTimestamp] (full-precision sqlite timestamps, not
+// the date-only from/to buildWhereClause already supports) - this IS
+// the single source of truth every participant's gate already reads
+// (token_last_decision derives from the same table), never a second,
+// separately-computed candidate list.
+function findTradingTierInWindow(fromTimestamp, toTimestamp){
+    return db.prepare(`
+        SELECT token_address, token_symbol, prediction_time as first_seen_at, confidence, entry_price
+        FROM prediction_history
+        WHERE id IN (
+            SELECT MIN(id) FROM prediction_history
+            WHERE recommendation IN ('BUY','STRONG BUY') AND prediction_time BETWEEN ? AND ?
+            GROUP BY token_address
+        )
+    `).all(fromTimestamp, toTimestamp);
+}
+
 module.exports = {
 
     insertPrediction,
@@ -324,6 +395,10 @@ module.exports = {
 
     findAllStatuses,
 
-    findEarliestPredictionTime
+    findEarliestPredictionTime,
+
+    findRecentByTokens,
+
+    findTradingTierInWindow
 
 };

@@ -11,10 +11,14 @@ const marketIntelligenceRoutes = require("./marketIntelligence");
 const gmgnOndemandRoutes = require("./gmgnOndemand");
 const validationRoutes = require("./validation");
 const walletsRoutes = require("./wallets");
+const walletRoutes = require("./wallet");
 const userHistoryRoutes = require("./userHistory");
 const adminRoutes = require("./admin");
+const authRoutes = require("./auth");
 const predictionValidationRoutes = require("./predictionValidation");
 const tradingBotRoutes = require("./tradingBot");
+const benchmarkRoutes = require("./benchmark");
+const executionRoutes = require("./execution");
 
 const router = express.Router();
 
@@ -26,9 +30,13 @@ router.use(marketIntelligenceRoutes);
 router.use(gmgnOndemandRoutes);
 router.use(validationRoutes);
 router.use(walletsRoutes);
+router.use(walletRoutes);
 router.use(userHistoryRoutes);
 router.use(adminRoutes);
+router.use(authRoutes);
 router.use(predictionValidationRoutes);
 router.use(tradingBotRoutes);
+router.use(benchmarkRoutes);
+router.use(executionRoutes);
 
 module.exports = router;

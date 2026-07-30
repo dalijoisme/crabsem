@@ -15,7 +15,7 @@
 
 <link rel="stylesheet" href="css/dashboard.css">
 <link rel="stylesheet" href="css/admin.css?v=9">
-<link rel="stylesheet" href="css/trading-bot.css?v=1">
+<link rel="stylesheet" href="css/trading-bot.css?v=2">
 
 </head>
 
@@ -27,9 +27,11 @@
 
 <h2>CRAB AGENT Trading Bot</h2>
 
-<p>This page is for administrators only.</p>
+<p>Log in to manage your trading bot.</p>
 
-<input type="password" id="adminPassword" placeholder="Enter admin password" autocomplete="off">
+<input type="email" id="tbEmail" placeholder="Email" autocomplete="off">
+
+<input type="password" id="adminPassword" placeholder="Password" autocomplete="off">
 
 <button id="adminLoginBtn" class="primaryBtnAdmin">Enter</button>
 
@@ -67,9 +69,13 @@
 
 </div>
 
-<button id="adminRefreshBtn" class="adminRefreshBtn">Refresh Now</button>
-
-<a href="admin.html" class="adminRefreshBtn" style="text-decoration:none; display:inline-flex; align-items:center;">Admin Panel</a>
+<div class="tbSettingsMenu" id="tbSettingsMenu">
+    <button id="tbSettingsBtn" class="adminRefreshBtn">Settings</button>
+    <div class="tbSettingsDropdown hidden" id="tbSettingsDropdown">
+        <button id="adminRefreshBtn" class="tbSettingsItem">Refresh Now</button>
+        <a href="advanced-settings.html" class="tbSettingsItem">Advanced Settings</a>
+    </div>
+</div>
 
 <button id="adminLogoutBtn" class="adminRefreshBtn">Log Out</button>
 
@@ -80,12 +86,12 @@
 <nav class="adminNav" id="adminNav">
 
 <a href="#secStatusBar">Status</a>
-<a href="#secConfig">Configuration</a>
+<a href="#secStrategyProfile">Strategy</a>
+<a href="#secCustomObjective">AI Advisor</a>
 <a href="#secPortfolio">Portfolio</a>
 <a href="#secPositions">Open Positions</a>
 <a href="#secHistory">Trade History</a>
-<a href="#secLog">Live Log</a>
-<a href="#secFuture">Future Integration</a>
+<a href="#secLog">Activity</a>
 
 </nav>
 
@@ -98,22 +104,25 @@ Loading real data from the backend...
 <div id="adminContent" class="adminContent hidden">
 
 <section class="adminSection" id="secStatusBar">
-    <div class="ceoSectionHead"><h4>Trading Status</h4></div>
+    <div class="ceoSectionHead"><h4>Bot Status</h4></div>
     <div id="tbStatusBar"></div>
 
     <div class="tbControlRow" id="tbControlRow">
         <button id="tbStartBtn" class="tbBtn tbBtnStart">START BOT</button>
         <button id="tbStopBtn" class="tbBtn tbBtnStop">STOP BOT</button>
         <button id="tbPauseBtn" class="tbBtn tbBtnPause">PAUSE BOT</button>
-        <button id="tbForceSellBtn" class="tbBtn tbBtnWarn">Force SELL ALL</button>
-        <button id="tbEmergencyBtn" class="tbBtn tbBtnEmergency">EMERGENCY STOP</button>
     </div>
     <div id="tbControlMsg" class="tbControlMsg"></div>
 </section>
 
-<section class="adminSection" id="secConfig">
-    <div class="ceoSectionHead"><h4>Bot Configuration</h4></div>
-    <div id="tbConfigForm"></div>
+<section class="adminSection" id="secStrategyProfile">
+    <div class="ceoSectionHead"><h4>Strategy</h4></div>
+    <div id="tbStrategyProfile"></div>
+</section>
+
+<section class="adminSection" id="secCustomObjective">
+    <div class="ceoSectionHead"><h4>AI Strategy Advisor</h4></div>
+    <div id="tbCustomObjective"></div>
 </section>
 
 <section class="adminSection" id="secPortfolio">
@@ -132,13 +141,8 @@ Loading real data from the backend...
 </section>
 
 <section class="adminSection" id="secLog">
-    <div class="ceoSectionHead"><h4>Live Log</h4></div>
+    <div class="ceoSectionHead"><h4>Activity</h4></div>
     <div id="tbLog" class="tbLogFeed"></div>
-</section>
-
-<section class="adminSection" id="secFuture">
-    <div class="ceoSectionHead"><h4>Future Integration</h4></div>
-    <div id="tbFuture" class="ceoSignalGrid"></div>
 </section>
 
 </div>
@@ -146,7 +150,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/tradingBot.js?v=1"></script>
+<script src="js/tradingBot.js?v=2"></script>
 
 </body>
 </html>

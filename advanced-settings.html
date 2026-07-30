@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+
+<title>CRAB AGENT - Advanced Settings</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/dashboard.css">
+<link rel="stylesheet" href="css/admin.css?v=9">
+<link rel="stylesheet" href="css/trading-bot.css?v=3">
+
+</head>
+
+<body>
+
+<div id="adminApp" class="app adminApp">
+
+<header class="topbar">
+
+<div class="logo">
+
+<img src="images/body.png">
+
+<div>
+
+<h2>CRAB AGENT</h2>
+
+<span>Advanced Settings</span>
+
+</div>
+
+</div>
+
+<div class="top-right">
+
+<a href="trading-bot.html" class="adminRefreshBtn" style="text-decoration:none; display:inline-flex; align-items:center;">&larr; Back to Dashboard</a>
+
+</div>
+
+</header>
+
+<div id="adminLoading" class="adminLoading">
+
+Loading real data from the backend...
+
+</div>
+
+<div id="adminContent" class="adminContent hidden">
+
+<section class="adminSection" id="secBalances">
+    <div class="ceoSectionHead"><h4>Balances</h4></div>
+    <p class="tbConfigHint">Read-only. Deposit and Trading Allocation are managed from the Trading Wallet flow, not here.</p>
+    <div id="tbBalances"></div>
+</section>
+
+<section class="adminSection" id="secTechConfig">
+    <div class="ceoSectionHead"><h4>Technical Configuration</h4></div>
+    <p class="tbConfigHint">These settings apply regardless of which Strategy you've selected. Most people never need to change these.</p>
+    <div id="tbConfigForm"></div>
+</section>
+
+<section class="adminSection" id="secSlippage">
+    <div class="ceoSectionHead"><h4>Slippage</h4></div>
+    <p class="tbConfigHint">How much price movement you're willing to accept between deciding to trade and the trade completing.</p>
+    <div id="tbSlippage"></div>
+</section>
+
+<section class="adminSection" id="secFee">
+    <div class="ceoSectionHead"><h4>Platform Fee</h4></div>
+    <div id="tbFee"></div>
+</section>
+
+<section class="adminSection" id="secStrategyDetail">
+    <button id="tbDetailToggleBtn" class="tbDetailToggle">View Technical Parameters</button>
+    <div id="tbStrategyDetail" class="hidden"></div>
+</section>
+
+<section class="adminSection" id="secDanger">
+    <div class="ceoSectionHead"><h4>Danger Zone</h4></div>
+    <p class="tbConfigHint">Rare, high-impact actions. Use with care.</p>
+    <div class="tbControlRow">
+        <button id="tbForceSellBtn" class="tbBtn tbBtnWarn">Force SELL ALL</button>
+        <button id="tbEmergencyBtn" class="tbBtn tbBtnEmergency">EMERGENCY STOP</button>
+    </div>
+    <div id="tbControlMsg" class="tbControlMsg"></div>
+</section>
+
+</div>
+
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/advancedSettings.js?v=1"></script>
+
+</body>
+</html>

@@ -87,14 +87,19 @@ function stepDownByDecay(originalAction, fraction){
 
 }
 
-// Real, already-computed hard-exclusion facts: the same Quality Gate
-// the decision pipeline enforces, plus tokenStatusService's real
-// price-drawdown/age-based Dumped/Dead label (previously decorative
-// only). Never a new signal - just made enforceable.
-function hardExclusionCheck(token){
-
-    const quality = qualityGateService.passesQualityGate(token);
-    if(!quality.pass) return { excluded: true, reason: quality.reason };
+// TRUE global hard-exclusion (Profile-Aware Production V2 refactor):
+// tokenStatusService's real price-drawdown/age-based Dumped/Dead label
+// - identical for every Strategy Profile, never tunable. Quality Gate
+// (services/qualityGateService.js) is deliberately NOT part of this -
+// its 4 thresholds are soft statistical filters, made profile-tunable
+// (see strategyProfileTranslator.js), and are checked separately,
+// per-profile, by entryGateService.evaluateEntry(). Exported so
+// benchmarkRunner.js's per-profile signal computation can apply the
+// same global exclusion without inheriting this function's global-
+// quality-gate behavior, which would otherwise silently override a
+// profile's own looser/stricter quality-gate settings before they ever
+// got a chance to run.
+function computeStructuralExclusion(token){
 
     const trenchesEntry = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
     const marketAgeSeconds = intelligenceEngine.ageSecondsSince(token.updated_at);
@@ -105,6 +110,20 @@ function hardExclusionCheck(token){
     if(tokenStatus === "Dead") return { excluded: true, reason: "STATUS_DEAD", tokenStatus };
 
     return { excluded: false, reason: null, tokenStatus };
+
+}
+
+// Real, already-computed hard-exclusion facts for the SHARED, single
+// decision-log path (homepage/global search/etc.): the global Quality
+// Gate plus computeStructuralExclusion's Dumped/Dead check. Unchanged
+// from before this refactor - this function's behavior (and every
+// caller of resolveLiveRecommendation) stays exactly as it was.
+function hardExclusionCheck(token){
+
+    const quality = qualityGateService.passesQualityGate(token);
+    if(!quality.pass) return { excluded: true, reason: quality.reason };
+
+    return computeStructuralExclusion(token);
 
 }
 
@@ -182,4 +201,4 @@ function resolveLiveRecommendation(token, baseSignal){
 
 }
 
-module.exports = { resolveLiveRecommendation, stepDownByDecay, TIER_RANK };
+module.exports = { resolveLiveRecommendation, stepDownByDecay, TIER_RANK, computeStructuralExclusion };

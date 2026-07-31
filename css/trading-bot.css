@@ -180,6 +180,21 @@
     color:#8b96a5;
 }
 
+/* Configuration Conflict warning (Trading Configuration's Live Preview) -
+   detection-only, never auto-applied - see js/tradingBot.js's
+   renderTradingConfigurationPreview(). Yellow, matching .tbBtnWarn's
+   existing "warning, not destructive" semantic - not .tbBtnEmergency's red. */
+.tbConfigWarningBox{
+    margin-top:14px;
+    padding:12px 14px;
+    border-radius:8px;
+    border:1px solid rgba(246,185,59,.4);
+    background:rgba(246,185,59,.1);
+    color:var(--yellow);
+    font-size:12.5px;
+    line-height:1.7;
+}
+
 /* ---- Empty states (no mock data - honest, quiet placeholders) ---- */
 
 .tbEmptyState{

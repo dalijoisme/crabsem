@@ -612,7 +612,9 @@ function renderTradingConfigurationPreview(tc){
     const fixedEl = document.getElementById("tcFixedPositionSizeUsd");
     const capEl = document.getElementById("tcMaxPositionSize");
     const slotsEl = document.getElementById("tcMaxOpenPositions");
+    const minOrderEl = document.getElementById("tcMinOrderSize");
     const previewEl = document.getElementById("tcPreview");
+    const warningEl = document.getElementById("tcConfigWarning");
     if(!modeEl) return;
 
     const mode = modeEl.value;
@@ -640,6 +642,29 @@ function renderTradingConfigurationPreview(tc){
             <span class="tbTimelineAt">capped by Max Open Positions (${maxOpen || 0})</span>
         </div>
     `;
+
+    // Configuration Conflict warning - detection only, mirrors
+    // tradeManager.js's own openPosition() sizing formula exactly
+    // (rawSize/effectiveSize above already do) so it's the same real
+    // number that would actually be rejected at INSUFFICIENT_AVAILABLE_CASH,
+    // never a re-derived estimate. Display-only: never writes anything,
+    // never changes Position Size/Min Order Size itself - the Founder
+    // decides which one to raise.
+    if(!warningEl) return;
+    const minOrderSize = Number(minOrderEl?.value || 0);
+    if(effectiveSize > 0 && minOrderSize > 0 && effectiveSize < minOrderSize){
+        warningEl.innerHTML = `
+            <strong>Current configuration cannot open real trades.</strong><br>
+            Estimated order size: <strong>${fmtUsd(effectiveSize)}</strong><br>
+            Minimum order: <strong>${fmtUsd(minOrderSize)}</strong><br>
+            Increase Position Size or lower Minimum Order.
+        `;
+        warningEl.classList.remove("hidden");
+    }
+    else{
+        warningEl.innerHTML = "";
+        warningEl.classList.add("hidden");
+    }
 }
 
 function renderTradingConfiguration(tc){
@@ -656,6 +681,12 @@ function renderTradingConfiguration(tc){
         <div class="tbDecisionMeta">
             Wallet source: ${tc.walletBalanceSource === "REAL" ? "real on-chain balance" : "unavailable - generate a Trading Wallet and fund it to see real balances"}${tc.solUsdPrice ? ` · SOL/USD ${fmtUsd(tc.solUsdPrice)}` : ""}
         </div>
+
+        <div class="tbConfigSaveRow">
+            <button id="tcResetCapitalBtn" class="tbBtn tbBtnWarn">Reset Trading Capital</button>
+            <span id="tcResetCapitalMsg" class="tbControlMsg"></span>
+        </div>
+        <div class="tbConfigHint">Sets Trading Balance back to your real wallet balance (using the same Trading Allocation % already set below). Historical trades and P&amp;L are never deleted - only the cash baseline changes.</div>
 
         <h4>Position Sizing</h4>
         <div class="tbConfigGrid">
@@ -690,6 +721,7 @@ function renderTradingConfiguration(tc){
 
         <h4>Live Preview</h4>
         <div class="tbTimeline" id="tcPreview"></div>
+        <div id="tcConfigWarning" class="tbConfigWarningBox hidden"></div>
 
         <div class="tbConfigSaveRow">
             <button id="tcSaveBtn" class="tbBtn tbBtnStart">Save Trading Configuration</button>
@@ -706,12 +738,51 @@ function renderTradingConfiguration(tc){
     togglePctFixedVisibility();
     renderTradingConfigurationPreview(tc);
 
-    ["tcSizingMode", "tcPositionSizePct", "tcFixedPositionSizeUsd", "tcMaxPositionSize", "tcMaxOpenPositions"].forEach(id => {
+    ["tcSizingMode", "tcPositionSizePct", "tcFixedPositionSizeUsd", "tcMaxPositionSize", "tcMaxOpenPositions", "tcMinOrderSize"].forEach(id => {
         document.getElementById(id).addEventListener("input", () => {
             togglePctFixedVisibility();
             renderTradingConfigurationPreview(tc);
         });
     });
+
+    // Reset Trading Capital (Founder-only - the backend rejects any
+    // other wallet with a plain error, surfaced below like any other
+    // failed action). Confirms with the exact real numbers this action
+    // will use before calling the backend - never silent, never auto-
+    // applied. Never touches Strategy/Mode/Wallet and never starts the
+    // bot - only reloads this same Trading Configuration panel plus the
+    // Portfolio widget (their Available Cash figure comes from the same
+    // getPortfolio() this reset changes) and the Momentum KPI panel.
+    document.getElementById("tcResetCapitalBtn").onclick = async () => {
+        const msgEl = document.getElementById("tcResetCapitalMsg");
+        const walletUsd = tc.walletBalanceUsd;
+        const currentCapitalUsd = tc.availableCashUsd;
+        if(walletUsd == null){
+            msgEl.textContent = "Real wallet balance is unavailable right now - cannot reset.";
+            msgEl.className = "tbControlMsg tbMsgError";
+            return;
+        }
+        const confirmed = confirm(
+            `Wallet:\n${fmtUsd(walletUsd)}\n\n` +
+            `Current Trading Capital:\n${fmtUsd(currentCapitalUsd)}\n\n` +
+            `After reset:\n\nTrading Capital:\n${fmtUsd(walletUsd)}\n\n` +
+            `Historical trades\nwill NOT be deleted.\n\n` +
+            `Continue?`
+        );
+        if(!confirmed) return;
+        try{
+            const result = await adminFetch("/tradingbot/reset-trading-capital", { method: "POST" });
+            msgEl.textContent = `Trading Capital reset to ${fmtUsd(result.freshInitialCapital)}.`;
+            msgEl.className = "tbControlMsg tbMsgOk";
+            loadTradingConfiguration();
+            loadPortfolio();
+            loadMomentumKpi();
+        }
+        catch(e){
+            msgEl.textContent = e.message || "Failed to reset Trading Capital.";
+            msgEl.className = "tbControlMsg tbMsgError";
+        }
+    };
 
     document.getElementById("tcSaveBtn").onclick = async () => {
         const msgEl = document.getElementById("tcMsg");

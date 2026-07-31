@@ -221,6 +221,24 @@ function updateInitialCapital(userId, initialCapital){
     return getConfig(userId);
 }
 
+// Reset Trading Capital feature: unlike updateInitialCapital above (a
+// silent periodic resync of the SAME baseline), this stamps
+// ledger_reset_at - the marker services/tradingBotService.js's
+// getPortfolio() uses to sum realizedPnl only since this moment for the
+// availableCash/equity calculation. Never touches trading_bot_positions/
+// trading_bot_trades/executions/prediction_history/benchmark_* - only
+// this one config row changes, so trade history and all-time PnL
+// reporting (sumClosedTrades, unfiltered) stay exactly as they were.
+const resetLedgerBaselineStmt = db.prepare(`
+    UPDATE trading_bot_config SET initial_capital = @initialCapital, ledger_reset_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE user_id = @userId
+`);
+
+function resetLedgerBaseline(userId, initialCapital){
+    resetLedgerBaselineStmt.run({ userId, initialCapital });
+    return getConfig(userId);
+}
+
 // Stamped only when services/tradingBotService.js's updateConfig()
 // actually receives a strategy_profile switch in the request - never
 // on a generic config save (Advanced Settings' slippage/execution-mode
@@ -641,6 +659,29 @@ function sumClosedTrades(userId){
     `).get(userId);
 }
 
+// Reset Trading Capital feature: identical query to sumClosedTrades
+// above, scoped to trades closed strictly after a ledger reset
+// baseline - used ONLY for the availableCash/equity calculation
+// (services/tradingBotService.js's getPortfolio), never for all-time
+// reporting fields (winRate/profitFactor/totalTrades/totalFees still
+// read the unfiltered sumClosedTrades - PnL history must stay intact).
+// No caller passes a null/undefined sinceTimestamp - getPortfolio()
+// only calls this when config.ledger_reset_at is actually set.
+function sumClosedTradesSince(userId, sinceTimestamp){
+    return db.prepare(`
+        SELECT
+            COUNT(*) as closedCount,
+            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN 1 ELSE 0 END), 0) as winCount,
+            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
+            COALESCE(SUM((size_usd * roi_pct / 100.0) - fee_usd), 0) as realizedPnl,
+            COALESCE(SUM(fee_usd), 0) as totalFees,
+            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN (size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossWin,
+            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN ABS(size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossLoss
+        FROM trading_bot_trades
+        WHERE user_id = ? AND closed_at IS NOT NULL AND closed_at > ?
+    `).get(userId, sinceTimestamp);
+}
+
 function sumOpenPositions(userId){
     return db.prepare(`
         SELECT
@@ -774,7 +815,7 @@ function forUser(userId){
 
 module.exports = {
     getState, updateState,
-    getConfig, updateConfig, setAllocationAndCapital, updateInitialCapital, markStrategySelected, markTradingConfigCustomized,
+    getConfig, updateConfig, setAllocationAndCapital, updateInitialCapital, resetLedgerBaseline, markStrategySelected, markTradingConfigCustomized,
     ensureBotForUser, findRunningUserIds,
     findOpenPositions, findOpenPositionForToken, findOpenPositionById, findPositionById, countOpenPositions,
     findLastTradeForToken, findTradeByPositionId,
@@ -782,7 +823,7 @@ module.exports = {
     findRecentTrades, countTrades, findAllTradesChronological, findRankAtEntryValues,
     findTradesClosedSince, countPositionsOpenedSince, findLogSince, findRankAtEntryValuesSince, findEntryDelayValues, findEntryDelayValuesSince, findTimeToPeakValues,
     findRecentLog, insertLog,
-    sumClosedTrades, sumOpenPositions,
+    sumClosedTrades, sumClosedTradesSince, sumOpenPositions,
     insertEquitySnapshot, findEquityCurve, computeMaxDrawdownPct, findThroughputSamplesSince,
     replaceDecisionSnapshot, findDecisionSnapshot,
     forUser

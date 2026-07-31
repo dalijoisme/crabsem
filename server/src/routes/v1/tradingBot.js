@@ -56,4 +56,10 @@ router.post("/tradingbot/custom-objective/analyze", controller.analyzeCustomObje
 // requireVerifiedEmail (Phase 4) will gate this once it exists.
 router.post("/tradingbot/allocation", controller.setAllocation);
 
+// Reset Trading Capital (Founder-only, gated inside the service layer -
+// see services/tradingBotService.js's resetTradingCapital()). Ledger-
+// baseline reset only - never deletes trade/prediction/execution/
+// benchmark history.
+router.post("/tradingbot/reset-trading-capital", controller.resetTradingCapital);
+
 module.exports = router;

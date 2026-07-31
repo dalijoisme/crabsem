@@ -195,6 +195,20 @@ async function setAllocation(req, res, next){
     catch(err){ next(err); }
 }
 
+// Reset Trading Capital (Founder-only) - services/tradingBotService.js's
+// resetTradingCapital() already fails closed (403-shaped ok:false) for
+// any wallet that isn't the configured Founder Trading Wallet, and for
+// a real balance read that isn't available - a 400 here just means the
+// action couldn't run yet, never a partial/silent success.
+async function resetTradingCapital(req, res, next){
+    try{
+        const result = await tradingBotService.resetTradingCapital(req.user.id);
+        if(!result.ok) return sendError(res, 400, "Cannot reset Trading Capital", result.error);
+        sendSuccess(res, result);
+    }
+    catch(err){ next(err); }
+}
+
 // Custom Objective AI Advisor (Constitution clause 7) - stateless, no
 // side effects, not scoped to any user's bot. Never starts the bot
 // itself; the frontend calls PUT /config then POST /start separately,
@@ -212,5 +226,5 @@ module.exports = {
     getStatus, getConfig, updateConfig, getTradingConfiguration, updateTradingConfiguration,
     getPortfolio, getPositions, getPositionDetail, getTrades, getLog, getEquityCurve, getDecisionCenter, getMomentumKpi, getMissedWinners, getSelfAudit, getSystemThroughput, getBottleneckReport, getTargetAchievementSummary,
     start, stop, pause, forceSellAll, sellPosition, emergencyStop, setMode,
-    analyzeCustomObjective, setAllocation
+    analyzeCustomObjective, setAllocation, resetTradingCapital
 };

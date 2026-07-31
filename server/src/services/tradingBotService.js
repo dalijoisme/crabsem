@@ -394,10 +394,26 @@ function analyzeCustomObjective(input){
 // a live P&L.
 function getPortfolio(userId){
     const config = tradingBotRepository.getConfig(userId);
+    // All-time - drives every REPORTING field below (totalTrades/winRate/
+    // profitFactor/totalFees/closedProfit) unconditionally. Reset Trading
+    // Capital (config.ledger_reset_at) must never make a user's historical
+    // track record look like it vanished - PnL history stays intact
+    // regardless of a ledger reset.
     const closed = tradingBotRepository.sumClosedTrades(userId);
+    // Reset Trading Capital feature: availableCash/equity are the only
+    // figures a ledger reset is meant to change. When ledger_reset_at is
+    // set, only trades closed AFTER that moment count toward the cash
+    // ledger - pre-reset realized P&L (however negative) no longer
+    // depresses availableCash below the fresh baseline, without deleting
+    // or altering a single trade row. Unset (the default for every
+    // account that has never reset) reproduces the exact original
+    // all-time formula, byte for byte.
+    const cashClosed = config.ledger_reset_at
+        ? tradingBotRepository.sumClosedTradesSince(userId, config.ledger_reset_at)
+        : closed;
     const open = tradingBotRepository.sumOpenPositions(userId);
 
-    const availableCash = config.initial_capital + closed.realizedPnl - open.openValueAtEntry;
+    const availableCash = config.initial_capital + cashClosed.realizedPnl - open.openValueAtEntry;
     const unrealizedPnl = open.openMarketValue - open.openValueAtEntry;
     const equity = availableCash + open.openMarketValue;
 
@@ -1362,12 +1378,71 @@ async function setAllocation(userId, allocationPct){
     return { ok: true, config };
 }
 
+// Reset Trading Capital (Founder-only action, implementation task
+// following the CASH_EXHAUSTED_BEFORE_TURN root-cause investigation):
+// a real wallet can accumulate realized losses until initial_capital +
+// realizedPnl - openValueAtEntry (getPortfolio's own formula) sits
+// below min_order_size forever, even though the real wallet still holds
+// real, tradeable SOL - the AI keeps qualifying real BUY candidates that
+// can never reach execution because the LEDGER, not the wallet, is
+// exhausted. This does not "fix" that by changing the formula or
+// switching to wallet-balance mode (explicitly rejected) - it gives the
+// Founder an explicit, logged, ledger-only reset: same
+// computeInitialCapitalFromReal(real, allocationPct) formula Trading
+// Allocation already uses (never a second conversion), stamped via
+// tradingBotRepository.resetLedgerBaseline() so getPortfolio() computes
+// availableCash from realizedPnl since this moment only. Never touches
+// trading_bot_positions/trading_bot_trades/executions/prediction_history/
+// benchmark_* - no row in any of those tables is inserted, updated, or
+// deleted by this function. Never starts/stops the bot, never touches
+// mode/strategy/wallet - purely a trading_bot_config.initial_capital +
+// ledger_reset_at write.
+//
+// Founder-only: same structural isFounderWallet gate
+// getExecutorSnapshot()/tradingBotEngine.js's buildLiveExecutionOptions()
+// already use (this user's trading wallet must equal the configured
+// FOUNDER_WALLET_PUBLIC_KEY) - every other account is SIMULATION-only
+// today and has no real wallet balance to reset against anyway.
+async function resetTradingCapital(userId){
+
+    const tradingWallet = tradingWalletRepository.findByUserId(userId);
+    if(!tradingWallet){
+        return { ok: false, error: "Generate a Trading Wallet before resetting Trading Capital." };
+    }
+
+    const isFounderWallet = Boolean(
+        envConfig.FOUNDER_WALLET_PUBLIC_KEY && tradingWallet.public_key === envConfig.FOUNDER_WALLET_PUBLIC_KEY
+    );
+    if(!isFounderWallet){
+        return { ok: false, error: "Reset Trading Capital is only available for the Founder Trading Wallet." };
+    }
+
+    const real = await walletService.getRealWalletBalance(userId);
+    if(!real || real.solUsd == null){
+        return { ok: false, error: `Could not read a real on-chain wallet balance${real?.unavailableReason ? ` (${real.unavailableReason})` : ""} - Reset Trading Capital needs a real balance to reset to, never a fabricated one.` };
+    }
+
+    const botConfig = tradingBotRepository.getConfig(userId);
+    const previousInitialCapital = botConfig.initial_capital;
+    const freshInitialCapital = computeInitialCapitalFromReal(real, botConfig.allocation_pct);
+
+    const updated = tradingBotRepository.resetLedgerBaseline(userId, freshInitialCapital);
+
+    tradingBotRepository.insertLog(userId, {
+        logType: "SYSTEM",
+        message: `Trading Capital reset - baseline changed from $${previousInitialCapital.toFixed(2)} to $${freshInitialCapital.toFixed(2)} (real wallet balance $${real.solUsd.toFixed(2)} x ${botConfig.allocation_pct}% Trading Allocation). Trade history and P&L history were not modified.`
+    });
+
+    return { ok: true, config: updated, walletBalanceUsd: real.solUsd, previousInitialCapital, freshInitialCapital };
+
+}
+
 module.exports = {
     getStatusBar, getConfig, updateConfig, getTradingConfiguration, updateTradingConfiguration,
     getPortfolio, getPortfolioReconciliation, getOpenPositions, getPositionDetail, getTrades, getLog, getEquityCurve,
     getDecisionCenter, getMomentumKpi, getMissedWinners, getSelfAudit, getSystemThroughput, getBottleneckReport, getTargetAchievementSummary,
     startBot, stopBot, pauseBot, forceSellAll, sellPosition, emergencyStop, setMode,
-    analyzeCustomObjective, setAllocation,
+    analyzeCustomObjective, setAllocation, resetTradingCapital,
     // Production Stabilization V1 (Sections D/E/Q): exported purely for
     // scheduler/walletBalanceSyncScheduler.js's own periodic sync - the
     // one shared "real balance x allocation % -> Trading Balance" formula,

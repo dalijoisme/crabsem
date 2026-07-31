@@ -385,6 +385,115 @@ test("setAllocation writes initial_capital: 0 (never fabricated) when no real ba
 
 });
 
+// Reset Trading Capital: Founder-only. A non-Founder wallet must be
+// rejected even when a real balance IS available - the gate checks the
+// wallet's public key, never whether a balance happens to exist.
+test("resetTradingCapital rejects a wallet that is not the configured Founder Trading Wallet", async () => {
+
+    const testEmail = `tradingbotservice.test.resetreject.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const rejectUserId = registerResult.userId;
+
+    tradingWalletRepository.insertWallet({ userId: rejectUserId, publicKey: `NotFounderWallet${crypto.randomBytes(4).toString("hex")}`, encryptedPrivateKey: "unused" });
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        solLamports: 1000000000, solAmount: 1, solUsdPrice: 200, solUsd: 200, unavailableReason: null
+    }));
+
+    try{
+        const result = await tradingBotService.resetTradingCapital(rejectUserId);
+        assert.equal(result.ok, false);
+        assert.match(result.error, /Founder Trading Wallet/);
+
+        const config = tradingBotRepository.getConfig(rejectUserId);
+        assert.equal(config.ledger_reset_at, null, "a rejected reset must never touch ledger_reset_at");
+
+    }
+    finally{
+        restore();
+        deleteTestUser(rejectUserId);
+    }
+
+});
+
+// Reset Trading Capital: the real, end-to-end feature. Builds up a
+// realistic CASH_EXHAUSTED_BEFORE_TURN shape (a real closed trade with
+// heavy realized losses depresses availableCash below min_order_size
+// even though the real wallet still holds tradeable SOL), then proves
+// the reset brings availableCash back to the fresh wallet-derived
+// baseline WITHOUT deleting the trade row or resetting its all-time PnL
+// reporting.
+test("resetTradingCapital sets availableCash to the real wallet balance without deleting trade/PnL history", async () => {
+
+    const testEmail = `tradingbotservice.test.resetok.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const resetUserId = registerResult.userId;
+
+    const envConfig = require("../config/env");
+    const founderPublicKey = envConfig.FOUNDER_WALLET_PUBLIC_KEY;
+    assert.ok(founderPublicKey, "FOUNDER_WALLET_PUBLIC_KEY must be configured for this test to mean anything");
+
+    tradingWalletRepository.insertWallet({ userId: resetUserId, publicKey: founderPublicKey, encryptedPrivateKey: "unused" });
+    tradingBotRepository.setAllocationAndCapital(resetUserId, 100, 13.122466);
+
+    // A real closed trade with a heavy realized loss - exactly the
+    // production shape (realizedPnL = -12.309702) that drives
+    // availableCash below min_order_size while openValue stays 0.
+    const positionId = insertTestOpenPosition(resetUserId, "ResetCapitalTestToken111");
+    const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+    tradingBotRepository.closePosition(resetUserId, position, {
+        exitPrice: 0.05, roiPct: -95, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason: "STOP_LOSS"
+    });
+
+    const beforePortfolio = tradingBotService.getPortfolio(resetUserId);
+    assert.ok(beforePortfolio.availableCash < tradingBotRepository.getConfig(resetUserId).min_order_size,
+        "fixture must reproduce CASH_EXHAUSTED_BEFORE_TURN before the reset - otherwise this test proves nothing");
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        solLamports: 87483106667, solAmount: 87.483106667, solUsdPrice: 0.15, solUsd: 13.122466, unavailableReason: null
+    }));
+
+    try{
+
+        const result = await tradingBotService.resetTradingCapital(resetUserId);
+        assert.equal(result.ok, true);
+        assert.equal(result.walletBalanceUsd, 13.122466);
+        assert.ok(Math.abs(result.freshInitialCapital - 13.122466) < 1e-9);
+        assert.ok(result.config.ledger_reset_at, "ledger_reset_at must be stamped");
+
+        // The whole point: availableCash now equals the fresh wallet
+        // balance (openValue is 0 in this fixture), not depressed by the
+        // pre-reset realized loss.
+        const afterPortfolio = tradingBotService.getPortfolio(resetUserId);
+        assert.ok(Math.abs(afterPortfolio.availableCash - 13.122466) < 1e-9,
+            `availableCash must equal the real wallet balance after reset, got ${afterPortfolio.availableCash}`);
+
+        // PnL history must remain intact: all-time reporting fields still
+        // reflect the real historical trade, never reset to zero.
+        assert.equal(afterPortfolio.totalTrades, 1);
+        assert.equal(afterPortfolio.winRate, 0);
+        assert.ok(afterPortfolio.realizedProfit < 0, "the real historical loss must still be reported, never erased");
+
+        // Trade history must remain intact: the row itself still exists.
+        const stillThere = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND token_address = ?").get(resetUserId, "ResetCapitalTestToken111");
+        assert.ok(stillThere, "the closed trade row must never be deleted by a Reset Trading Capital action");
+        assert.equal(stillThere.reason, "STOP_LOSS");
+
+        // No hidden resets - a real, visible log row documents the change.
+        const log = tradingBotRepository.findRecentLog(resetUserId, 1)[0];
+        assert.equal(log.log_type, "SYSTEM");
+        assert.match(log.message, /Trading Capital reset/);
+
+    }
+    finally{
+        restore();
+        deleteTestUser(resetUserId);
+    }
+
+});
+
 test("a smuggled bundle-field override alongside a profile switch never wins over the real bundle", () => {
     const result = tradingBotService.updateConfig(userId, { strategy_profile: "STABLE", min_confidence: 999, opportunity_priority_enabled: 1 });
     assert.equal(result.ok, true);

@@ -60,6 +60,11 @@ function getConfig(userId){
 const CONFIG_FIELDS = [
     "initial_capital", "position_size_pct", "max_position_size", "max_open_positions",
     "min_order_size", "fee_pct", "slippage_pct", "one_position_per_token", "scan_interval_seconds",
+    // Exit Evaluation Interval sprint (migration 062): independent of
+    // scan_interval_seconds above - governs only
+    // scheduler/exitEvaluationScheduler.js's per-user exit-check cadence,
+    // never the BUY-side scan/AI-scoring interval.
+    "exit_evaluation_interval_seconds",
     // Trading Configuration sprint (migration 055): position_size_pct/
     // max_position_size/max_open_positions above are no longer
     // profile-owned (see services/tradingBotService.js's PROFILE_OWNED_FIELDS
@@ -149,6 +154,7 @@ function updateConfig(userId, partial){
             slippage_pct = @slippage_pct,
             one_position_per_token = @one_position_per_token,
             scan_interval_seconds = @scan_interval_seconds,
+            exit_evaluation_interval_seconds = @exit_evaluation_interval_seconds,
             position_sizing_mode = @position_sizing_mode,
             fixed_position_size_usd = @fixed_position_size_usd,
             min_confidence = @min_confidence,

@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 
-const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, HELD_POSITION_STALE_AFTER_MS } = require("./tradingBotEngine");
+const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, HELD_POSITION_STALE_AFTER_MS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
@@ -736,6 +736,147 @@ test("runCycle does NOT call the on-demand fallback for a position whose token i
         db.prepare("DELETE FROM trading_bot_equity_snapshot WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM trading_bot_positions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+// Exit Evaluation Interval sprint: runExitCycle()/manageOpenPositions()
+// are the independent, faster exit-only path (scheduler/exitEvaluationScheduler.js).
+// Unlike runCycle(), they have no tick-wide `tokens`/`byAddress` snapshot -
+// each open position's own token must be looked up individually via
+// gmgnTokenRepository.getTokenByAddress(). Proves that path closes a real
+// STOP_LOSS exactly like runCycle()'s own inline loop already did before
+// this refactor - same dynamicExitService/tradeManager wiring, reached a
+// different way.
+test("runExitCycle closes a real STOP_LOSS position via gmgnTokenRepository.getTokenByAddress (no tokens/byAddress snapshot needed)", async () => {
+
+    const testEmail = `tradingbotengine.test.exitcycle.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalGetTokenByAddress = gmgnTokenRepository.getTokenByAddress;
+    const nowStamp = nowSqliteTimestamp();
+
+    try{
+
+        tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestExitCycleToken111", tokenSymbol: "EXITCYCLE",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.85, stopLossMarketCap: null
+        });
+
+        // Real price crashed below stop_loss_price (0.85) - the ONLY
+        // thing this test needs gmgnTokenRepository.getTokenByAddress to
+        // return, proving manageOpenPositions used this lookup (never
+        // thrown a tokensByAddress-is-null error, never silently skipped).
+        gmgnTokenRepository.getTokenByAddress = (tokenAddress) => {
+            assert.equal(tokenAddress, "TestExitCycleToken111");
+            return {
+                token_address: "TestExitCycleToken111", symbol: "EXITCYCLE", price: 0.5,
+                market_cap: 1000, last_seen: nowStamp, updated_at: nowStamp
+            };
+        };
+
+        const result = await runExitCycle(userId);
+
+        assert.equal(result.skipped, false);
+        assert.equal(result.closed, 1);
+
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.status, "CLOSED");
+
+        // Either real reason proves the same thing here (a genuine
+        // dynamicExitService close reached through the per-address
+        // token lookup, unchanged from runCycle()'s own wiring) -
+        // REVERSAL fires first in evaluateDynamicExit whenever the real,
+        // un-stubbed engine itself reads this sparse, crashed (-50%)
+        // fake token as AVOID; STOP_LOSS is the fallback otherwise. This
+        // test isn't about which one wins, only that manageOpenPositions
+        // reached a real close via gmgnTokenRepository.getTokenByAddress.
+        const trade = db.prepare("SELECT reason FROM trading_bot_trades WHERE position_id = ?").get(positionId);
+        assert.ok(["STOP_LOSS", "REVERSAL"].includes(trade.reason), `expected a real close reason, got ${trade.reason}`);
+
+    }
+    finally{
+        gmgnTokenRepository.getTokenByAddress = originalGetTokenByAddress;
+        db.prepare("DELETE FROM trading_bot_trades WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_positions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+// The core BUY-side cost guarantee this whole sprint depends on: the
+// exit-only path must NEVER touch the full token universe or the AI
+// batch-scoring pass, no matter how often it's called - proven here by
+// making both throw if called at all.
+test("runExitCycle never calls getAllTokens or scoreTokens - BUY-side scan/RPC cost is completely unaffected", async () => {
+
+    const testEmail = `tradingbotengine.test.exitcyclecost.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalGetAllTokens = gmgnTokenRepository.getAllTokens;
+    const scoringWorkerPool = require("./scoringWorkerPool");
+    const originalScoreTokens = scoringWorkerPool.scoreTokens;
+
+    try{
+
+        tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
+
+        gmgnTokenRepository.getAllTokens = () => { throw new Error("must never be called - exit-only cycle must never scan the full token universe"); };
+        scoringWorkerPool.scoreTokens = async () => { throw new Error("must never be called - exit-only cycle must never run AI scoring"); };
+
+        // No open positions at all - proves the function completes
+        // cleanly without ever needing the full-universe token list.
+        const result = await runExitCycle(userId);
+        assert.equal(result.skipped, false);
+        assert.equal(result.closed, 0);
+
+    }
+    finally{
+        gmgnTokenRepository.getAllTokens = originalGetAllTokens;
+        scoringWorkerPool.scoreTokens = originalScoreTokens;
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+test("runExitCycle skips honestly when the bot is not RUNNING, never touching positions", async () => {
+
+    const testEmail = `tradingbotengine.test.exitcyclenotrunning.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        // Default seeded state is STOPPED - never started in this test.
+        const result = await runExitCycle(userId);
+        assert.equal(result.skipped, true);
+        assert.equal(result.reason, "NOT_RUNNING");
+
+    }
+    finally{
         db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);

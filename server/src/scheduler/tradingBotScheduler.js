@@ -33,12 +33,20 @@
 // unaffected - STABLE's translated philosophy is all-default, so their
 // computed signal is byte-identical to before this fix.
 
-const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const liveRecommendationService = require("../services/liveRecommendationService");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotEngine = require("../services/tradingBotEngine");
 const strategyProfileTranslator = require("../services/strategyProfileTranslator");
 const scoringWorkerPool = require("../services/scoringWorkerPool");
+// Fresh BUY Universe RFC (approved architecture: misty-floating-quasar.md):
+// gmgnTokenRepository.getAllTokens() is no longer called directly from
+// this file - freshUniverseService owns building the scoring/ranking
+// universe now, so stale rows the collector stopped refreshing never
+// reach scoring at all. tradingBotFreshUniverseSnapshotRepository
+// records the collector->fresh-universe stage of the funnel per tick -
+// the one stage that had zero observability before this sprint.
+const freshUniverseService = require("../services/freshUniverseService");
+const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradingBotFreshUniverseSnapshotRepository");
 
 const TICK_MS = 15000;
 
@@ -197,7 +205,19 @@ async function tick(){
     // SCORING pass below (which genuinely depends on each user's own
     // strategy_profile) is no longer collapsed onto a single hardcoded
     // philosophy.
-    const tokens = gmgnTokenRepository.getAllTokens().filter(t => t.market_cap != null && t.market_cap > 0);
+    //
+    // Fresh BUY Universe RFC: freshUniverseService.getBuyCandidateUniverse()
+    // replaces the old inline getAllTokens().filter(market_cap>0) - same
+    // market-cap floor, now ALSO excluding rows the collector stopped
+    // refreshing (stale market snapshots that used to get scored/ranked
+    // and then die at entryGateService's STALE_MARKET_DATA reject
+    // anyway). One snapshot row recorded per tick for the funnel report
+    // (services/tradingBotService.js's getBottleneckReport).
+    const { tokens, collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap } = freshUniverseService.getBuyCandidateUniverse();
+
+    tradingBotFreshUniverseSnapshotRepository.insertSnapshot({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
+
+    console.log(`[trading-bot-scheduler] fresh universe: collector=${collectorTotalCount} fresh=${freshUniverseCount}`);
 
     // Group this tick's due users by their OWN translated philosophy -
     // dedup'd so N users on the same profile still score once, not N

@@ -103,6 +103,42 @@ function getAllTokens(){
 
 }
 
+// Fresh BUY Universe RFC (services/freshUniverseService.js): the
+// collector (trendingCollector.js) only refreshes rows still in GMGN's
+// trending list, so getAllTokens() carries stale rows forward
+// indefinitely. This is the SQL-side freshness + market-cap filter -
+// same "market_cap > 0" floor getAllTokens() callers used to apply in
+// JS after the fact (scheduler/tradingBotScheduler.js), now pushed into
+// the query so it can use idx_gmgn_tokens_updated_at_market_cap
+// (migration 063) instead of full-scanning. SELECT * (not the
+// LIST_COLUMNS trimmed set) to keep exact column parity with
+// getAllTokens() - only row COUNT changes for downstream scoring, never
+// which fields a token object carries.
+//
+// EXPLAIN QUERY PLAN, verified against this account's own real ~12.5k-row
+// dev DB (per the RFC's own required verification step, not assumed):
+// with market_cap > 0 true for essentially every row and no ANALYZE
+// stats collected, SQLite's planner picks the pre-existing
+// idx_gmgn_tokens_market_cap instead - it satisfies ORDER BY market_cap
+// DESC for free, which its heuristic (no real row-count stats available)
+// values over the freshness predicate. That plan is wrong for THIS
+// query: it still has to touch every market_cap>0 row (i.e. nearly the
+// whole table) to check updated_at, which is exactly the full-scan this
+// index was added to avoid. `INDEXED BY` forces the freshness index,
+// which is genuinely faster here because only a small fraction of rows
+// are ever fresh - the resulting (small) row set is then sorted in a
+// temp b-tree, verified cheap at this scale.
+function getFreshTokens({ maxAgeSeconds, minMarketCap }){
+
+    return db.prepare(`
+        SELECT * FROM gmgn_tokens INDEXED BY idx_gmgn_tokens_updated_at_market_cap
+        WHERE updated_at >= datetime('now', '-' || @maxAgeSeconds || ' seconds')
+          AND market_cap > @minMarketCap
+        ORDER BY market_cap DESC
+    `).all({ maxAgeSeconds, minMarketCap });
+
+}
+
 function buildSearchClause(search){
 
     if(!search) return { whereClause: "", params: {} };
@@ -182,6 +218,7 @@ module.exports = {
     countTokens,
     getTokenByAddress,
     getAllTokens,
+    getFreshTokens,
     findMany,
     countMany,
     getStats

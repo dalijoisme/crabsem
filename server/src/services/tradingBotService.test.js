@@ -28,6 +28,7 @@ const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradingBotFreshUniverseSnapshotRepository");
 const db = require("../database/connection");
 
 // Inserts a real, disposable OPEN position row directly (bypassing the
@@ -205,6 +206,61 @@ test("updateTradingConfiguration rejects out-of-range inputs with real, specific
         const after = tradingBotService.getConfig(tcUserId);
         assert.equal(after.position_size_pct, before.position_size_pct, "a rejected update must write nothing");
         assert.equal(after.trading_config_customized_at, null);
+
+    }
+    finally{
+        deleteTestUser(tcUserId);
+    }
+
+});
+
+// Exit Evaluation Interval sprint: independent of scan_interval_seconds
+// (not editable here) - configurable 1-30s, defaults to 5.
+test("updateTradingConfiguration validates Exit Evaluation Interval to 1-30 seconds and defaults to 5", () => {
+
+    const testEmail = `tradingbotservice.test.tc.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const tcUserId = registerResult.userId;
+
+    try{
+
+        const fresh = tradingBotService.getConfig(tcUserId);
+        assert.equal(fresh.exit_evaluation_interval_seconds, 5, "a never-customized account must default to 5s");
+
+        const tooLow = tradingBotService.updateTradingConfiguration(tcUserId, { exitEvaluationIntervalSeconds: 0 });
+        assert.equal(tooLow.ok, false);
+        assert.ok(tooLow.errors[0].includes("Exit Evaluation Interval"));
+
+        const tooHigh = tradingBotService.updateTradingConfiguration(tcUserId, { exitEvaluationIntervalSeconds: 31 });
+        assert.equal(tooHigh.ok, false);
+
+        const notInteger = tradingBotService.updateTradingConfiguration(tcUserId, { exitEvaluationIntervalSeconds: 2.5 });
+        assert.equal(notInteger.ok, false);
+
+        const valid = tradingBotService.updateTradingConfiguration(tcUserId, { exitEvaluationIntervalSeconds: 1 });
+        assert.equal(valid.ok, true);
+        assert.equal(valid.config.exit_evaluation_interval_seconds, 1);
+
+    }
+    finally{
+        deleteTestUser(tcUserId);
+    }
+
+});
+
+test("getTradingConfiguration surfaces exitEvaluationIntervalSeconds under sizing", async () => {
+
+    const testEmail = `tradingbotservice.test.tc.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const tcUserId = registerResult.userId;
+
+    try{
+
+        tradingBotService.updateTradingConfiguration(tcUserId, { exitEvaluationIntervalSeconds: 3 });
+        const tc = await tradingBotService.getTradingConfiguration(tcUserId);
+        assert.equal(tc.sizing.exitEvaluationIntervalSeconds, 3);
 
     }
     finally{
@@ -1216,6 +1272,16 @@ test("getBottleneckReport computes real counts and a real cause-percentage break
         assert.equal(report.openPosition, 1);
         assert.equal(report.totalMissedOpportunities, 3);
 
+        // Fresh BUY Universe RFC, pipeline observability enhancement: the
+        // report always carries this shape, even with zero fresh-universe
+        // snapshots recorded in the window - tick-global data, never
+        // guessed/defaulted to a fabricated number.
+        assert.ok("freshUniverse" in report);
+        assert.ok("tickCount" in report.freshUniverse);
+        assert.ok("collectorTotalAvg" in report.freshUniverse);
+        assert.ok("freshUniverseAvg" in report.freshUniverse);
+        assert.ok("droppedPct" in report.freshUniverse);
+
         const slotCause = report.causes.find(c => c.category === "OPEN_SLOT_FULL");
         assert.ok(slotCause, "OPEN_SLOT_FULL must aggregate both MAX_OPEN_POSITIONS_REACHED and SLOT_FULL_BEFORE_TURN");
         assert.equal(slotCause.count, 2);
@@ -1230,6 +1296,34 @@ test("getBottleneckReport computes real counts and a real cause-percentage break
     }
     finally{
         deleteTestUser(bnUserId);
+    }
+
+});
+
+// Fresh BUY Universe RFC, pipeline observability enhancement: proves
+// getBottleneckReport's freshUniverse block correctly surfaces the
+// collector->fresh-universe funnel stage. Stubbed (not real inserts) -
+// trading_bot_fresh_universe_snapshots is tick-global, not user-scoped,
+// so unlike this file's other real-DB tests there is no per-test-user
+// row to clean up afterward via deleteTestUser.
+test("getBottleneckReport surfaces the fresh-universe funnel stage from tradingBotFreshUniverseSnapshotRepository", () => {
+
+    const restoreSumSince = stub(tradingBotFreshUniverseSnapshotRepository, "sumSince", (hours) => {
+        assert.equal(hours, 24);
+        return { tickCount: 4, collectorTotalAvg: 14023, freshUniverseAvg: 351 };
+    });
+
+    try{
+        const report = tradingBotService.getBottleneckReport(userId, 24);
+        assert.deepEqual(report.freshUniverse, {
+            tickCount: 4,
+            collectorTotalAvg: 14023,
+            freshUniverseAvg: 351,
+            droppedPct: 97.5 // (14023 - 351) / 14023 * 100, rounded to 1 decimal
+        });
+    }
+    finally{
+        restoreSumSince();
     }
 
 });

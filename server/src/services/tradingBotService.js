@@ -32,6 +32,7 @@ const walletService = require("./walletService");
 const executionRepository = require("../repositories/executionRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradingBotFreshUniverseSnapshotRepository");
 // Section J (Open Position fields): reuses MIN_TP_PCT for a read-only
 // "Dynamic State" label - never re-implements or re-evaluates the real
 // exit decision itself (that stays in tradeManager.js's closeIfDue).
@@ -317,7 +318,10 @@ async function getTradingConfiguration(userId){
             fixedPositionSizeUsd: config.fixed_position_size_usd,
             maxPositionSize: config.max_position_size,
             maxOpenPositions: config.max_open_positions,
-            minOrderSize: config.min_order_size
+            minOrderSize: config.min_order_size,
+            // Exit Evaluation Interval sprint: independent of scan_interval_seconds
+            // (BUY-side scanning) - see scheduler/exitEvaluationScheduler.js.
+            exitEvaluationIntervalSeconds: config.exit_evaluation_interval_seconds
         },
         customized: Boolean(config.trading_config_customized_at)
     };
@@ -369,6 +373,17 @@ function updateTradingConfiguration(userId, partial){
         const floor = Number(partial.minOrderSize);
         if(!Number.isFinite(floor) || floor <= 0) errors.push("Min Order Size must be a positive USD amount.");
         else patch.min_order_size = floor;
+    }
+    // Exit Evaluation Interval sprint: independent of scan_interval_seconds
+    // (BUY-side scanning, not editable from this form) - governs only how
+    // often scheduler/exitEvaluationScheduler.js re-checks this user's own
+    // OPEN positions for Dynamic Exit/Stop Loss.
+    if(partial.exitEvaluationIntervalSeconds != null){
+        const seconds = Number(partial.exitEvaluationIntervalSeconds);
+        if(!Number.isInteger(seconds) || seconds < 1 || seconds > 30){
+            errors.push("Exit Evaluation Interval must be a whole number of seconds between 1 and 30.");
+        }
+        else patch.exit_evaluation_interval_seconds = seconds;
     }
 
     if(errors.length) return { ok: false, errors };
@@ -808,8 +823,29 @@ function getBottleneckReport(userId, hours = 24){
         at: failedExecutions[0].created_at
     } : null;
 
+    // Fresh BUY Universe RFC, pipeline observability enhancement: the
+    // one funnel stage (collector -> fresh universe) with no prior
+    // visibility, before this report's existing qualified/bought/closed
+    // stages (which are already real, per-user, per-cycle numbers above).
+    // Tick-global, not user-scoped - every due user in a tick shares the
+    // exact same fresh universe - so this answers "how much is being
+    // filtered out before I even see it," same question the rest of
+    // this report already answers for the later stages.
+    const freshUniverseSnapshot = tradingBotFreshUniverseSnapshotRepository.sumSince(hours);
+    const collectorTotalAvg = freshUniverseSnapshot.collectorTotalAvg;
+    const freshUniverseAvg = freshUniverseSnapshot.freshUniverseAvg;
+    const droppedPct = (collectorTotalAvg != null && collectorTotalAvg > 0)
+        ? Math.round(((collectorTotalAvg - freshUniverseAvg) / collectorTotalAvg) * 1000) / 10
+        : null;
+
     return {
         windowHours: hours,
+        freshUniverse: {
+            tickCount: freshUniverseSnapshot.tickCount,
+            collectorTotalAvg,
+            freshUniverseAvg,
+            droppedPct
+        },
         qualified: audit.qualified,
         bought: audit.bought,
         openPosition,

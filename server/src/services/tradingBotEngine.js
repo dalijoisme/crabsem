@@ -37,6 +37,7 @@
 // red flags) than a token's very first entry gets.
 
 const tradingBotRepository = require("../repositories/tradingBotRepository");
+const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const tradingWalletRepository = require("../repositories/tradingWalletRepository");
 const config = require("../config/env");
 const tradingBotService = require("./tradingBotService");
@@ -335,6 +336,94 @@ function buildLiveExecutionOptions(userId){
 
 }
 
+// Exit Evaluation Interval sprint: the exact loop body runCycle()'s own
+// "manage OPEN positions first" section always ran, extracted verbatim
+// so the independent, faster exit-only scheduler
+// (scheduler/exitEvaluationScheduler.js's runExitCycle() below) can
+// share it - never a second copy of the close-decision wiring. Preserves
+// every existing Dynamic Exit behavior unmodified: dynamicExitService.js/
+// tradeManager.js's closeIfDue/finalizeClose are called exactly as
+// before, in the exact same order, for the exact same positions.
+//
+// tokensByAddress: runCycle() passes its own already-computed
+// byAddress Map (this tick's shared trending snapshot - zero behavior
+// change, zero extra query). The independent exit-only scheduler has no
+// such tick-wide snapshot (it never scans/scores the full token
+// universe - that would increase BUY-side cost for no reason) and
+// passes null instead - each open position's own token is looked up
+// individually via gmgnTokenRepository.getTokenByAddress(), the exact
+// same gmgn_tokens table, just a targeted single-row read rather than
+// an in-memory map lookup. No new RPC/network call either way - both
+// paths only ever call ondemandService (ondemandService.getTokenPoolInfo/
+// getTokenKline) for a position whose token is already stale, exactly as
+// today.
+async function manageOpenPositions(userId, tradeManagerForUser, botConfig, tokensByAddress, ondemandService){
+
+    let closed = 0;
+    const openPositions = tradingBotRepository.findOpenPositions(userId);
+
+    for(const position of openPositions){
+
+        let token = tokensByAddress
+            ? tokensByAddress.get(position.token_address)
+            : gmgnTokenRepository.getTokenByAddress(position.token_address);
+
+        // Exit Engine root-cause fix (see refreshStaleHeldToken's own
+        // header comment above) - a token that fell out of this cycle's
+        // shared trending snapshot (or was never in it at all) gets its
+        // own on-demand freshness check here, so a held position is
+        // never evaluated against a price that stopped being real.
+        if(msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS){
+            token = await refreshStaleHeldToken(userId, position, token, ondemandService);
+        }
+        if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
+
+        const result = await tradeManagerForUser.closeIfDue(position, token, botConfig);
+        if(result.closed) closed++;
+
+    }
+
+    return closed;
+
+}
+
+// Exit Evaluation Interval sprint: the independent exit-only cycle -
+// scheduler/exitEvaluationScheduler.js calls this on each user's OWN
+// trading_bot_config.exit_evaluation_interval_seconds cadence (default
+// 5s), completely decoupled from scan_interval_seconds (the BUY-side
+// scan/AI-scoring cadence, which this never touches). Never calls
+// gmgnTokenRepository.getAllTokens(), scoringWorkerPool.scoreTokens(),
+// orderCandidates(), or entryGateService - only ever reads/evaluates
+// this user's own currently-OPEN positions, so BUY-side RPC/compute cost
+// is completely unaffected by how often this runs.
+//
+// Mirrors runCycle()'s own state/liveOptions/tradeManager setup exactly
+// (deliberately small, duplicated DB-only plumbing, never the Dynamic
+// Exit logic itself) rather than sharing that setup code with runCycle() -
+// keeps runCycle() itself completely untouched, changing nothing about
+// its own proven behavior.
+async function runExitCycle(userId, ondemandService = gmgnOndemandService){
+
+    const state = tradingBotRepository.getState(userId);
+    if(state.status !== "RUNNING") return { skipped: true, reason: "NOT_RUNNING" };
+
+    let liveOptions = null;
+
+    if(state.mode !== "SIMULATION"){
+        liveOptions = buildLiveExecutionOptions(userId);
+        if(!liveOptions) return { skipped: true, reason: "LIVE_MODE_NOT_AUTHORIZED" };
+    }
+
+    const botConfig = tradingBotRepository.getConfig(userId);
+    const repositoryForUser = tradingBotRepository.forUser(userId);
+    const tradeManagerForUser = tradeManager.createTradeManager(repositoryForUser, liveOptions);
+
+    const closed = await manageOpenPositions(userId, tradeManagerForUser, botConfig, null, ondemandService);
+
+    return { skipped: false, closed };
+
+}
+
 // Sprint A, Goal 2 (auth/multi-tenancy foundation): tokens/liveByAddress
 // are now PARAMETERS instead of recomputed inside this function - that
 // computation is identical for every user (the "house profile" decision,
@@ -388,22 +477,12 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
     const skipReasons = {};
 
     // ---- 1. manage OPEN positions first (exit checks use live current price) ----
-    const openPositions = tradingBotRepository.findOpenPositions(userId);
-    for(const position of openPositions){
-        let token = byAddress.get(position.token_address);
-        // Exit Engine root-cause fix (see refreshStaleHeldToken's own
-        // header comment above) - a token that fell out of this
-        // cycle's shared trending snapshot (or was never in it at all)
-        // gets its own on-demand freshness check here, so a held
-        // position is never evaluated against a price that stopped
-        // being real.
-        if(msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS){
-            token = await refreshStaleHeldToken(userId, position, token, ondemandService);
-        }
-        if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
-        const result = await tradeManagerForUser.closeIfDue(position, token, botConfig);
-        if(result.closed) closed++;
-    }
+    // Exit Evaluation Interval sprint: this loop body now lives in
+    // manageOpenPositions() below, shared with the independent, faster
+    // exit-only scheduler (scheduler/exitEvaluationScheduler.js's
+    // runExitCycle()) - same variables, same call, same order as before
+    // this extraction, so this cycle's own behavior is unchanged.
+    closed = await manageOpenPositions(userId, tradeManagerForUser, botConfig, byAddress, ondemandService);
 
     // ---- 2. look for new entries ----
     let openCount = tradingBotRepository.countOpenPositions(userId);
@@ -465,11 +544,34 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
             // own required message shape exactly.
             if(evaluation.reason === "STALE_MARKET_DATA"){
                 const ageLabel = evaluation.marketAgeSeconds != null ? Math.round(evaluation.marketAgeSeconds) : "unknown";
+                // STALE_MARKET_DATA root-cause observability: the age
+                // alone can't tell "the collector never refreshed this
+                // token at all" apart from "the collector is healthy,
+                // this token just fell out of its own source coverage" -
+                // both raw inputs entryGateService.js's marketAgeSecondsFor
+                // actually diffs (token.updated_at, falling back to
+                // last_seen) plus the evaluation instant itself are
+                // captured here, never re-derived differently. Printed to
+                // the server console for real-time visibility while
+                // tailing logs, AND persisted in this same WARNING row's
+                // meta_json for later querying (trading_bot_log) - one
+                // fact, two destinations, never a second computation.
+                const lastTimestamp = token.updated_at || token.last_seen || null;
+                const evaluatedAt = new Date().toISOString();
+                console.log(
+                    `[stale-market-data] token=${token.symbol || token.token_address} ` +
+                    `marketAgeSeconds=${ageLabel} lastTimestamp=${lastTimestamp} now=${evaluatedAt} reason=STALE_MARKET_DATA`
+                );
                 tradingBotRepository.insertLog(userId, {
                     logType: "WARNING",
                     tokenSymbol: token.symbol,
                     message: `Rejected: Market data stale (${ageLabel} seconds old) - ${token.symbol || token.token_address.slice(0, 8)}`,
-                    meta: { tokenAddress: token.token_address, marketAgeSeconds: evaluation.marketAgeSeconds }
+                    meta: {
+                        tokenAddress: token.token_address,
+                        marketAgeSeconds: evaluation.marketAgeSeconds,
+                        lastTimestamp,
+                        evaluatedAt
+                    }
                 });
             }
             // Production Stabilization V2 (BUY Quality sprint, Section 3
@@ -711,8 +813,14 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
 // exported purely for this file's own regression test (Production
 // Stabilization V1, Section A) - pure/near-pure functions, no other
 // module calls them directly.
+//
+// runExitCycle is exported for scheduler/exitEvaluationScheduler.js - the
+// independent, faster exit-only cadence (Exit Evaluation Interval
+// sprint). manageOpenPositions is exported purely for this file's own
+// regression test - no other module calls it directly.
 module.exports = {
     runCycle, orderCandidates, buildLiveExecutionOptions,
     msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
-    HELD_POSITION_STALE_AFTER_MS
+    HELD_POSITION_STALE_AFTER_MS,
+    manageOpenPositions, runExitCycle
 };

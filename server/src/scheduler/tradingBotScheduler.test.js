@@ -25,6 +25,8 @@ const liveRecommendationService = require("../services/liveRecommendationService
 const tradingBotEngine = require("../services/tradingBotEngine");
 const strategyProfileTranslator = require("../services/strategyProfileTranslator");
 const strategyProfileConfig = require("../config/strategyProfileConfig");
+const freshUniverseService = require("../services/freshUniverseService");
+const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradingBotFreshUniverseSnapshotRepository");
 
 const scheduler = require("./tradingBotScheduler");
 
@@ -47,7 +49,10 @@ test("each due user's OWN strategy_profile philosophy drives their OWN entry-sco
     };
 
     const restores = [
-        stub(gmgnTokenRepository, "getAllTokens", () => tokens),
+        stub(freshUniverseService, "getBuyCandidateUniverse", () => ({
+            tokens, collectorTotalCount: tokens.length, freshUniverseCount: tokens.length, maxAgeSeconds: 120, minMarketCap: 0
+        })),
+        stub(tradingBotFreshUniverseSnapshotRepository, "insertSnapshot", () => {}),
         stub(tradingBotRepository, "findRunningUserIds", () => [1, 2, 3]),
         stub(tradingBotRepository, "getConfig", (userId) => configsByUser[userId]),
         stub(liveRecommendationService, "computeStructuralExclusion", () => ({ excluded: false, reason: null, tokenStatus: null }))
@@ -120,5 +125,56 @@ test("each due user's OWN strategy_profile philosophy drives their OWN entry-sco
     const observedAggressivePhilosophy = scoreTokensCalls.find(p => p.acceleration);
     assert.deepEqual(observedAggressivePhilosophy, expectedAggressivePhilosophy);
     assert.equal(observedAggressivePhilosophy.acceleration.requireGateForEntry, true);
+
+});
+
+// Fresh BUY Universe RFC (approved architecture: misty-floating-quasar.md):
+// proves tick() now builds its per-tick universe via
+// freshUniverseService.getBuyCandidateUniverse() - never
+// gmgnTokenRepository.getAllTokens() directly - and records exactly one
+// fresh-universe snapshot per tick via
+// tradingBotFreshUniverseSnapshotRepository.insertSnapshot().
+test("tick() sources tokens from freshUniverseService (never getAllTokens directly) and records one fresh-universe snapshot per tick", async () => {
+
+    const tokens = [{ token_address: "TOKEN_A", market_cap: 1000000 }];
+
+    let getAllTokensCalled = false;
+    const originalGetAllTokens = gmgnTokenRepository.getAllTokens;
+    gmgnTokenRepository.getAllTokens = () => { getAllTokensCalled = true; return tokens; };
+
+    let getBuyCandidateUniverseCalled = false;
+    const snapshotCalls = [];
+
+    const restores = [
+        () => { gmgnTokenRepository.getAllTokens = originalGetAllTokens; },
+        stub(freshUniverseService, "getBuyCandidateUniverse", () => {
+            getBuyCandidateUniverseCalled = true;
+            return { tokens, collectorTotalCount: 14023, freshUniverseCount: tokens.length, maxAgeSeconds: 120, minMarketCap: 0 };
+        }),
+        stub(tradingBotFreshUniverseSnapshotRepository, "insertSnapshot", (args) => snapshotCalls.push(args)),
+        // Fresh, never-before-used userId in this file - the earlier test
+        // above already ran tick() for userIds 1/2/3, which set their
+        // module-level lastCycleAtByUser to "just now"; reusing any of
+        // those ids here would make isDue() false (not enough of
+        // scan_interval_seconds elapsed between the two tests), and this
+        // test would wrongly appear to do nothing.
+        stub(tradingBotRepository, "findRunningUserIds", () => [101]),
+        stub(tradingBotRepository, "getConfig", () => ({ scan_interval_seconds: 1, ...strategyProfileConfig.resolveProfile("STABLE") })),
+        stub(liveRecommendationService, "computeStructuralExclusion", () => ({ excluded: false, reason: null, tokenStatus: null })),
+        stub(scoringWorkerPool, "scoreTokens", async (tokensArg) => tokensArg.map(() => ({ action: "HOLD", confidence: 10, risk: "LOW", participantScore: 20, marketHealth: 50 }))),
+        stub(tradingBotEngine, "runCycle", async (userId, tokensArg) => ({ scanned: tokensArg.length, opened: 0, closed: 0, skipped: 0, skipReasons: {} }))
+    ];
+
+    try{
+        await scheduler.tick();
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+    assert.equal(getBuyCandidateUniverseCalled, true, "tick() must source its universe from freshUniverseService.getBuyCandidateUniverse()");
+    assert.equal(getAllTokensCalled, false, "tick() must never call gmgnTokenRepository.getAllTokens() directly anymore");
+    assert.equal(snapshotCalls.length, 1, "exactly one fresh-universe snapshot must be recorded per tick");
+    assert.deepEqual(snapshotCalls[0], { collectorTotalCount: 14023, freshUniverseCount: 1, maxAgeSeconds: 120, minMarketCap: 0 });
 
 });

@@ -410,7 +410,24 @@ function renderBottleneckReport(b){
         `).join("")
         : `<div class="tbEmptyState">No real missed opportunities recorded in this window.</div>`;
 
+    // Fresh BUY Universe RFC, pipeline observability enhancement: the
+    // top-of-funnel stage (collector -> fresh universe) shown ahead of
+    // the existing Qualified/Bought/... stages, so the whole funnel
+    // (Collector -> Fresh Universe -> Qualified -> Bought) reads as one
+    // sequence. tickCount:0 means the bot hasn't ticked in this window
+    // yet - "Collecting data", never a fabricated 0/—.
+    const fu = b.freshUniverse;
+    const freshUniverseHtml = fu && fu.tickCount > 0 ? `
+        <div class="adminGrid4">
+            <div class="adminStat"><span>Collector Total (avg)</span><strong>${fmtNum(Math.round(fu.collectorTotalAvg))}</strong></div>
+            <div class="adminStat"><span>Fresh Universe (avg)</span><strong>${fmtNum(Math.round(fu.freshUniverseAvg))}</strong></div>
+            <div class="adminStat"><span>Dropped as Stale</span><strong>${fu.droppedPct != null ? fmtPct(fu.droppedPct) : "—"}</strong></div>
+        </div>
+    ` : `<div class="tbEmptyState">No fresh-universe snapshot recorded in this window yet - collecting data.</div>`;
+
     el.innerHTML = `
+        <h4>Collector &rarr; Fresh Universe</h4>
+        ${freshUniverseHtml}
         <div class="adminGrid4">
             <div class="adminStat"><span>Qualified</span><strong>${fmtNum(b.qualified)}</strong></div>
             <div class="adminStat"><span>Bought</span><strong>${fmtNum(b.bought)}</strong></div>
@@ -717,7 +734,12 @@ function renderTradingConfiguration(tc){
                 <label>Min Order Size (USD)</label>
                 <input type="number" id="tcMinOrderSize" min="1" step="1" value="${s.minOrderSize}">
             </div>
+            <div class="tbConfigField">
+                <label>Exit Evaluation Interval (seconds)</label>
+                <input type="number" id="tcExitEvaluationIntervalSeconds" min="1" max="30" step="1" value="${s.exitEvaluationIntervalSeconds}">
+            </div>
         </div>
+        <div class="tbConfigHint">Exit Evaluation Interval controls only how often OPEN positions are re-checked for Take Profit/Stop Loss (1-30s, independent of the Scan Interval used for finding new BUY candidates).</div>
 
         <h4>Live Preview</h4>
         <div class="tbTimeline" id="tcPreview"></div>
@@ -738,7 +760,7 @@ function renderTradingConfiguration(tc){
     togglePctFixedVisibility();
     renderTradingConfigurationPreview(tc);
 
-    ["tcSizingMode", "tcPositionSizePct", "tcFixedPositionSizeUsd", "tcMaxPositionSize", "tcMaxOpenPositions", "tcMinOrderSize"].forEach(id => {
+    ["tcSizingMode", "tcPositionSizePct", "tcFixedPositionSizeUsd", "tcMaxPositionSize", "tcMaxOpenPositions", "tcMinOrderSize", "tcExitEvaluationIntervalSeconds"].forEach(id => {
         document.getElementById(id).addEventListener("input", () => {
             togglePctFixedVisibility();
             renderTradingConfigurationPreview(tc);
@@ -792,7 +814,8 @@ function renderTradingConfiguration(tc){
             fixedPositionSizeUsd: document.getElementById("tcFixedPositionSizeUsd").value ? Number(document.getElementById("tcFixedPositionSizeUsd").value) : null,
             maxPositionSize: Number(document.getElementById("tcMaxPositionSize").value),
             maxOpenPositions: Number(document.getElementById("tcMaxOpenPositions").value),
-            minOrderSize: Number(document.getElementById("tcMinOrderSize").value)
+            minOrderSize: Number(document.getElementById("tcMinOrderSize").value),
+            exitEvaluationIntervalSeconds: Number(document.getElementById("tcExitEvaluationIntervalSeconds").value)
         };
         try{
             await adminFetch("/tradingbot/trading-configuration", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });

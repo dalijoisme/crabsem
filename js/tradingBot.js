@@ -143,6 +143,21 @@ document.addEventListener("click", (e) => {
 // =====================================
 
 function fmtUsd(n){ return n == null ? "—" : `$${Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`; }
+// A fixed 2-decimal format (fmtUsd above) rounds any sub-cent token
+// price to $0.00 - meme-coin entry/current/target/SL prices routinely
+// sit at $0.0000001-$0.001. Same scaling approach as ui.js's own
+// formatPrice() (discovery pages), reimplemented here since ui.js isn't
+// loaded on this page: precision grows with how small the price is,
+// never switching to exponential notation.
+function fmtTokenPrice(n){
+    if(n == null) return "—";
+    const v = Number(n);
+    if(v === 0) return "$0.00";
+    if(Math.abs(v) >= 1) return fmtUsd(v);
+    const magnitude = Math.floor(Math.log10(Math.abs(v)));
+    const decimals = Math.min(18, Math.max(4, -magnitude + 2));
+    return `$${v.toFixed(decimals)}`;
+}
 function fmtPct(n){ return n == null ? "—" : `${Number(n).toFixed(2)}%`; }
 function fmtNum(n){ return n == null ? "—" : Number(n).toLocaleString(); }
 function fmtDuration(seconds){
@@ -222,7 +237,7 @@ function renderCandidateRow(c){
             <span class="tbPill ${c.action === "AVOID" ? "tbNeg" : (c.action === "HOLD" ? "tbNeutral" : "tbPos")}">${c.action}</span>
             <span class="tbCandidateConfidence">${c.confidence != null ? `${c.confidence}%` : "—"}</span>
             <span class="tbCandidateReasonShort" title="${shortReason.replace(/"/g, "&quot;")}">${shortReason}</span>
-            <span class="tbCandidateTarget">${c.targetPrice != null ? fmtUsd(c.targetPrice) : "—"}</span>
+            <span class="tbCandidateTarget">${fmtTokenPrice(c.targetPrice)}</span>
             <span class="tbCandidateAge${staleLabel}" title="Market Data Age">${fmtAgeSeconds(c.marketAgeSeconds)}</span>
             <button class="tbViewDetailBtn" data-detail-toggle="${rowId}" type="button">View Detail</button>
         </div>
@@ -905,11 +920,11 @@ function renderPositions(positions){
         <tr class="tbPositionRow" data-position-id="${p.id}" title="Click for details">
             <td>${p.tokenSymbol || p.tokenAddress.slice(0,8)}</td>
             <td><span class="tbModeTag tbMode${p.mode}">${p.mode}</span></td>
-            <td>${fmtUsd(p.entryPrice)}</td>
-            <td>${p.currentPrice != null ? fmtUsd(p.currentPrice) : "—"}</td>
+            <td>${fmtTokenPrice(p.entryPrice)}</td>
+            <td>${fmtTokenPrice(p.currentPrice)}</td>
             <td>${p.roiPct != null ? `<span class="tbPill ${p.roiPct >= 0 ? "tbPos" : "tbNeg"}">${fmtPct(p.roiPct)}</span>` : "—"}</td>
-            <td>${p.stopLossPrice != null ? fmtUsd(p.stopLossPrice) : "—"}</td>
-            <td>${p.targetPrice != null ? fmtUsd(p.targetPrice) : "—"}</td>
+            <td>${fmtTokenPrice(p.stopLossPrice)}</td>
+            <td>${fmtTokenPrice(p.targetPrice)}</td>
             <td>${DYNAMIC_STATE_LABELS[p.dynamicState] || p.dynamicState || "—"}</td>
             <td>${timeAgo(p.priceUpdatedAt)}</td>
             <td>${timeUntilEstimate(p.nextEvaluationAtEstimate)}</td>
@@ -1051,14 +1066,14 @@ function renderPositionDetail(d){
 
     const timelineHtml = `
         <div class="tbTimeline">
-            ${renderTimelineStage("Buy", fmtUsd(d.timeline.buy.price), d.timeline.buy.at)}
+            ${renderTimelineStage("Buy", fmtTokenPrice(d.timeline.buy.price), d.timeline.buy.at)}
             ${renderTimelineStage("+5%", "Crossed", d.timeline.crossed5pct.at)}
             ${renderTimelineStage("+10%", "Crossed", d.timeline.crossed10pct.at)}
             ${renderTimelineStage("Highest", d.timeline.highest.pct != null ? fmtPct(d.timeline.highest.pct) : "—", d.timeline.highest.at)}
             ${renderTimelineStage("Reversal", "Momentum turned here", d.timeline.reversal.at)}
             ${renderTimelineStage("Lowest", d.timeline.lowest.pct != null ? fmtPct(d.timeline.lowest.pct) : "—", d.timeline.lowest.at)}
-            ${d.timeline.current ? renderTimelineStage("Current", fmtUsd(d.timeline.current.price), null) : ""}
-            ${d.timeline.exit ? renderTimelineStage("Exit", `${fmtUsd(d.timeline.exit.price)} · ${friendlyReason(d.timeline.exit.reason)}`, null) : ""}
+            ${d.timeline.current ? renderTimelineStage("Current", fmtTokenPrice(d.timeline.current.price), null) : ""}
+            ${d.timeline.exit ? renderTimelineStage("Exit", `${fmtTokenPrice(d.timeline.exit.price)} · ${friendlyReason(d.timeline.exit.reason)}`, null) : ""}
             ${d.timeline.sell ? renderTimelineStage("Sell", "Closed", d.timeline.sell.at) : ""}
         </div>
     `;
@@ -1080,16 +1095,16 @@ function renderPositionDetail(d){
         <h3>${d.tokenSymbol || d.tokenAddress.slice(0,8)}</h3>
         <div class="tbDetailSub">${d.status} · opened ${timeAgo(d.timeline.buy.at)}${d.timeline.sell ? ` · closed ${timeAgo(d.timeline.sell.at)}` : ""}</div>
         <div class="adminGrid4">
-            <div class="adminStat"><span>Entry Price</span><strong>${fmtUsd(d.entryPrice)}</strong></div>
-            <div class="adminStat"><span>Current Price</span><strong>${d.currentPrice != null ? fmtUsd(d.currentPrice) : "—"}</strong></div>
+            <div class="adminStat"><span>Entry Price</span><strong>${fmtTokenPrice(d.entryPrice)}</strong></div>
+            <div class="adminStat"><span>Current Price</span><strong>${fmtTokenPrice(d.currentPrice)}</strong></div>
             <div class="adminStat"><span>ROI</span><strong>${d.roiPct != null ? fmtPct(d.roiPct) : "—"}</strong></div>
             <div class="adminStat"><span>Size</span><strong>${fmtUsd(d.sizeUsd)}</strong></div>
             <div class="adminStat"><span>AI Confidence</span><strong>${d.confidence != null ? d.confidence : "—"}</strong></div>
             <div class="adminStat"><span>Risk</span><strong>${d.risk ?? "—"}</strong></div>
             <div class="adminStat"><span>Composite Rank</span><strong>${d.rankAtEntry != null ? `#${d.rankAtEntry + 1} (${d.priorityScoreAtEntry})` : "not recorded"}</strong></div>
             <div class="adminStat"><span>Exit Strategy</span><strong>${friendlyReason(d.exitStrategy)}</strong></div>
-            <div class="adminStat"><span>Target Price</span><strong>${d.targetPrice != null ? fmtUsd(d.targetPrice) : "—"}</strong></div>
-            <div class="adminStat"><span>Stop Loss Price</span><strong>${d.stopLossPrice != null ? fmtUsd(d.stopLossPrice) : "—"}</strong></div>
+            <div class="adminStat"><span>Target Price</span><strong>${fmtTokenPrice(d.targetPrice)}</strong></div>
+            <div class="adminStat"><span>Stop Loss Price</span><strong>${fmtTokenPrice(d.stopLossPrice)}</strong></div>
             <div class="adminStat"><span>Liquidity</span><strong>${d.liquidity ? `${d.liquidity.score}/${d.liquidity.max}` : "—"}</strong></div>
             <div class="adminStat"><span>Flow</span><strong>${d.flow != null ? d.flow.toFixed(2) : "not computed"}</strong></div>
         </div>
@@ -1138,8 +1153,8 @@ function renderTrades(trades){
         <tr>
             <td><span class="tbModeTag tbMode${t.mode}">${t.mode}</span></td>
             <td>${timeAgo(t.closedAt || t.openedAt)}</td>
-            <td>${fmtUsd(t.entryPrice)}</td>
-            <td>${t.exitPrice != null ? fmtUsd(t.exitPrice) : "—"}</td>
+            <td>${fmtTokenPrice(t.entryPrice)}</td>
+            <td>${fmtTokenPrice(t.exitPrice)}</td>
             <td>${t.roiPct != null ? `<span class="tbPill ${t.roiPct >= 0 ? "tbPos" : "tbNeg"}">${fmtPct(t.roiPct)}</span>` : "—"}</td>
             <td>${t.profitUsd != null ? `<span class="tbPill ${t.profitUsd >= 0 ? "tbPos" : "tbNeg"}">${fmtUsd(t.profitUsd)}</span>` : "—"}</td>
             <td>${fmtUsd(t.feeUsd)}</td>

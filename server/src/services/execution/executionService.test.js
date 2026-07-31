@@ -166,6 +166,51 @@ test("insufficient balance fails during PREPARING, before signing is ever attemp
     assert.equal(row.tx_hash, null); // never reached broadcast
 });
 
+// Regression test for a real, proven production bug: tradeManager.js's
+// finalizeClose() passes the TOKEN's own raw base-unit balance as
+// amountLamports for a SELL (correct - gmgnSwapTransactionBuilder.js
+// needs that exact figure to know how much of the token to swap), but
+// the PREPARING balance check used to fold amountLamports into the
+// required-SOL floor unconditionally, regardless of action. A real
+// wallet holding thousands of a low-decimal memecoin (raw balance in
+// the billions) but only a fraction of a SOL would always fail this
+// check, even though a SELL spends the token, never SOL, for the
+// swapped amount - only the network-fee buffer is real SOL cost.
+// Verified against this account's own real, failed SELL executions
+// (MOON: amountLamports 7573760666 against a real wallet balance of
+// 103601988 lamports) before this fix landed.
+test("a SELL's large token-quantity amountLamports never inflates the required-SOL floor - only BUY's does", async () => {
+
+    const seenRequiredLamports = [];
+    const balanceService = {
+        async hasSufficientSolBalance(walletPublicKey, requiredLamports){
+            seenRequiredLamports.push(requiredLamports);
+            // Simulates this account's real shape: a small real SOL
+            // balance that can never cover a token's raw base-unit count,
+            // but comfortably covers the real network-fee floor.
+            return requiredLamports <= 103601988;
+        }
+    };
+
+    // SELL: a huge raw token balance (bigger than the real SOL balance
+    // by orders of magnitude) must NOT be added to the required-SOL
+    // floor - only MIN_FEE_BUFFER_LAMPORTS (5000) should be required.
+    const sellResult = await buildService({ balanceService }).service.execute({
+        userId: 1, walletPublicKey, action: "SELL", amountLamports: 7573760666, tokenAddress: "SomeTokenMint111"
+    });
+    assert.equal(sellResult.outcome, STATES.SUCCESS, "a SELL must never be rejected for 'insufficient SOL' based on the token quantity being sold");
+    assert.equal(seenRequiredLamports.at(-1), 5000, "SELL's required-SOL floor must be exactly the fee buffer, never amountLamports + buffer");
+
+    // BUY: amountLamports genuinely IS SOL to spend - the required-SOL
+    // floor must still include it, unchanged from before this fix.
+    const buyResult = await buildService({ balanceService }).service.execute({
+        userId: 1, walletPublicKey, action: "BUY", amountLamports: 200000000, tokenAddress: "SomeTokenMint111"
+    });
+    assert.equal(buyResult.outcome, STATES.FAILED, "BUY must still fail when it genuinely can't afford the real SOL amount requested");
+    assert.equal(seenRequiredLamports.at(-1), 200005000, "BUY's required-SOL floor must still be amountLamports + buffer, unchanged");
+
+});
+
 test("a genuine on-chain error resolves to FAILED with the confirmation result recorded", async () => {
     const { service, repository } = buildService({ confirmationService: fakeConfirmationService(STATES.FAILED) });
     const result = await service.execute({ userId: 1, walletPublicKey, action: "TEST_TRANSFER" });

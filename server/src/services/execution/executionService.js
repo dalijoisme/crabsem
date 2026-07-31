@@ -125,7 +125,14 @@ function createExecutionService({ repository, connectionProvider, signingService
 
             machine.transition(STATES.PREPARING);
 
-            const requiredLamports = (amountLamports ?? 0) + MIN_FEE_BUFFER_LAMPORTS;
+            // amountLamports is intentionally overloaded (see
+            // gmgnSwapTransactionBuilder.js's own build() doc comment):
+            // SOL lamports to spend for BUY, but the TOKEN's own raw
+            // base-unit balance for SELL - a SELL spends the token, never
+            // SOL, for the swapped amount itself. Only ever fold it into
+            // the required-SOL floor for BUY; every action still needs at
+            // least the network-fee buffer.
+            const requiredLamports = (action === "BUY" ? (amountLamports ?? 0) : 0) + MIN_FEE_BUFFER_LAMPORTS;
             const sufficient = await balanceService.hasSufficientSolBalance(walletPublicKey, requiredLamports);
             if(!sufficient){
                 throw new Error(`insufficient on-chain SOL balance for wallet ${walletPublicKey} (need at least ${requiredLamports} lamports)`);

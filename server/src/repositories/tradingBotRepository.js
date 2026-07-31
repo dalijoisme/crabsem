@@ -287,6 +287,9 @@ function ensureBotForUser(userId){
 // Powers scheduler/tradingBotScheduler.js's per-tick fan-out - only
 // users whose bot is actually RUNNING get a cycle this tick.
 function findRunningUserIds(){
+    // TEMPORARY DIAGNOSTIC LOGGING - remove once it's confirmed which
+    // physical SQLite file this query is actually running against.
+    console.log("[tradingBotRepository] DIAG findRunningUserIds PRAGMA database_list =", db.pragma("database_list"));
     return db.prepare("SELECT user_id FROM trading_bot_state WHERE status = 'RUNNING'").all().map(r => r.user_id);
 }
 

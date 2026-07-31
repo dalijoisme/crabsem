@@ -11,6 +11,14 @@ const dbPath = path.resolve(__dirname, "../../", config.DB_PATH);
 
 const db = new Database(dbPath);
 
+// TEMPORARY DIAGNOSTIC LOGGING - remove once it's confirmed which
+// physical SQLite file the running process actually has open.
+console.log("[database/connection] DIAG process.cwd() =", process.cwd());
+console.log("[database/connection] DIAG config.DB_PATH (raw) =", config.DB_PATH);
+console.log("[database/connection] DIAG path.resolve(config.DB_PATH) =", path.resolve(config.DB_PATH));
+console.log("[database/connection] DIAG actual resolved dbPath (path.resolve(__dirname, '../../', config.DB_PATH)) =", dbPath);
+console.log("[database/connection] DIAG PRAGMA database_list =", db.pragma("database_list"));
+
 db.pragma("foreign_keys = ON");
 
 // WAL mode: lets API reads proceed without waiting on (or being

@@ -193,11 +193,17 @@ async function computeLiveByAddressForPhilosophy(tokens, philosophy){
 
 async function tick(){
 
+    // TEMPORARY DIAGNOSTIC LOGGING - remove once it's confirmed tick()
+    // is actually being invoked in production.
+    console.log("[trading-bot-scheduler] tick() entered");
+
     const runningUserIds = tradingBotRepository.findRunningUserIds();
+    console.log("[trading-bot-scheduler] runningUserIds =", runningUserIds.length);
     if(!runningUserIds.length) return;
 
     const now = Date.now();
     const dueUserIds = runningUserIds.filter(userId => isDue(userId, now));
+    console.log("[trading-bot-scheduler] dueUserIds =", dueUserIds.length);
     if(!dueUserIds.length) return;
 
     // Compute the candidate universe ONCE this tick, not once per due

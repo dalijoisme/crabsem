@@ -108,4 +108,9 @@ function classifyMany(tokens, batchContext, accelerationByAddress){
     return map;
 }
 
-module.exports = { classify, classifyMany, MAX_AGE_MINUTES, SIGNAL_FRESHNESS_MINUTES };
+// resolveTokenAgeMinutes exported for reuse (False Positive Reduction V4):
+// tradeManager.js persists this same real, single-source-of-truth
+// computation as observability on every real BUY, now meaningful for
+// the first time since tokenTransformer.js's launch_time fix - never a
+// second, drifting copy of this formula.
+module.exports = { classify, classifyMany, resolveTokenAgeMinutes, MAX_AGE_MINUTES, SIGNAL_FRESHNESS_MINUTES };

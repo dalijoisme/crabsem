@@ -62,7 +62,7 @@ function fetchBatchContext(tokens){
 // replaces them when present - undefined for every profile that doesn't
 // set acceleration_overrides, so this is a strict no-op for BALANCED,
 // byte-identical to before.
-function computeFactors(token, historyRows, trenchesEntry, acceleration){
+function computeFactors(token, historyRows, trenchesEntry, acceleration, riskReasonCount){
 
     const row0 = historyRows?.[0] ?? null;
     const row1 = historyRows?.[1] ?? null;
@@ -90,7 +90,22 @@ function computeFactors(token, historyRows, trenchesEntry, acceleration){
     const sells = trenchesEntry ? (safeNumber(trenchesEntry.sells_24h) ?? 0) : 0;
     const buyPressure = (buys + sells) > 0 ? buys / (buys + sells) : 0.5; // neutral when no real data
 
-    return { confidenceVelocity, participantScoreVelocity, triggerHeat, priceVelocity, buyPressure };
+    // Production Stabilization V2 (Close Remaining BUY Blind Spots,
+    // Section 3 - Opportunity Ranking): the same real riskReasons count
+    // entryGateService's own HIGH-risk gate already computes and gates
+    // on (Production Stabilization V2) - not a new signal, no new
+    // scoring. HIGH-risk candidates never reach this function at all
+    // (excluded from the ranked pool entirely, unchanged). Among the
+    // MEDIUM/LOW-risk pool that DOES reach ranking, a token with more
+    // real risk flags is ranked worse on this one factor, weighted
+    // exactly the same as the other 5 (one vote each, via rank-position
+    // summing below) - never a hand-picked numeric weight. Real proof
+    // this was needed: replayed against this account's own real BUY
+    // history, BABYCATE (a real HIGH-risk loser, 4 real flags) ranked
+    // #0 of the whole set on momentum factors alone before this fix.
+    const riskDanger = riskReasonCount ?? 0;
+
+    return { confidenceVelocity, participantScoreVelocity, triggerHeat, priceVelocity, buyPressure, riskDanger };
 
 }
 
@@ -125,8 +140,12 @@ function applyEmiBump(tier, priorityScore, emiFlag){
 // accelerationByAddress: optional Map(token_address -> acceleration signal
 // | undefined) from tradingBotEngine.js's orderCandidates - only ever
 // populated (non-undefined per token) for a profile with
-// acceleration_overrides set (AGGRESSIVE today).
-function rank(tokens, batchContext, emiFlagsByAddress, accelerationByAddress){
+// acceleration_overrides set (AGGRESSIVE today). riskReasonsByAddress:
+// optional Map(token_address -> live.riskReasons array) from
+// tradingBotEngine.js's orderCandidates - the same real array
+// entryGateService's HIGH-risk gate already reads off `live`, never a
+// second copy.
+function rank(tokens, batchContext, emiFlagsByAddress, accelerationByAddress, riskReasonsByAddress){
 
     if(!tokens.length) return [];
 
@@ -134,7 +153,8 @@ function rank(tokens, batchContext, emiFlagsByAddress, accelerationByAddress){
         t,
         batchContext.historyByToken.get(t.token_address),
         batchContext.trenchesByToken.get(t.token_address),
-        accelerationByAddress?.get(t.token_address)
+        accelerationByAddress?.get(t.token_address),
+        riskReasonsByAddress?.get(t.token_address)?.length
     ));
 
     const confidenceVelocityRanks = rankByDescending(factorSets.map(f => f.confidenceVelocity));
@@ -142,17 +162,22 @@ function rank(tokens, batchContext, emiFlagsByAddress, accelerationByAddress){
     const triggerHeatRanks = rankByDescending(factorSets.map(f => f.triggerHeat));
     const priceVelocityRanks = rankByDescending(factorSets.map(f => f.priceVelocity));
     const buyPressureRanks = rankByDescending(factorSets.map(f => f.buyPressure));
+    // Fewer real risk flags = better rank - descending on the negated
+    // count reuses the exact same rankByDescending helper every other
+    // factor already uses, no new ranking mechanism.
+    const riskDangerRanks = rankByDescending(factorSets.map(f => -f.riskDanger));
 
     // Worst possible rank sum this cycle - denominator for priorityScore's
     // 0-100 projection. Single-candidate cycles have nothing to rank
     // against (every factor is trivially rank 0) - guarded to avoid a
     // divide-by-zero, not a real distinct code path.
-    const maxCombinedRank = tokens.length > 1 ? 5 * (tokens.length - 1) : 1;
+    const FACTOR_COUNT = 6;
+    const maxCombinedRank = tokens.length > 1 ? FACTOR_COUNT * (tokens.length - 1) : 1;
 
     const combined = tokens.map((token, i) => {
 
         const combinedRank = confidenceVelocityRanks[i] + participantScoreVelocityRanks[i]
-            + triggerHeatRanks[i] + priceVelocityRanks[i] + buyPressureRanks[i];
+            + triggerHeatRanks[i] + priceVelocityRanks[i] + buyPressureRanks[i] + riskDangerRanks[i];
 
         const priorityScore = Math.round(100 * (1 - combinedRank / maxCombinedRank));
 

@@ -50,6 +50,18 @@ const priceStability = require("./intelligence/market/priceStability");
 const PARTICIPANT_MAX = config.participant.maxTotal;
 const MARKET_MAX = config.market.maxTotal;
 
+// False Positive Reduction V2, Priority 5 (observability): a plain-
+// language label per module, used only to render `missingEvidence` below
+// - never read by any decision logic. Every module already has a
+// hasData flag; this just names it for a human.
+const MODULE_LABELS = {
+    accumulation: "Net buy/sell flow", smartMoney: "Smart-money trade activity", kol: "KOL trade activity",
+    whale: "Smart/degen wallet concentration", developer: "Developer track record", sniperQuality: "Sniper-bot concentration",
+    bundleQuality: "Bundled/coordinated trading", insiderQuality: "Suspected-insider holdings", walletQuality: "Involved-wallet quality",
+    walletProfitability: "Involved-wallet historical PNL", liquidity: "Liquidity depth", security: "Security facts (honeypot/renounce/rug ratio)",
+    holderDistribution: "Holder count/concentration", volume: "1h trading volume", priceStability: "Price stability"
+};
+
 // =====================================
 // SHARED PRELOAD (identical to intelligenceEngine.js's preloadContext)
 // =====================================
@@ -149,15 +161,61 @@ function computeStructuralRedFlags(token, trenchesEntry, participantModules){
     return flags;
 }
 
+// False Positive Reduction V2, Priority 1: every sub-module already
+// returns a real, non-fabricated neutral score (MAX_SCORE * neutralFraction,
+// ~40% of its own max) when it has no real data - see e.g.
+// intelligence/participant/smartMoney.js's own hasData:false branch. Before
+// this sprint, combineScore discarded that neutral value entirely and
+// EXCLUDED the module from both the numerator and denominator of the
+// weighted average - which silently renormalizes the remaining modules'
+// weight up to fill the gap, so "no data" ended up contributing NOTHING
+// to the score rather than dragging it toward neutral. For a profile that
+// up-weights exactly the modules most likely to be missing on a fresh
+// token (AGGRESSIVE: smartMoney x1.8, kol x1.4), this meant the two
+// modules the profile trusts most could be silently absent with zero
+// score impact, while the remaining modules (several of which default
+// toward FULL marks on mere absence-of-bad-evidence - see sniperQuality.js/
+// bundleQuality.js/insiderQuality.js) counted for proportionally MORE of
+// the total. Real proof (this account's own two real BUYs, replayed):
+// MOON's participantScore was 77 with smartMoney/kol/walletQuality/
+// walletProfitability all hasData:false; correctly included at their own
+// real neutral scores instead of excluded, it recomputes to 56 - below
+// AGGRESSIVE's own strongBuy floor (75) and barely above its buy floor
+// (55). Fukuruto: 79 -> 58, the same direction. No module's own scoring
+// logic changed - only how a module with nothing real to say is folded
+// into the aggregate. Same function, same signature, used for both
+// PARTICIPANT and MARKET scores - no weight, tier, or philosophy value
+// changed anywhere in scoringConfig.js or strategyProfileConfig.js.
 function combineScore(modules, maxTotal, neutralFraction){
     const values = Object.values(modules);
-    const availableWeight = values.filter(m => m.hasData).reduce((sum,m) => sum+m.max, 0);
-    if(availableWeight === 0) return Math.round(maxTotal * neutralFraction);
-    const availableScore = values.filter(m => m.hasData).reduce((sum,m) => sum+m.score, 0);
-    return Math.round((availableScore / availableWeight) * maxTotal);
+    const totalWeight = values.reduce((sum,m) => sum+m.max, 0);
+    if(totalWeight === 0) return Math.round(maxTotal * neutralFraction);
+    const totalScore = values.reduce((sum,m) => sum+m.score, 0);
+    return Math.round((totalScore / totalWeight) * maxTotal);
 }
 
-function computeConfidence(participantScore, marketScore, allModules, freshnessPenalty){
+// False Positive Reduction V2, Priority 3 ("Sinkronkan confidence dengan
+// risk"): before this sprint, confidence blended participant/market
+// scores plus mismatch/completeness/freshness penalties, but never read
+// `risk` at all - a token already classified HIGH risk (>=4 real red
+// flags, or a parabolic hard trigger - config.risk, computeRisk below)
+// could still report confidence indistinguishable from a genuinely clean
+// token's. entryGateService's HIGH-risk gate (Production Stabilization
+// V2) already stops such a token from being bought, but the SIGNAL
+// itself - shown on the homepage, candidate cards, and every other
+// consumer of analyzeToken/analyzeTokens - still displayed a falsely
+// reassuring confidence number. riskConfidencePenalty is a new,
+// consistent-scale addition to config.risk (same order of magnitude as
+// the existing freshness penalty's 20-point max and the existing
+// completeness penalty's 25-point max) - not a participant/market
+// weight, not a Strategy Profile field, not a philosophy change.
+// False Positive Reduction V2, Priority 5 (observability): returns the
+// full penalty breakdown alongside the final number - every input that
+// pulled confidence down from the raw blended value, named individually,
+// so a real BUY can persist WHY its confidence is what it is instead of
+// just the final figure. Purely additive to this function's existing
+// arithmetic - the final `value` is computed exactly as before.
+function computeConfidence(participantScore, marketScore, allModules, freshnessPenalty, risk){
     const c = config.confidence;
     const participantPct = participantScore / PARTICIPANT_MAX;
     const marketPct = marketScore / MARKET_MAX;
@@ -166,7 +224,16 @@ function computeConfidence(participantScore, marketScore, allModules, freshnessP
     const mismatchPenalty = mismatch * c.mismatchPenaltyPerPoint;
     const completeness = allModules.filter(m => m.hasData).length / allModules.length;
     const completenessPenalty = (1 - completeness) * c.maxCompletenessPenalty;
-    return Math.round(Math.min(c.max, Math.max(c.min, blended - mismatchPenalty - completenessPenalty - freshnessPenalty)));
+    const riskPenalty = config.risk.confidencePenalty[risk] ?? 0;
+    const value = Math.round(Math.min(c.max, Math.max(c.min, blended - mismatchPenalty - completenessPenalty - freshnessPenalty - riskPenalty)));
+    return {
+        value,
+        blended: Math.round(blended * 10) / 10,
+        mismatchPenalty: Math.round(mismatchPenalty * 10) / 10,
+        completenessPenalty: Math.round(completenessPenalty * 10) / 10,
+        freshnessPenalty: Math.round(freshnessPenalty * 10) / 10,
+        riskPenalty
+    };
 }
 
 function computeFreshnessPenalty(marketAgeSeconds){
@@ -223,6 +290,26 @@ function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kol
     const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
     const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
 
+    // Investigated this sprint: change5m === change1h exactly, in every
+    // one of the real BUYs examined so far (Fukuruto, MOON, FEPE, KOSPI -
+    // all real losers or unresolved). Considered treating this as a
+    // data-integrity defect (single stale snapshot read into both
+    // fields) and suppressing priceAccel when it occurs. Deliberately
+    // NOT implemented: a direct population query (gmgn_tokens, this
+    // sprint) found this exact equality true for 49.94% of ALL tracked
+    // tokens (6,184 of 12,383), most of which are not new/thin enough to
+    // explain by coincidence alone - meaning it is far more likely a
+    // genuine, common reflection of a real market condition (a thinly-
+    // traded token where price simply hasn't moved between 1h-ago and
+    // 5-min-ago, so the two windows legitimately compute equal) than a
+    // rare data bug. Suppressing priceAccel on this signal alone would
+    // have reshaped scoring for roughly half of all real candidates on
+    // n=5 outcome-labeled examples - exactly the small-sample
+    // overreach this sprint's own rules forbid. See the end-of-sprint
+    // report, Section A/J, for the full reasoning and what additional
+    // data (a genuinely independent short-interval price sample, or
+    // GMGN's own documentation of how these two fields are computed)
+    // would be needed to resolve this responsibly.
     let priceAccel = 0;
     if(change5m != null && change1h != null && change5m > 0 && change1h > 0){
         const pace5m = change5m * 12; // annualize the 5-minute move to an hourly pace
@@ -272,7 +359,14 @@ function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kol
     // be present. Liquidity still counts toward the scored bonus above.
     const gatePassed = priceAccel > 0 || flowAccel > 0.3;
 
-    return { priceAccel, flowAccel, liquidityAccel, compositeScore, gatePassed };
+    // Observability only (Production Stabilization Final, Section A) -
+    // never read by gatePassed/priceAccel/any decision above. Exposed so
+    // a future sprint, once enough outcome-labeled real data exists, can
+    // actually test whether this correlates with bad outcomes instead of
+    // guessing from n=5 the way this sprint deliberately declined to.
+    const isDuplicateWindow = change5m != null && change1h != null && change5m === change1h;
+
+    return { priceAccel, flowAccel, liquidityAccel, compositeScore, gatePassed, isDuplicateWindow };
 
 }
 
@@ -564,9 +658,13 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
 
     const allModules = [...Object.values(participantModules), ...Object.values(marketModules)];
     const freshnessPenalty = computeFreshnessPenalty(marketAgeSeconds);
-    const confidence = computeConfidence(participantScore, marketScore, allModules, freshnessPenalty);
+    // False Positive Reduction V2, Priority 3: risk must be known BEFORE
+    // confidence is computed, not after - see computeConfidence's own
+    // header comment for why.
     const hardTriggers = [vetoed, change1h != null && change1h >= 500];
     const risk = computeRisk(riskReasons, hardTriggers);
+    const confidenceResult = computeConfidence(participantScore, marketScore, allModules, freshnessPenalty, risk);
+    const confidence = confidenceResult.value;
 
     // entry gate: an ADDITIONAL, philosophy-specific requirement beyond
     // the normal score/tier/veto pipeline above. If present and it
@@ -591,6 +689,15 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         if(!accelSignal?.gatePassed) action = "HOLD";
     }
 
+    // False Positive Reduction V2, Priority 5 (observability): the
+    // explicit, named list of "evidence yang tidak tersedia" - every
+    // module that reported hasData:false for THIS token, in plain
+    // language. Previously derivable only by a reader manually scanning
+    // `breakdown` for hasData:false entries; now a first-class field.
+    const missingEvidence = Object.entries({ ...participantModules, ...marketModules })
+        .filter(([, m]) => !m.hasData)
+        .map(([key]) => MODULE_LABELS[key] || key);
+
     return {
         action, participantScore, participantMax: PARTICIPANT_MAX, marketHealth: marketScore, marketHealthMax: MARKET_MAX,
         confidence, risk, reasons: reasons.length ? reasons : ["No strong participant signal detected yet"],
@@ -599,7 +706,11 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         // discarded - same "computed then discarded" shape already fixed for
         // acceleration/breakdown. Purely additive observability fields, read
         // by no decision logic anywhere in this function.
-        riskReasons, freshnessPenalty,
+        riskReasons, freshnessPenalty, missingEvidence,
+        // Priority 5: every penalty that pulled confidence down from its
+        // raw blended value, named individually - see computeConfidence's
+        // own header comment.
+        confidenceBreakdown: confidenceResult,
         breakdown: {
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
             market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))

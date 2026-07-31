@@ -16,6 +16,7 @@ const tradeManager = require("./tradeManager");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const userAuthService = require("./userAuthService");
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
+const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
 const researchEngineFactory = require("./researchEngineFactory");
 const strategyProfileConfig = require("../config/strategyProfileConfig");
 const strategyProfileTranslator = require("./strategyProfileTranslator");
@@ -58,10 +59,21 @@ test("openPosition persists the real decision breakdown - was discarded before t
             confidence: signal.confidence, risk: signal.risk,
             acceleration: signal.acceleration, reasons: signal.reasons, breakdown: signal.breakdown,
             riskReasons: signal.riskReasons, freshnessPenalty: signal.freshnessPenalty,
+            // False Positive Reduction V2, Priority 5: real signal fields
+            // this sprint added - missingEvidence/confidenceBreakdown,
+            // exactly as tradingBotScheduler.js's real liveMap now carries
+            // them through unmodified.
+            missingEvidence: signal.missingEvidence, confidenceBreakdown: signal.confidenceBreakdown,
+            participantScore: signal.participantScore, participantMax: signal.participantMax,
             // Live Decision Center sprint: this cycle's real rank, exactly
             // as tradingBotEngine.js's runCycle attaches it onto `live`
             // right before calling openPosition.
-            rankAtEntry: 2, priorityScoreAtEntry: 71
+            rankAtEntry: 2, priorityScoreAtEntry: 71,
+            // Production Stabilization Final, Section G/H: the entry
+            // gate's own real result, exactly as tradingBotEngine.js's
+            // runCycle attaches it onto `live` right before this call.
+            decayFraction: 1,
+            entryGateResult: { eligible: true, isReentry: false, marketAgeSeconds: 12.5, decayFraction: 1 }
         };
 
         const config = tradingBotRepository.getConfig(userId);
@@ -70,7 +82,7 @@ test("openPosition persists the real decision breakdown - was discarded before t
 
         assert.equal(result.opened, true, `openPosition should succeed for a real, priced token (got: ${JSON.stringify(result)})`);
 
-        const row = db.prepare("SELECT breakdown_json, rank_at_entry, priority_score_at_entry, risk FROM trading_bot_positions WHERE id = ?").get(result.positionId);
+        const row = db.prepare("SELECT breakdown_json, rank_at_entry, priority_score_at_entry, risk, config_snapshot_json FROM trading_bot_positions WHERE id = ?").get(result.positionId);
         assert.ok(row.breakdown_json, "breakdown_json must be populated, not null, for a real signal with a real breakdown");
 
         const parsed = JSON.parse(row.breakdown_json);
@@ -80,9 +92,39 @@ test("openPosition persists the real decision breakdown - was discarded before t
         assert.deepEqual(parsed.riskReasons, signal.riskReasons);
         assert.equal(parsed.freshnessPenalty, signal.freshnessPenalty);
 
+        // False Positive Reduction V2, Priority 5: the full evidence
+        // picture - missing evidence, the full confidence penalty
+        // breakdown, and a real, non-empty final pass-reason narrative -
+        // must all be genuinely persisted, not discarded like breakdown
+        // itself was before the earlier Trust/UX sprint fix.
+        assert.deepEqual(parsed.missingEvidence, signal.missingEvidence);
+        assert.deepEqual(parsed.confidenceBreakdown, signal.confidenceBreakdown);
+        assert.ok(parsed.passReason, "passReason must be a real, non-empty narrative for every real BUY");
+        assert.ok(parsed.passReason.includes(String(signal.participantScore)), "passReason must cite the real participantScore, not a placeholder");
+        assert.ok(parsed.passReason.includes(config.min_confidence != null ? String(config.min_confidence) : ""), "passReason must cite the real confidence floor active at decision time");
+
+        // Production Stabilization Final, Section G/H: the entry gate's
+        // own real result must be persisted verbatim, not discarded.
+        assert.deepEqual(parsed.entryGateResult, { eligible: true, isReentry: false, marketAgeSeconds: 12.5, decayFraction: 1 });
+
+        // False Positive Reduction V4: tokenAgeMinutesAtEntry must be a
+        // real, non-negative number (or null, if this real token genuinely
+        // has no real launch/trenches-creation timestamp) - never
+        // silently dropped from the persisted record.
+        assert.ok(parsed.tokenAgeMinutesAtEntry === null || parsed.tokenAgeMinutesAtEntry >= 0);
+
         assert.equal(row.rank_at_entry, 2);
         assert.equal(row.priority_score_at_entry, 71);
         assert.equal(row.risk, signal.risk);
+
+        // Production Stabilization V1: the real trading_bot_config active
+        // at decision time must be captured too - so a later profile
+        // switch/Trading Configuration edit can never erase what actually
+        // produced this BUY.
+        assert.ok(row.config_snapshot_json, "config_snapshot_json must be populated for a real BUY");
+        const configSnapshot = JSON.parse(row.config_snapshot_json);
+        assert.equal(configSnapshot.min_confidence, config.min_confidence);
+        assert.equal(configSnapshot.strategy_profile, config.strategy_profile);
 
     }
     finally{
@@ -170,6 +212,214 @@ test("closeIfDue detects an external sell (real balance already zero) and closes
 
     }
     finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// Production Stabilization V1 Final Sprint (Section I - Scheduler
+// Safety): defense-in-depth verification for the BUY side - application
+// logic already prevents a duplicate real BUY (verified: entryGateService's
+// ALREADY_OPEN_FOR_TOKEN check, and runCycle's strictly-sequential
+// per-candidate processing within one scheduler-guarded cycle), but
+// migration 060's partial unique index now makes that a real, enforced
+// database guarantee too - this proves the database itself, not just
+// application code, refuses a second OPEN position for the same
+// (user_id, token_address).
+test("the database itself rejects a second OPEN position for the same user+token (migration 060)", () => {
+
+    const testEmail = `tradermanager.test.dupe.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionFields = {
+            tokenAddress: "TestTokenDupeGuard111", tokenSymbol: "DUPE",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.2, targetMarketCap: null, stopLossPrice: 0.9, stopLossMarketCap: null
+        };
+
+        tradingBotRepository.insertPosition(userId, positionFields);
+        assert.throws(
+            () => tradingBotRepository.insertPosition(userId, positionFields),
+            /UNIQUE constraint failed/
+        );
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// Production Stabilization V1 Final Sprint (Section I - Scheduler
+// Safety): real, concrete race found this sprint - the scheduler's own
+// automatic close (closeIfDue -> finalizeClose) and the dashboard's
+// manual Force Sell/Sell Position (tradingBotService.js's forceSellAll/
+// sellPosition) are two independent call paths with no shared lock; both
+// could reach finalizeClose() for the SAME position.id if a manual sell
+// happens to land while the scheduler is mid-cycle for that position.
+// Simulated directly here by calling finalizeClose() twice for the same
+// already-fetched position row (exactly what two racing callers would
+// each hold) - the second call must NOT insert a second trade row or
+// re-log a SELL that didn't really happen a second time.
+test("finalizeClose is idempotent - a second call for an already-closed position never inserts a duplicate trade row", async () => {
+
+    const testEmail = `tradermanager.test.race.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenRaceClose111", tokenSymbol: "RACE",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.2, targetMarketCap: null, stopLossPrice: 0.9, stopLossMarketCap: null
+        });
+        // Both racing callers would each independently fetch the SAME
+        // real, still-OPEN row before either one closes it.
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId)); // SIMULATION - no liveOptions, isolates the DB-level race from real execution
+
+        const first = await tm.finalizeClose(position, 1.1, "STOP_LOSS", config);
+        const second = await tm.finalizeClose(position, 1.1, "STOP_LOSS", config);
+
+        assert.equal(first.closed, true);
+        assert.equal(second.closed, false);
+        assert.equal(second.reason, "ALREADY_CLOSED");
+
+        const trades = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND token_address = ?").all(userId, "TestTokenRaceClose111");
+        assert.equal(trades.length, 1, "exactly one trade row must exist, never a duplicate from the second racing call");
+
+        const sellLogs = db.prepare("SELECT * FROM trading_bot_log WHERE user_id = ? AND log_type = 'SELL'").all(userId);
+        assert.equal(sellLogs.length, 1, "exactly one real SELL log line must exist, never a phantom second one");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// False Positive Reduction V4: a real, deterministic token age, computed
+// from a known launch_time, must be persisted exactly - this is the
+// same real formula this sprint's fix in tokenTransformer.js/emiService.js
+// finally made trustworthy (GMGN's open_timestamp:0 "unknown" sentinel no
+// longer read as a real 1970 launch date).
+test("openPosition persists a real, correctly-computed tokenAgeMinutesAtEntry", async () => {
+
+    const testEmail = `tradermanager.test.age.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const baseToken = gmgnTokenRepository.getAllTokens().find(t => t.market_cap > 0 && t.price > 0);
+        assert.ok(baseToken);
+
+        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60000).toISOString().slice(0, 19).replace("T", " ");
+        const token = { ...baseToken, launch_time: thirtyMinutesAgo };
+
+        const philosophy = strategyProfileTranslator.translate(strategyProfileConfig.resolveProfile("AGGRESSIVE")).philosophy;
+        const ctx = researchEngineFactory.preloadContext([token]);
+        const [signal] = researchEngineFactory.analyzeTokensWithOverride([token], ctx, "momentumHunter", philosophy);
+
+        const live = {
+            confidence: signal.confidence, risk: signal.risk === "HIGH" ? "MEDIUM" : signal.risk,
+            reasons: signal.reasons, breakdown: signal.breakdown, riskReasons: signal.riskReasons,
+            freshnessPenalty: signal.freshnessPenalty, participantScore: signal.participantScore, participantMax: signal.participantMax
+        };
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        const result = await tm.openPosition(token, live, config, 1000);
+
+        assert.equal(result.opened, true, `expected a real BUY (got: ${JSON.stringify(result)})`);
+        const row = db.prepare("SELECT breakdown_json FROM trading_bot_positions WHERE id = ?").get(result.positionId);
+        const parsed = JSON.parse(row.breakdown_json);
+
+        assert.ok(parsed.tokenAgeMinutesAtEntry != null, "a real launch_time was set - age must be computed, never null");
+        assert.ok(Math.abs(parsed.tokenAgeMinutesAtEntry - 30) < 1, `expected ~30 minutes, got ${parsed.tokenAgeMinutesAtEntry}`);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
+// 5 - Position Snapshot): every real, raw fact behind the persisted
+// scores must be captured too, not just the derived scores - so a
+// future replay against a changed scoringConfig.js can genuinely
+// recompute, not just re-read the same old number. Same monkey-patch
+// pattern already established in qualityGateService.test.js/
+// entryGateService.test.js for this exact real-DB dependency.
+test("openPosition persists the real, raw facts (rug ratio, dev balance, sniper hold rate, etc.) behind every score", async () => {
+
+    const testEmail = `tradermanager.test.facts.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalFindByTokenAddress = gmgnTrenchesRepository.findByTokenAddress;
+
+    try{
+
+        const baseToken = gmgnTokenRepository.getAllTokens().find(t => t.market_cap > 0 && t.price > 0);
+        assert.ok(baseToken);
+        const token = { ...baseToken, liquidity: 12345, market_cap: 67890, holders: 42 };
+
+        gmgnTrenchesRepository.findByTokenAddress = () => ({
+            rug_ratio: 0.12, top_10_holder_rate: 0.35, smart_degen_count: 2, sniper_count: 1,
+            net_buy_24h: 999, is_honeypot: 0,
+            raw_json: JSON.stringify({
+                creator_balance_rate: 0.08, top70_sniper_hold_rate: 0.22, bundler_mhr: 0.05,
+                suspected_insider_hold_rate: 0.01, creator_created_count: 2, creator_created_open_ratio: 0.5
+            })
+        });
+
+        const philosophy = strategyProfileTranslator.translate(strategyProfileConfig.resolveProfile("AGGRESSIVE")).philosophy;
+        const ctx = researchEngineFactory.preloadContext([token]);
+        const [signal] = researchEngineFactory.analyzeTokensWithOverride([token], ctx, "momentumHunter", philosophy);
+
+        const live = {
+            confidence: signal.confidence, risk: signal.risk === "HIGH" ? "MEDIUM" : signal.risk,
+            reasons: signal.reasons, breakdown: signal.breakdown, riskReasons: signal.riskReasons,
+            freshnessPenalty: signal.freshnessPenalty, participantScore: signal.participantScore, participantMax: signal.participantMax
+        };
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        const result = await tm.openPosition(token, live, config, 1000);
+
+        assert.equal(result.opened, true, `expected a real BUY (got: ${JSON.stringify(result)})`);
+        const row = db.prepare("SELECT breakdown_json FROM trading_bot_positions WHERE id = ?").get(result.positionId);
+        const parsed = JSON.parse(row.breakdown_json);
+
+        assert.ok(parsed.rawFactsAtEntry, "rawFactsAtEntry must be persisted");
+        assert.equal(parsed.rawFactsAtEntry.liquidity, 12345);
+        assert.equal(parsed.rawFactsAtEntry.marketCap, 67890);
+        assert.equal(parsed.rawFactsAtEntry.holders, 42);
+        assert.equal(parsed.rawFactsAtEntry.rugRatio, 0.12);
+        assert.equal(parsed.rawFactsAtEntry.top10HolderRate, 0.35);
+        assert.equal(parsed.rawFactsAtEntry.developerBalanceRate, 0.08);
+        assert.equal(parsed.rawFactsAtEntry.sniperHoldRate, 0.22);
+        assert.equal(parsed.rawFactsAtEntry.bundlerMhr, 0.05);
+        assert.equal(parsed.rawFactsAtEntry.insiderHoldRate, 0.01);
+        assert.equal(parsed.rawFactsAtEntry.creatorCreatedCount, 2);
+
+    }
+    finally{
+        gmgnTrenchesRepository.findByTokenAddress = originalFindByTokenAddress;
         deleteTestUser(userId);
     }
 

@@ -26,6 +26,33 @@ function numberOrNull(value){
 
 }
 
+// False Positive Reduction V4 (data-integrity fix, not a threshold):
+// verified against a direct query of the real local dataset that GMGN's
+// own `open_timestamp` field is a literal 0 - not null, not undefined,
+// a real "0" - for 8,722 of 12,387 tokens (70.4%) in this database.
+// numberOrNull(0) previously passed that 0 straight through, which the
+// repository then converts to a real SQL datetime: 1970-01-01 00:00:00.
+// Every downstream reader of gmgn_tokens.launch_time (emiService.js's
+// resolveTokenAgeMinutes, walletIntelligenceService.js's sniper-timing
+// check) does a plain truthy check (`if(token.launch_time)`) - a non-
+// empty 1970 datetime STRING is truthy, so both readers took it as a
+// real, ~55-year-old token age instead of "unknown," and - critically -
+// emiService.js's own already-existing fallback to
+// gmgn_trenches.created_timestamp (verified real for 1,701 of a 2,000-
+// row sample of these exact epoch-zero tokens, including all 7 of this
+// account's own real BUYs) was never reached, because the truthy check
+// short-circuited first. This is the same "never fabricate, honest null
+// over a wrong value" convention already used everywhere else in this
+// file (see numberOrNull above) - GMGN's 0 sentinel is not real launch
+// data and must not be treated as if it were.
+function realLaunchTimestampOrNull(value){
+
+    const n = numberOrNull(value);
+
+    return (n == null || n <= 0) ? null : n;
+
+}
+
 function transformToken(token){
 
     return {
@@ -70,7 +97,7 @@ function transformToken(token){
 
         // Unix seconds; the repository converts this to the DB's
         // datetime format so this service stays database-agnostic.
-        launchTimestamp: numberOrNull(token.open_timestamp),
+        launchTimestamp: realLaunchTimestampOrNull(token.open_timestamp),
 
         rawJson: JSON.stringify(token)
 

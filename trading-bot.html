@@ -15,7 +15,7 @@
 
 <link rel="stylesheet" href="css/dashboard.css">
 <link rel="stylesheet" href="css/admin.css?v=9">
-<link rel="stylesheet" href="css/trading-bot.css?v=5">
+<link rel="stylesheet" href="css/trading-bot.css?v=10">
 
 </head>
 
@@ -83,23 +83,17 @@
 
 </header>
 
-<nav class="adminNav" id="adminNav">
+<!-- Section R (UX cleanup): the dashboard used to show all 14 sections
+     stacked on one long scroll at once. Regrouped into 5 tabs - only one
+     group's sections are visible at a time, everything still on this one
+     page (no separate URLs), per the sprint's own explicit requirement. -->
+<nav class="tbTabBar" id="tbTabBar">
 
-<a href="#secDecisionCenter">Live Decision Center</a>
-<a href="#secTargetAchievement">Target Achievement</a>
-<a href="#secMomentumKpi">Momentum KPI</a>
-<a href="#secSelfAudit">Self-Audit</a>
-<a href="#secBottleneckReport">Bottleneck Report</a>
-<a href="#secSystemThroughput">System Throughput</a>
-<a href="#secMissedWinners">Missed Winners</a>
-<a href="#secStatusBar">Status</a>
-<a href="#secStrategyProfile">Strategy</a>
-<a href="#secTradingConfiguration">Trading Configuration</a>
-<a href="#secCustomObjective">AI Advisor</a>
-<a href="#secPortfolio">Portfolio</a>
-<a href="#secPositions">Open Positions</a>
-<a href="#secHistory">Trade History</a>
-<a href="#secLog">Activity</a>
+<button class="tbTabBtn tbTabActive" data-tab="overview" type="button">Overview</button>
+<button class="tbTabBtn" data-tab="trading" type="button">Trading</button>
+<button class="tbTabBtn" data-tab="portfolio" type="button">Portfolio</button>
+<button class="tbTabBtn" data-tab="analytics" type="button">Analytics</button>
+<button class="tbTabBtn" data-tab="logs" type="button">Logs</button>
 
 </nav>
 
@@ -111,6 +105,20 @@ Loading real data from the backend...
 
 <div id="adminContent" class="adminContent hidden">
 
+<div class="tbTabPanel" data-tab-panel="overview">
+
+<section class="adminSection" id="secStatusBar">
+    <div class="ceoSectionHead"><h4>Bot Status</h4></div>
+    <div id="tbStatusBar"></div>
+
+    <div class="tbControlRow" id="tbControlRow">
+        <button id="tbStartBtn" class="tbBtn tbBtnStart">START BOT</button>
+        <button id="tbStopBtn" class="tbBtn tbBtnStop">STOP BOT</button>
+        <button id="tbPauseBtn" class="tbBtn tbBtnPause">PAUSE BOT</button>
+    </div>
+    <div id="tbControlMsg" class="tbControlMsg"></div>
+</section>
+
 <section class="adminSection" id="secDecisionCenter">
     <div class="ceoSectionHead"><h4>Live Decision Center</h4></div>
     <div id="tbDecisionCenter"></div>
@@ -120,6 +128,50 @@ Loading real data from the backend...
     <div class="ceoSectionHead"><h4>Target Achievement (last 24 hours)</h4></div>
     <div id="tbTargetAchievement"></div>
 </section>
+
+</div>
+
+<div class="tbTabPanel hidden" data-tab-panel="trading">
+
+<section class="adminSection" id="secStrategyProfile">
+    <div class="ceoSectionHead"><h4>Strategy — AI Decision Engine</h4></div>
+    <div id="tbStrategyProfile"></div>
+</section>
+
+<section class="adminSection" id="secTradingConfiguration">
+    <div class="ceoSectionHead"><h4>Trading Configuration</h4></div>
+    <div id="tbTradingConfiguration"></div>
+</section>
+
+<section class="adminSection" id="secCustomObjective">
+    <div class="ceoSectionHead"><h4>AI Strategy Advisor</h4></div>
+    <div id="tbCustomObjective"></div>
+</section>
+
+</div>
+
+<div class="tbTabPanel hidden" data-tab-panel="portfolio">
+
+<section class="adminSection" id="secPortfolio">
+    <div class="ceoSectionHead"><h4>Portfolio</h4></div>
+    <div id="tbPortfolio"></div>
+    <div class="ceoSectionHead"><h4>On-Chain Wallet</h4></div>
+    <div id="tbOnChainWallet"></div>
+</section>
+
+<section class="adminSection" id="secPositions">
+    <div class="ceoSectionHead"><h4>Open Positions</h4></div>
+    <div id="tbPositions"></div>
+</section>
+
+<section class="adminSection" id="secHistory">
+    <div class="ceoSectionHead"><h4>Trade History</h4></div>
+    <div id="tbTrades"></div>
+</section>
+
+</div>
+
+<div class="tbTabPanel hidden" data-tab-panel="analytics">
 
 <section class="adminSection" id="secMomentumKpi">
     <div class="ceoSectionHead"><h4>Momentum KPI</h4></div>
@@ -146,54 +198,17 @@ Loading real data from the backend...
     <div id="tbMissedWinners"></div>
 </section>
 
-<section class="adminSection" id="secStatusBar">
-    <div class="ceoSectionHead"><h4>Bot Status</h4></div>
-    <div id="tbStatusBar"></div>
+</div>
 
-    <div class="tbControlRow" id="tbControlRow">
-        <button id="tbStartBtn" class="tbBtn tbBtnStart">START BOT</button>
-        <button id="tbStopBtn" class="tbBtn tbBtnStop">STOP BOT</button>
-        <button id="tbPauseBtn" class="tbBtn tbBtnPause">PAUSE BOT</button>
-    </div>
-    <div id="tbControlMsg" class="tbControlMsg"></div>
-</section>
-
-<section class="adminSection" id="secStrategyProfile">
-    <div class="ceoSectionHead"><h4>Strategy — AI Decision Engine</h4></div>
-    <div id="tbStrategyProfile"></div>
-</section>
-
-<section class="adminSection" id="secTradingConfiguration">
-    <div class="ceoSectionHead"><h4>Trading Configuration</h4></div>
-    <div id="tbTradingConfiguration"></div>
-</section>
-
-<section class="adminSection" id="secCustomObjective">
-    <div class="ceoSectionHead"><h4>AI Strategy Advisor</h4></div>
-    <div id="tbCustomObjective"></div>
-</section>
-
-<section class="adminSection" id="secPortfolio">
-    <div class="ceoSectionHead"><h4>Portfolio</h4></div>
-    <div id="tbPortfolio"></div>
-    <div class="ceoSectionHead"><h4>On-Chain Wallet</h4></div>
-    <div id="tbOnChainWallet"></div>
-</section>
-
-<section class="adminSection" id="secPositions">
-    <div class="ceoSectionHead"><h4>Open Positions</h4></div>
-    <div id="tbPositions"></div>
-</section>
-
-<section class="adminSection" id="secHistory">
-    <div class="ceoSectionHead"><h4>Trade History</h4></div>
-    <div id="tbTrades"></div>
-</section>
+<div class="tbTabPanel hidden" data-tab-panel="logs">
 
 <section class="adminSection" id="secLog">
     <div class="ceoSectionHead"><h4>Activity</h4></div>
+    <div id="tbLogFilterBar" class="tbLogFilterBar"></div>
     <div id="tbLog" class="tbLogFeed"></div>
 </section>
+
+</div>
 
 </div>
 
@@ -207,7 +222,7 @@ Loading real data from the backend...
 </div>
 
 <script src="js/config.js"></script>
-<script src="js/tradingBot.js?v=9"></script>
+<script src="js/tradingBot.js?v=18"></script>
 
 </body>
 </html>

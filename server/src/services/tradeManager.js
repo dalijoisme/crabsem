@@ -39,8 +39,68 @@ const tokenLastDecisionRepository = require("../repositories/tokenLastDecisionRe
 const qualityGateService = require("./qualityGateService");
 const productionEngineResolver = require("./productionEngineResolver");
 const dynamicExitService = require("./dynamicExitService");
+const { resolveTokenAgeMinutes } = require("./emiService");
 
 const FEE_PCT_DEFAULT = 1;
+
+// Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
+// 5 - Position Snapshot): breakdown_json already persisted every
+// derived SCORE (participant/market breakdown), but never the raw,
+// underlying FACTS those scores were computed from (real rug ratio,
+// real developer balance rate, real sniper hold rate, etc. - all
+// already fetched, already real, just never written down). Without
+// this, a future replay against a changed scoringConfig.js could only
+// ever re-derive the SAME old score, never genuinely recompute a new
+// one - not a true replay. token: the real gmgn_tokens row (already
+// has liquidity/market_cap/holders). trenchesEntry: the same real
+// gmgn_trenches row already fetched once for tokenAgeMinutesAtEntry,
+// reused here rather than re-fetched.
+function buildRawFactsSnapshot(token, trenchesEntry){
+    let raw = {};
+    try{ raw = trenchesEntry?.raw_json ? JSON.parse(trenchesEntry.raw_json) : {}; }
+    catch(e){ /* malformed - honest empty, never guessed */ }
+    return {
+        liquidity: token.liquidity != null ? Number(token.liquidity) : null,
+        marketCap: token.market_cap != null ? Number(token.market_cap) : null,
+        holders: token.holders != null ? Number(token.holders) : null,
+        volume1h: token.volume_1h != null ? Number(token.volume_1h) : null,
+        priceChange1h: token.price_change_1h != null ? Number(token.price_change_1h) : null,
+        priceChange5m: token.price_change_5m != null ? Number(token.price_change_5m) : null,
+        rugRatio: trenchesEntry?.rug_ratio ?? null,
+        top10HolderRate: trenchesEntry?.top_10_holder_rate ?? null,
+        smartDegenCount: trenchesEntry?.smart_degen_count ?? null,
+        sniperCount: trenchesEntry?.sniper_count ?? null,
+        netBuy24h: trenchesEntry?.net_buy_24h ?? null,
+        isHoneypot: trenchesEntry?.is_honeypot ?? null,
+        developerBalanceRate: raw.creator_balance_rate ?? null,
+        sniperHoldRate: raw.top70_sniper_hold_rate ?? null,
+        bundlerMhr: raw.bundler_mhr ?? null,
+        insiderHoldRate: raw.suspected_insider_hold_rate ?? null,
+        creatorCreatedCount: raw.creator_created_count ?? null,
+        creatorCreatedOpenRatio: raw.creator_created_open_ratio ?? null
+    };
+}
+
+// False Positive Reduction V2, Priority 5 (observability): "alasan akhir
+// mengapa token tetap lolos" - a plain-language narrative built entirely
+// from real, already-known values at the moment of BUY (live.* /
+// config.min_confidence), never a new computation or a guess. Every
+// clause states a real fact the entry gate/scoring pass already
+// established before openPosition() was ever called.
+function buildPassReason(live, config){
+    const parts = [
+        `Action tier ${live.action} at participantScore ${live.participantScore}/${live.participantMax}.`,
+        `Confidence ${live.confidence} (floor ${config.min_confidence}).`,
+        `Risk classified ${live.risk || "LOW"} (HIGH is hard-rejected before a BUY can ever reach this point).`
+    ];
+    if(live.missingEvidence?.length){
+        parts.push(`Evidence not available for this token: ${live.missingEvidence.join(", ")}.`);
+    }
+    if(live.riskReasons?.length){
+        parts.push(`Real risk flags noted but not disqualifying on their own: ${live.riskReasons.join("; ")}.`);
+    }
+    return parts.join(" ");
+}
 
 /**
  * @typedef {object} LiveExecutionOptions
@@ -80,6 +140,23 @@ function createTradeManager(repository, liveOptions = null){
 
         const entryPrice = Number(token.price) || null;
         if(!entryPrice || entryPrice <= 0) return { opened: false, reason: "NO_REAL_PRICE" };
+
+        // False Positive Reduction V4 (observability, not a gate): real
+        // token age at the moment of BUY, now meaningful for the first
+        // time since tokenTransformer.js's launch_time fix (GMGN's real
+        // open_timestamp:0 "unknown" sentinel was previously read as a
+        // literal 1970 date). Persisted, never acted on here - this
+        // sprint found a striking real pattern (this account's 4 real
+        // losers were all bought within 17-31 minutes of launch; its one
+        // real winner was bought 7 days after launch) but explicitly
+        // declined to gate on it: age and token size are confounded in
+        // this n=5 sample, and picking an age cutoff now would be
+        // exactly the small-sample overfitting this sprint was told not
+        // to do. Recorded so a future sprint has real data to test this
+        // properly once more real outcomes exist.
+        const trenchesEntryAtEntry = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
+        const tokenAgeMinutesAtEntry = resolveTokenAgeMinutes(token, trenchesEntryAtEntry);
+        const rawFactsAtEntry = buildRawFactsSnapshot(token, trenchesEntryAtEntry);
 
         const activeVersion = productionEngineResolver.getActiveVersion();
         const activeEngine = productionEngineResolver.getActiveEngine();
@@ -149,7 +226,35 @@ function createTradeManager(repository, liveOptions = null){
                 // so Position Detail's Confidence Breakdown can recompute
                 // participantPct/marketPct later without re-scoring.
                 participantScore: live.participantScore ?? null, participantMax: live.participantMax ?? null,
-                marketHealth: live.marketHealth ?? null, marketHealthMax: live.marketHealthMax ?? null
+                marketHealth: live.marketHealth ?? null, marketHealthMax: live.marketHealthMax ?? null,
+                // False Positive Reduction V2, Priority 5: the full,
+                // persisted evidence picture for this exact real BUY -
+                // positive (`reasons` above), negative (`riskReasons`
+                // above), missing (`missingEvidence`), every penalty that
+                // shaped `confidence` (`confidenceBreakdown` - mismatch/
+                // completeness/freshness/risk, researchEngineFactory.js's
+                // computeConfidence), and a plain-language narrative of
+                // why this exact token still passed every gate it needed
+                // to. All real, already-computed fields carried through on
+                // `live` unmodified - nothing here is a new score.
+                missingEvidence: live.missingEvidence || [],
+                confidenceBreakdown: live.confidenceBreakdown ?? null,
+                passReason: buildPassReason(live, config),
+                // Production Stabilization Final, Section G/H: the entry
+                // gate's own real result (isReentry, marketAgeSeconds,
+                // decayFraction) - see tradingBotEngine.js's runCycle,
+                // attached onto `live` right before this call. Was
+                // computed then discarded before this fix.
+                entryGateResult: live.entryGateResult ?? null,
+                // False Positive Reduction V4: real token age at entry,
+                // observability only - see the comment above where this
+                // is computed.
+                tokenAgeMinutesAtEntry,
+                // Production Stabilization V2 (Close Remaining BUY Blind
+                // Spots, Section 5): the real, raw facts every score
+                // above was actually computed from - see
+                // buildRawFactsSnapshot's own header comment.
+                rawFactsAtEntry
             })
             : null;
 
@@ -182,7 +287,18 @@ function createTradeManager(repository, liveOptions = null){
             // observational (never read back into ranking/scoring), null
             // whenever Opportunity Priority was off or no other candidate
             // existed this cycle.
-            siblingsJson: live.siblings?.length ? JSON.stringify(live.siblings) : null
+            siblingsJson: live.siblings?.length ? JSON.stringify(live.siblings) : null,
+            // Production Stabilization V1: the real trading_bot_config row
+            // this exact BUY decision was made under (strategy_profile,
+            // min_confidence, quality gate/exit overrides, sizing mode -
+            // everything) - a later profile switch or Trading Configuration
+            // edit can never erase what was actually active at decision
+            // time. `config` here is always a plain, already-loaded DB row
+            // (tradingBotRepository.getConfig's own shape) for the real
+            // bot; a benchmark/ab-test caller's own lighter config object
+            // serializes the same way, honestly reflecting what it really
+            // used.
+            configSnapshotJson: JSON.stringify(config)
         });
 
         const kind = executionId ? "Real" : "Virtual";
@@ -232,7 +348,19 @@ function createTradeManager(repository, liveOptions = null){
                 // position from before real execution existed) - close
                 // the row so it stops being retried, but never claim a
                 // real trade that didn't happen.
-                repository.closePosition(position, { exitPrice, roiPct: 0, feeUsd: 0, slippagePct: 0, durationSeconds, reason: `${reason}_NO_REAL_BALANCE` });
+                //
+                // Production Stabilization V1 Final Sprint (Section I):
+                // closePosition() is now the real idempotency guard - if
+                // a concurrent caller (the scheduler's own automatic
+                // close, or a manual Force Sell/Sell Position from the
+                // dashboard) already closed this exact position first,
+                // { closed: false } comes back and this must NOT log a
+                // second, misleading "position closed" line for an
+                // action that didn't actually happen here.
+                const outcome = repository.closePosition(position, { exitPrice, roiPct: 0, feeUsd: 0, slippagePct: 0, durationSeconds, reason: `${reason}_NO_REAL_BALANCE` });
+                if(!outcome.closed){
+                    return { closed: false, reason: "ALREADY_CLOSED" };
+                }
                 repository.insertLog({
                     logType: "SELL", tokenSymbol: position.token_symbol,
                     message: `Position closed with no real on-chain balance to sell (${position.token_symbol}) - reason: ${reason}`,
@@ -265,7 +393,17 @@ function createTradeManager(repository, liveOptions = null){
 
         }
 
-        repository.closePosition(position, {
+        // Production Stabilization V1 Final Sprint (Section I): same
+        // idempotency check as the no-real-balance branch above - a real
+        // SELL may have already executed (this exact call reached here
+        // via a genuinely successful real transaction), but if a
+        // concurrent caller's closePosition() already won the race for
+        // this position.id, this call must not also log a second SELL
+        // line or claim credit for a close that the database says
+        // already happened. The real on-chain SELL itself already ran by
+        // this point either way - this only governs the application-side
+        // bookkeeping, never a second real trade.
+        const outcome = repository.closePosition(position, {
 
             exitPrice, roiPct, feeUsd,
             slippagePct: config.slippage_pct || 0,
@@ -273,6 +411,10 @@ function createTradeManager(repository, liveOptions = null){
             txHash, closeExecutionId
 
         });
+
+        if(!outcome.closed){
+            return { closed: false, reason: "ALREADY_CLOSED" };
+        }
 
         const kind = closeExecutionId ? "Real" : (options.skipBalanceCheck ? "Detected External" : "Virtual");
         repository.insertLog({

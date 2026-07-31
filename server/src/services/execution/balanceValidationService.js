@@ -3,11 +3,11 @@
 // as truth - every method here is a read against the chain itself
 // (via the injected connectionProvider, see solanaConnectionProvider.js),
 // never a lookup of a locally-cached/self-reported number. This is the
-// deliberate fix for the gap the earlier migration audit flagged in
-// services/walletService.js's depositFunds() (a trust-based, client-
-// supplied dollar figure) - this module is what a real balance check
-// should look like; wiring it into depositFunds() itself is Sprint 2+
-// scope, not this file's job.
+// deliberate fix for the gap the earlier migration audit flagged in the
+// old self-reported deposit model (a trust-based, client-supplied
+// dollar figure, removed in Production Stabilization V1) - this module
+// is what a real balance check should look like, and is what Trading
+// Balance is now derived from throughout the app.
 
 const { PublicKey } = require("@solana/web3.js");
 

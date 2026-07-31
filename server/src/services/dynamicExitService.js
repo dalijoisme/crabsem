@@ -109,23 +109,40 @@ function evaluateDynamicExit({ position, token, trenchesEntry, engineAction, sto
     //    exits immediately (momentum has to be simultaneously strong,
     //    buyer-led, still building, and free of reversal signs - not
     //    "mostly fine").
+    //
+    // Production Stabilization Final, Section B: `token.marketContextStale`
+    // (tradingBotEngine.js's refreshStaleHeldToken) means price/liquidity
+    // were just re-verified as real and fresh, but price_change_5m/
+    // volume_1h/trenches were NOT - they are whatever was last known,
+    // possibly hours old, for a token that has fallen out of the trending
+    // scan entirely. Evidence this stale must never be read as "momentum
+    // still supports holding" - the same "unknown must not score as good
+    // evidence" principle already applied to BUY-side scoring this
+    // engagement, now applied to the exit side. This never touches the
+    // Stop Loss check above (already always fresh) or the sub-minTpPct
+    // "keep running" branch (position is not yet in profit-protection
+    // territory) - only the optional "ride the winner further" decision.
+    const contextStale = Boolean(token.marketContextStale);
+
     const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
-    const momentumStillPositive = change5m != null ? change5m > 0 : false;
+    const momentumStillPositive = !contextStale && change5m != null ? change5m > 0 : false;
 
     const dominant = buyerDominant(trenchesEntry, buyerDominanceRatio);
-    const buyersInControl = dominant === true;
+    const buyersInControl = !contextStale && dominant === true;
 
     const currentVolume1h = token.volume_1h != null ? Number(token.volume_1h) : null;
-    const volumeStillBuilding = position.last_volume_1h == null || currentVolume1h == null
-        ? true // no prior reading to compare against yet - don't penalize on absence of data
-        : currentVolume1h >= position.last_volume_1h;
+    const volumeStillBuilding = contextStale
+        ? false // stale market context - never assume volume is still building
+        : (position.last_volume_1h == null || currentVolume1h == null
+            ? true // no prior reading to compare against yet - don't penalize on absence of data
+            : currentVolume1h >= position.last_volume_1h);
 
     const noReversalSigns = !hasReversalOrDistributionSigns(token, trenchesEntry);
 
     const momentumSustained = momentumStillPositive && buyersInControl && volumeStillBuilding && noReversalSigns;
 
     if(!momentumSustained){
-        return { shouldClose: true, reason: "MOMENTUM_WEAKENING", currentPrice, roiPct };
+        return { shouldClose: true, reason: contextStale ? "MOMENTUM_WEAKENING_STALE_CONTEXT" : "MOMENTUM_WEAKENING", currentPrice, roiPct };
     }
 
     return { shouldClose: false, currentPrice, roiPct };

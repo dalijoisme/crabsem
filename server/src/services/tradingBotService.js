@@ -32,6 +32,10 @@ const walletService = require("./walletService");
 const executionRepository = require("../repositories/executionRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+// Section J (Open Position fields): reuses MIN_TP_PCT for a read-only
+// "Dynamic State" label - never re-implements or re-evaluates the real
+// exit decision itself (that stays in tradeManager.js's closeIfDue).
+const { MIN_TP_PCT } = require("./dynamicExitService");
 const { buildSolanaTxUrl } = require("../utils/explorerUrl");
 // Read-only constants (mismatchPenaltyPerPoint/maxCompletenessPenalty) -
 // Position Detail's Confidence Breakdown recomputes computeConfidence()'s
@@ -249,17 +253,33 @@ function updateConfig(userId, partial){
     return { ok: true, config: needsRefetch ? tradingBotRepository.getConfig(userId) : updated };
 }
 
+// Production Stabilization V1 (Sections D/E/Q): the real balance, never
+// a self-reported one. Returns 0 (never a fabricated positive figure)
+// when no real balance is available yet - a Founder can still set an
+// allocation % ahead of funding their wallet, it just starts at $0 until
+// a real balance exists.
+function computeInitialCapitalFromReal(real, allocationPct){
+    return real?.solUsd != null ? real.solUsd * (allocationPct / 100) : 0;
+}
+
 // Trading Configuration sprint: the dashboard's real source of truth for
 // "how much capital is available for new trades" - reuses
 // walletService.getRealWalletBalance() (Trust Layer sprint, already
 // proven) for the real on-chain SOL balance/price, never a second GMGN
-// price probe. Falls back to the manually-entered deposit figure
-// (honestly labeled) only when no real wallet/RPC is available - never
-// silently blends the two.
+// price probe.
+//
+// Production Stabilization V1 (Sections D/E/Q): the self-reported
+// deposited_balance_usd fallback is gone - walletBalanceSource is only
+// ever REAL or an honest UNAVAILABLE, never a stand-in number. Every
+// call also write-throughs a fresh initial_capital (Trading Balance)
+// from this real balance, keeping tradingBotEngine.js's runCycle hot
+// path (getPortfolio() - must stay synchronous/DB-only, never RPC-
+// dependent) in sync without ever making that hot path itself async.
+// scheduler/walletBalanceSyncScheduler.js covers the same sync on a
+// timer, for accounts whose dashboard isn't open.
 async function getTradingConfiguration(userId){
 
     const config = tradingBotRepository.getConfig(userId);
-    const tradingWallet = tradingWalletRepository.findByUserId(userId);
     const real = await walletService.getRealWalletBalance(userId);
 
     let walletBalanceUsd = null, walletBalanceSol = null, walletBalanceSource = "UNAVAILABLE";
@@ -269,10 +289,12 @@ async function getTradingConfiguration(userId){
         walletBalanceUsd = real.solUsd;
         walletBalanceSol = real.solAmount;
         walletBalanceSource = "REAL";
-    }
-    else if(tradingWallet){
-        walletBalanceUsd = tradingWallet.deposited_balance_usd;
-        walletBalanceSource = "MANUAL_DEPOSIT";
+
+        const freshInitialCapital = computeInitialCapitalFromReal(real, config.allocation_pct);
+        if(freshInitialCapital !== config.initial_capital){
+            tradingBotRepository.updateInitialCapital(userId, freshInitialCapital);
+            config.initial_capital = freshInitialCapital;
+        }
     }
 
     const tradingAllocationUsd = config.initial_capital;
@@ -431,7 +453,16 @@ function mapSnapshotRow(r){
         tokenAddress: r.token_address, tokenSymbol: r.token_symbol,
         action: r.action, confidence: r.confidence, risk: r.risk,
         tier: r.tier, rank: r.rank, priorityScore: r.priority_score,
-        reasons
+        reasons,
+        // Section H (Candidate Card): real "if bought now" projection -
+        // null for AVOID-tier rows and whenever the engine couldn't
+        // produce one (no real market_cap yet), never fabricated.
+        targetPrice: r.target_price ?? null,
+        // Production Hotfix V1.1, Section 3: real freshness observability.
+        marketAgeSeconds: r.market_age_seconds ?? null,
+        lastSnapshotAt: r.last_snapshot_at ?? null,
+        decisionTime: r.decision_time ?? null,
+        snapshotSource: r.snapshot_source ?? null
     };
 }
 
@@ -891,19 +922,49 @@ function getMomentumKpi(userId){
 
 }
 
+// Section J (Open Position fields): SL/TP are the position's OWN stored
+// risk bands (tradePlanService.buildRiskBands, computed once at real BUY
+// time) - the exact values dynamicExitService.evaluateDynamicExit
+// actually enforces, never a recomputed/current-config guess.
+// dynamicState is a real, honest, coarse read of already-stored data
+// (current ROI vs the same MIN_TP_PCT floor dynamicExitService itself
+// uses) - "is this position still below its minimum target, or riding
+// above it" - never a re-run of the momentum-sustained sub-checks
+// (those are transient per-cycle signals, not meaningful to redisplay
+// after the fact). priceUpdatedAt is real (migration 058); nextEvalAt is
+// an ESTIMATE derived from it plus the user's own real
+// scan_interval_seconds, explicitly labeled as such on the frontend -
+// never a guarantee.
 function getOpenPositions(userId){
-    return tradingBotRepository.findOpenPositions(userId).map(p => ({
-        id: p.id,
-        tokenAddress: p.token_address,
-        tokenSymbol: p.token_symbol,
-        entryPrice: p.entry_price,
-        currentPrice: p.current_price,
-        roiPct: p.current_price != null ? ((p.current_price / p.entry_price) - 1) * 100 : null,
-        openedAt: p.opened_at,
-        confidence: p.confidence,
-        exitStrategy: p.exit_strategy,
-        status: p.status
-    }));
+    const config = tradingBotRepository.getConfig(userId);
+    return tradingBotRepository.findOpenPositions(userId).map(p => {
+        const roiPct = p.current_price != null ? ((p.current_price / p.entry_price) - 1) * 100 : null;
+        const dynamicState = roiPct == null ? "AWAITING_PRICE_DATA" : (roiPct < MIN_TP_PCT ? "BELOW_TARGET" : "TRAILING_ABOVE_TARGET");
+        const nextEvaluationAtEstimate = p.price_updated_at
+            ? new Date(new Date(`${String(p.price_updated_at).replace(" ", "T")}Z`).getTime() + config.scan_interval_seconds * 1000).toISOString()
+            : null;
+        return {
+            id: p.id,
+            // Production Hotfix V1.1, Section 5: same real
+            // execution_id-based signal as Trade History - a SIMULATION
+            // position must never look indistinguishable from a real one.
+            mode: p.execution_id != null ? "LIVE" : "SIMULATION",
+            tokenAddress: p.token_address,
+            tokenSymbol: p.token_symbol,
+            entryPrice: p.entry_price,
+            currentPrice: p.current_price,
+            roiPct,
+            stopLossPrice: p.stop_loss_price,
+            targetPrice: p.target_price,
+            dynamicState,
+            priceUpdatedAt: p.price_updated_at,
+            nextEvaluationAtEstimate,
+            openedAt: p.opened_at,
+            confidence: p.confidence,
+            exitStrategy: p.exit_strategy,
+            status: p.status
+        };
+    });
 }
 
 // Position-detail view (Trust/UX sprint): entirely real, already-
@@ -929,13 +990,29 @@ function getPositionDetail(userId, id){
     const strength = parsed?.reasons ?? [];
     const weakness = parsed?.riskReasons ?? [];
 
-    // Confidence Breakdown: read-only re-derivation of computeConfidence()'s
-    // own arithmetic (researchEngineFactory.js) from numbers already
-    // persisted in breakdown_json - never a re-score, never a new formula.
-    // null wholesale when the underlying scores weren't persisted (legacy
-    // pre-migration rows), never a guessed breakdown.
+    // Confidence Breakdown: False Positive Reduction V2, Priority 5 - a
+    // position opened after this sprint carries its own real, fully-
+    // computed confidenceBreakdown (mismatch/completeness/freshness/risk
+    // penalties, researchEngineFactory.js's computeConfidence) straight
+    // from breakdown_json, persisted at BUY time - preferred whenever
+    // present. A position opened BEFORE this sprint has no such field;
+    // for those, fall back to the original read-only re-derivation
+    // (participantPct/marketPct/mismatchPenalty only - completeness/risk
+    // penalties were never captured for legacy rows and are honestly left
+    // out rather than guessed).
     let confidenceBreakdown = null;
-    if(parsed?.participantScore != null && parsed?.marketHealth != null && parsed?.participantMax && parsed?.marketHealthMax){
+    if(parsed?.confidenceBreakdown){
+        const cb = parsed.confidenceBreakdown;
+        confidenceBreakdown = {
+            participantPct: parsed.participantMax ? Math.round((parsed.participantScore / parsed.participantMax) * 1000) / 10 : null,
+            marketPct: parsed.marketHealthMax ? Math.round((parsed.marketHealth / parsed.marketHealthMax) * 1000) / 10 : null,
+            mismatchPenalty: cb.mismatchPenalty ?? null,
+            completenessPenalty: cb.completenessPenalty ?? null,
+            freshnessPenalty: cb.freshnessPenalty ?? null,
+            riskPenalty: cb.riskPenalty ?? null
+        };
+    }
+    else if(parsed?.participantScore != null && parsed?.marketHealth != null && parsed?.participantMax && parsed?.marketHealthMax){
         const participantPct = parsed.participantScore / parsed.participantMax;
         const marketPct = parsed.marketHealth / parsed.marketHealthMax;
         const mismatch = Math.abs(participantPct - marketPct) * 100;
@@ -947,6 +1024,23 @@ function getPositionDetail(userId, id){
             freshnessPenalty: parsed.freshnessPenalty ?? null
         };
     }
+
+    // Priority 5: "evidence yang tidak tersedia" and the final plain-
+    // language pass reason, both persisted verbatim at BUY time - null/
+    // empty (never guessed) for a position opened before this sprint.
+    const missingEvidence = parsed?.missingEvidence ?? [];
+    const passReason = parsed?.passReason ?? null;
+    // Production Stabilization Final, Section G/H: the entry gate's own
+    // real, persisted result - null for a position opened before this fix.
+    const entryGateResult = parsed?.entryGateResult ?? null;
+    // False Positive Reduction V4: real token age at entry - null for a
+    // position opened before this fix, or when no real age data (neither
+    // launch_time nor a trenches created_timestamp) existed for this token.
+    const tokenAgeMinutesAtEntry = parsed?.tokenAgeMinutesAtEntry ?? null;
+    // Production Stabilization V2 (Close Remaining BUY Blind Spots,
+    // Section 5): the real, raw facts behind every score - null for a
+    // position opened before this fix.
+    const rawFactsAtEntry = parsed?.rawFactsAtEntry ?? null;
 
     // Flow: the acceleration signal's own flow-pace component (real
     // smart-money+KOL buy-rate data, researchEngineFactory.js's
@@ -995,6 +1089,11 @@ function getPositionDetail(userId, id){
         hasBreakdown: Boolean(parsed),
         strength,
         weakness,
+        missingEvidence,
+        passReason,
+        entryGateResult,
+        tokenAgeMinutesAtEntry,
+        rawFactsAtEntry,
         confidenceBreakdown,
         flow,
         liquidity,
@@ -1023,10 +1122,22 @@ function getPositionDetail(userId, id){
 
 function getTrades(userId, limit){
     return tradingBotRepository.findRecentTrades(userId, limit).map(t => ({
+        // Production Hotfix V1.1, Section 5: Trade History keeps showing
+        // BOTH SIMULATION and LIVE rows (historical simulation data may
+        // remain, per that sprint's own instruction) - but every row is
+        // now clearly labeled, never blended unlabeled. close_execution_id
+        // is the same real signal Production Stabilization V1 already
+        // established distinguishes a genuine on-chain close from a
+        // SIMULATION-mode paper trade.
+        mode: t.close_execution_id != null ? "LIVE" : "SIMULATION",
         tokenSymbol: t.token_symbol,
         entryPrice: t.entry_price,
         exitPrice: t.exit_price,
         roiPct: t.roi_pct,
+        // Section K (Trade History): real dollar PnL, not just ROI% - the
+        // exact same net-of-fees formula sumClosedTrades() already uses
+        // for the Portfolio's own realizedPnl, so the two can never drift.
+        profitUsd: t.size_usd != null && t.roi_pct != null ? (t.size_usd * (t.roi_pct / 100)) - t.fee_usd : null,
         feeUsd: t.fee_usd,
         slippagePct: t.slippage_pct,
         durationSeconds: t.duration_seconds,
@@ -1074,7 +1185,11 @@ function getEquityCurve(userId){
 // Journey v1 lock): Start Bot must never fail later because a
 // prerequisite was silently missing - it's checked here, once, with a
 // specific itemized reason, before the bot ever flips to RUNNING.
-function startBot(userId){
+// Async as of Production Stabilization V1 (Sections D/E/Q) -
+// onboardingService.getOnboardingStatus is now a real on-chain balance
+// check (walletService.getRealWalletBalance). Its one caller (the start
+// controller) is already an async Express handler.
+async function startBot(userId){
     const state = tradingBotRepository.getState(userId);
     if(state.status === "RUNNING") return { ok: false, error: "Bot is already RUNNING." };
 
@@ -1085,7 +1200,7 @@ function startBot(userId){
     // existed - gating it the same as LIVE made Start Bot unstartable for
     // any account that hasn't been through the full real-money flow yet.
     if(state.mode === "LIVE"){
-        const onboarding = onboardingService.getOnboardingStatus(userId);
+        const onboarding = await onboardingService.getOnboardingStatus(userId);
         if(!onboarding.readyToTrade){
             return { ok: false, error: `Complete onboarding before starting the bot in LIVE mode. Missing: ${onboarding.missing.join(", ")}.` };
         }
@@ -1219,17 +1334,20 @@ function emergencyStop(userId){
 // CRAB User Journey v1 (locked): Trading Allocation is a PERCENTAGE the
 // user always thinks in, never a dollar amount they set directly.
 // initial_capital (the one field the paper-trading engine actually
-// reads - untouched by this change) is derived here as
-// deposited_balance_usd * allocationPct / 100 and written alongside
-// allocation_pct via tradingBotRepository.setAllocationAndCapital() -
+// reads - untouched by this change) is derived here and written
+// alongside allocation_pct via tradingBotRepository.setAllocationAndCapital() -
 // the ONLY place either field is ever written, same "owned by its own
-// flow" convention as strategy_profile's bundle fields above. Because
-// allocation is a percentage OF the deposit rather than an independent
-// dollar figure, it can never become "invalid" relative to a shrunk
-// deposit the way a stored dollar amount could - a later withdrawal
-// just recomputes this same derived initial_capital down
-// proportionally (see services/walletService.js's withdrawFunds()).
-function setAllocation(userId, allocationPct){
+// flow" convention as strategy_profile's bundle fields above.
+//
+// Production Stabilization V1 (Sections D/E/Q): the basis is now the
+// REAL on-chain wallet balance (walletService.getRealWalletBalance),
+// never the old self-reported deposited_balance_usd - a real deposit or
+// withdrawal now flows through automatically (it's just a different
+// on-chain balance the next real read sees), no app-side ledger action
+// needed. Async because getRealWalletBalance is a real RPC/GMGN read -
+// this function's one caller (the allocation controller) is already an
+// async Express handler.
+async function setAllocation(userId, allocationPct){
     const pct = Number(allocationPct);
     if(!Number.isFinite(pct) || pct < 0 || pct > 100){
         return { ok: false, error: "Trading Allocation must be a percentage between 0 and 100." };
@@ -1238,7 +1356,8 @@ function setAllocation(userId, allocationPct){
     if(!tradingWallet){
         return { ok: false, error: "Generate a Trading Wallet before setting an allocation." };
     }
-    const initialCapital = tradingWallet.deposited_balance_usd * pct / 100;
+    const real = await walletService.getRealWalletBalance(userId);
+    const initialCapital = computeInitialCapitalFromReal(real, pct);
     const config = tradingBotRepository.setAllocationAndCapital(userId, pct, initialCapital);
     return { ok: true, config };
 }
@@ -1248,5 +1367,10 @@ module.exports = {
     getPortfolio, getPortfolioReconciliation, getOpenPositions, getPositionDetail, getTrades, getLog, getEquityCurve,
     getDecisionCenter, getMomentumKpi, getMissedWinners, getSelfAudit, getSystemThroughput, getBottleneckReport, getTargetAchievementSummary,
     startBot, stopBot, pauseBot, forceSellAll, sellPosition, emergencyStop, setMode,
-    analyzeCustomObjective, setAllocation
+    analyzeCustomObjective, setAllocation,
+    // Production Stabilization V1 (Sections D/E/Q): exported purely for
+    // scheduler/walletBalanceSyncScheduler.js's own periodic sync - the
+    // one shared "real balance x allocation % -> Trading Balance" formula,
+    // never a second copy of it.
+    computeInitialCapitalFromReal
 };

@@ -11,6 +11,7 @@ const userRepository = require("../repositories/userRepository");
 const userWalletRepository = require("../repositories/userWalletRepository");
 const tradingWalletRepository = require("../repositories/tradingWalletRepository");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
+const walletService = require("./walletService");
 // Named envConfig - getOnboardingStatus() below already uses `config`
 // as the local variable name for trading_bot_config.
 const envConfig = require("../config/env");
@@ -19,17 +20,23 @@ const STEPS = [
     { key: "emailVerified", label: "Email verified" },
     { key: "ownerWalletVerified", label: "Owner Wallet verified" },
     { key: "tradingWalletGenerated", label: "Trading Wallet generated" },
-    { key: "depositCompleted", label: "Deposit completed" },
+    { key: "depositCompleted", label: "Wallet funded" },
     { key: "allocationConfigured", label: "Trading Allocation configured" },
     { key: "strategySelected", label: "Strategy selected" }
 ];
 
-function getOnboardingStatus(userId){
+// Async as of Production Stabilization V1 (Sections D/E/Q) - depositCompleted
+// now checks the REAL on-chain wallet balance (walletService.getRealWalletBalance,
+// a real RPC/GMGN read) instead of the old self-reported
+// deposited_balance_usd, which has been removed. This function's one
+// caller (services/tradingBotService.js's startBot) is already async.
+async function getOnboardingStatus(userId){
 
     const user = userRepository.findById(userId);
     const ownerWallet = userWalletRepository.findByUserId(userId);
     const tradingWallet = tradingWalletRepository.findByUserId(userId);
     const config = tradingBotRepository.getConfig(userId);
+    const real = tradingWallet ? await walletService.getRealWalletBalance(userId) : null;
 
     // Owner Wallet normally proves account ownership via a real external
     // signature (services/walletService.js's verifyOwnership) - the ONE
@@ -48,7 +55,7 @@ function getOnboardingStatus(userId){
         emailVerified: Boolean(user && user.email_verified),
         ownerWalletVerified: isVerifiedFounderWallet || Boolean(ownerWallet && ownerWallet.verified_at),
         tradingWalletGenerated: Boolean(tradingWallet),
-        depositCompleted: Boolean(tradingWallet && tradingWallet.deposited_balance_usd > 0),
+        depositCompleted: Boolean(real && real.solUsd != null && real.solUsd > 0),
         // Product decision: no step may be silently satisfied by a
         // default value. allocation_pct defaults to 100 and
         // strategy_profile defaults to STABLE, so both checks use a

@@ -45,8 +45,132 @@ const opportunityPriorityService = require("./opportunityPriorityService");
 const emiService = require("./emiService");
 const tradeManager = require("./tradeManager");
 const entryGateService = require("./entryGateService");
+const { marketAgeSecondsFor } = entryGateService;
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
+const gmgnOndemandService = require("./gmgnOndemandService");
+// Section H (Candidate Card): read-only reuse of buildRiskBands for a
+// real "if bought now" Target price on qualified/watch candidates -
+// never used here to score/decide anything (this file still never
+// scores a token itself, per its own header comment).
+const productionEngineResolver = require("./productionEngineResolver");
+
+// Production Stabilization V1, Section A (Exit Engine root cause): a
+// held position's token in gmgn_tokens is only ever refreshed by
+// collectors/gmgn/trendingCollector.js's top-100-per-interval trending
+// merge - a token that stops appearing in GMGN's own trending rankings
+// (exactly what a token that just crashed does; trending ranks rising
+// volume/momentum, never a dump) simply freezes at its last trending-
+// snapshot price forever, with nothing anywhere flagging it as stale.
+// Confirmed against real, live data, not hypothesized: of 5 positions
+// opened in the exact same cycle, 4 whose tokens fell out of trending
+// never received a single price update afterward (current_price stayed
+// byte-identical to entry_price, mfe_pct/mae_pct stayed exactly 0)
+// while the 5th, whose token stayed trending, tracked ROI correctly the
+// whole time. Since services/dynamicExitService.js's Stop Loss/Take
+// Profit/ROI all compute directly from `token.price`, a position can
+// crash to near-zero and never close - not because Hard Stop Loss is
+// bypassed by Dynamic Exit's own trailing logic (it isn't - the SL
+// check there is already unconditional and runs before any "let it
+// ride" reasoning), but because the price it evaluates against never
+// moves.
+//
+// Fix: every OPEN position gets its own on-demand freshness check,
+// independent of whether its token is still in this cycle's shared
+// trending snapshot. STALE_AFTER_MS is 3x the trending collector's own
+// 30s tick (scheduler/gmgnTrendingScheduler.js) - long enough that
+// normal tick jitter never falsely trips it, short enough that a token
+// which has genuinely stopped being tracked is caught within one or two
+// bot cycles for every existing scan_interval_seconds default.
+const HELD_POSITION_CHAIN = "sol";
+const HELD_POSITION_STALE_AFTER_MS = 90 * 1000;
+
+function msSinceTokenSeen(token){
+    const lastSeen = token?.last_seen || token?.updated_at;
+    if(!lastSeen) return Infinity;
+    return Date.now() - new Date(`${String(lastSeen).replace(" ", "T")}Z`).getTime();
+}
+
+// Pure extraction - given already-fetched GMGN on-demand responses,
+// returns a real fresh price (never a hand-derived AMM reserve
+// calculation from token_pool_info's raw reserves - decimals/reserve-
+// side are too easy to get wrong, and a wrong derived price would be a
+// WORSE bug than the stale one being fixed here; token_kline's own
+// `close` is GMGN's own already-computed number, same source the
+// trending snapshot's own price ultimately comes from) plus a fresh
+// liquidity figure (token_pool_info's real-time value - read by
+// qualityGateService's rug re-check). Every other field (market_cap,
+// volume, holders, price_change_5m) is deliberately left untouched from
+// the last known snapshot: re-deriving Momentum Hunter's other real
+// inputs outside the frozen engine is out of scope for this fix - only
+// the two fields the Stop Loss/Take Profit/rug-check floor actually
+// depend on are refreshed. Returns null if GMGN gave nothing real
+// (never fabricates a price).
+function extractFreshPriceAndLiquidity(poolResult, klineResult){
+    const candles = klineResult?.data?.list;
+    const latestCandle = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
+    const freshPrice = latestCandle ? Number(latestCandle.close) : null;
+
+    if(!freshPrice || freshPrice <= 0) return null;
+
+    const rawLiquidity = poolResult?.data?.liquidity;
+    const freshLiquidity = rawLiquidity != null ? Number(rawLiquidity) : null;
+
+    return { price: freshPrice, liquidity: freshLiquidity };
+}
+
+// ondemandService is injectable purely for testing (same optional-
+// trailing-parameter DI seam services/tradeManager.js's liveOptions
+// already uses) - defaults to the real, already-built, already-cached
+// GMGN on-demand client (services/gmgnOndemandService.js), never a
+// second API surface. Fails soft: any GMGN error/timeout, or an empty/
+// zero response, logs a real WARNING and keeps using whatever token
+// data was already in hand - never crashes the cycle, never fabricates
+// a price.
+async function refreshStaleHeldToken(userId, position, token, ondemandService){
+
+    try{
+
+        const [poolResult, klineResult] = await Promise.all([
+            ondemandService.getTokenPoolInfo(HELD_POSITION_CHAIN, position.token_address),
+            ondemandService.getTokenKline(HELD_POSITION_CHAIN, position.token_address, "1h")
+        ]);
+
+        const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
+        if(!fresh) return token;
+
+        return {
+            ...(token || { token_address: position.token_address, symbol: position.token_symbol }),
+            price: fresh.price,
+            liquidity: fresh.liquidity ?? token?.liquidity ?? null,
+            // Production Stabilization Final, Section B: this on-demand
+            // refresh only re-verifies price/liquidity (the two Hard Stop
+            // Loss/rug-check actually depend on) - price_change_5m,
+            // volume_1h, and this token's trenches row are NOT re-fetched
+            // here and may be hours stale, carried through unchanged from
+            // whatever `token` was (or absent entirely). Flagged so
+            // dynamicExitService's momentum-hold logic (the +15% "let it
+            // ride while real evidence supports it" branch, never the
+            // Stop Loss floor, which always uses the fresh price above)
+            // never treats stale/absent momentum evidence as license to
+            // keep holding.
+            marketContextStale: true
+        };
+
+    }
+    catch(err){
+
+        tradingBotRepository.insertLog(userId, {
+            logType: "WARNING",
+            message: `Held position ${position.token_symbol} price refresh failed (${err.message}) - its token has fallen out of the trending snapshot and the on-demand refresh also failed this cycle; exit checks are using the last known price.`,
+            meta: { tokenAddress: position.token_address, positionId: position.id, error: err.message }
+        });
+
+        return token;
+
+    }
+
+}
 
 // tokens/liveByAddress are computed by scheduler/tradingBotScheduler.js
 // (ONCE per tick, shared across every user - see runCycle() below) and
@@ -96,7 +220,23 @@ function orderCandidates(tokens, liveByAddress, botConfig){
 
         for(const token of tokens){
             const live = liveByAddress.get(token.token_address);
-            if(live.action === "BUY" || live.action === "STRONG BUY"){
+            // False Positive Reduction V2, Priority 4: a HIGH-risk candidate
+            // is never ranked - entryGateService already hard-rejects it
+            // outright (Production Stabilization V2), so ranking it was
+            // pure noise at best - at worst, Opportunity Priority's own
+            // heat-based formula (confidenceVelocity/participantScoreVelocity/
+            // triggerHeat/priceVelocity/buyPressure - none of them a safety
+            // signal) could and did rank a HIGH-risk token to the very top
+            // (real proof: MOON, this account's own real BUY, ranked #2 of 2
+            // at priority 97 while risk:"HIGH"). Routed to `rest` instead of
+            // `buyCandidates` - still visited by the entry-gate loop below in
+            // its original scan order (so it is still real-logged as
+            // HIGH_RISK_REJECTED, same as today), just never occupies a
+            // ranked leaderboard slot or a real candidate's sibling list.
+            // This changes ORDER/observability only - identical to before
+            // for every LOW/MEDIUM-risk candidate, and no token that was
+            // ever actually bought before this change stops being eligible.
+            if((live.action === "BUY" || live.action === "STRONG BUY") && live.risk !== "HIGH"){
                 buyAddresses.add(token.token_address);
                 buyCandidates.push(token);
             }
@@ -120,11 +260,22 @@ function orderCandidates(tokens, liveByAddress, botConfig){
             buyCandidates.map(t => [t.token_address, liveByAddress.get(t.token_address)?.acceleration])
         );
 
+        // Production Stabilization V2 (Close Remaining BUY Blind Spots,
+        // Section 3 - Opportunity Ranking): the same real riskReasons
+        // array entryGateService's own HIGH-risk gate already reads off
+        // `live`, threaded through so ranking can de-prioritize a
+        // relatively more dangerous MEDIUM/LOW-risk candidate among this
+        // cycle's real BUY-tier pool - never a new signal, never a
+        // second copy of it.
+        const riskReasonsByAddress = new Map(
+            buyCandidates.map(t => [t.token_address, liveByAddress.get(t.token_address)?.riskReasons])
+        );
+
         const emiFlags = botConfig.emi_enabled
             ? emiService.classifyMany(buyCandidates, batchContext, accelerationByAddress)
             : null;
 
-        const ranked = opportunityPriorityService.rank(buyCandidates, batchContext, emiFlags, accelerationByAddress);
+        const ranked = opportunityPriorityService.rank(buyCandidates, batchContext, emiFlags, accelerationByAddress, riskReasonsByAddress);
 
         const rankInfoByAddress = new Map(
             ranked.map((r, i) => [r.token.token_address, {
@@ -199,7 +350,7 @@ function buildLiveExecutionOptions(userId){
 // caller (scheduler/tradingBotScheduler.js) already treats this as
 // fire-and-forget per user, so making it async changes nothing about
 // how ticks are paced - see that file's own runUserCycle().
-async function runCycle(userId, tokens, liveByAddress){
+async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOndemandService){
 
     const state = tradingBotRepository.getState(userId);
 
@@ -239,8 +390,17 @@ async function runCycle(userId, tokens, liveByAddress){
     // ---- 1. manage OPEN positions first (exit checks use live current price) ----
     const openPositions = tradingBotRepository.findOpenPositions(userId);
     for(const position of openPositions){
-        const token = byAddress.get(position.token_address);
-        if(!token) continue; // token no longer tracked at all - leave position, next cycle may see it again
+        let token = byAddress.get(position.token_address);
+        // Exit Engine root-cause fix (see refreshStaleHeldToken's own
+        // header comment above) - a token that fell out of this
+        // cycle's shared trending snapshot (or was never in it at all)
+        // gets its own on-demand freshness check here, so a held
+        // position is never evaluated against a price that stopped
+        // being real.
+        if(msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS){
+            token = await refreshStaleHeldToken(userId, position, token, ondemandService);
+        }
+        if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
         const result = await tradeManagerForUser.closeIfDue(position, token, botConfig);
         if(result.closed) closed++;
     }
@@ -299,6 +459,33 @@ async function runCycle(userId, tokens, liveByAddress){
         if(!evaluation.eligible){
             skipped++;
             skipReasons[evaluation.reason] = (skipReasons[evaluation.reason] || 0) + 1;
+            // Production Hotfix V1.1, Section 3: a stale-data rejection
+            // must never be silent - a real, human-readable log row every
+            // time, not just a DB stat for later. Matches the sprint's
+            // own required message shape exactly.
+            if(evaluation.reason === "STALE_MARKET_DATA"){
+                const ageLabel = evaluation.marketAgeSeconds != null ? Math.round(evaluation.marketAgeSeconds) : "unknown";
+                tradingBotRepository.insertLog(userId, {
+                    logType: "WARNING",
+                    tokenSymbol: token.symbol,
+                    message: `Rejected: Market data stale (${ageLabel} seconds old) - ${token.symbol || token.token_address.slice(0, 8)}`,
+                    meta: { tokenAddress: token.token_address, marketAgeSeconds: evaluation.marketAgeSeconds }
+                });
+            }
+            // Production Stabilization V2 (BUY Quality sprint, Section 3
+            // observability requirement carried forward): a HIGH-risk
+            // rejection is never silent either - same real log-row
+            // convention as the freshness rejection above, listing the
+            // actual riskReasons that pushed this candidate to HIGH so
+            // the Founder can see exactly why, not just that it happened.
+            if(evaluation.reason === "HIGH_RISK_REJECTED"){
+                tradingBotRepository.insertLog(userId, {
+                    logType: "WARNING",
+                    tokenSymbol: token.symbol,
+                    message: `Rejected: HIGH risk (${(evaluation.riskReasons || []).length} red flags) - ${token.symbol || token.token_address.slice(0, 8)}`,
+                    meta: { tokenAddress: token.token_address, riskReasons: evaluation.riskReasons }
+                });
+            }
             // Missed Opportunity sprint priority: only for tokens that
             // genuinely cleared the BUY/STRONG BUY action tier (rankInfo
             // truthy) - never for NOT_A_BUY_TIER_*/HARD_EXCLUDED_*/
@@ -324,6 +511,22 @@ async function runCycle(userId, tokens, liveByAddress){
                     priorityScore: rankInfoByAddress.get(t.token_address).priorityScore
                 }));
         }
+
+        // Production Stabilization Final, Section G/H: `evaluation` itself
+        // (the entry gate's own real result - isReentry, the real
+        // marketAgeSeconds it verified, decayFraction already on `live`)
+        // was computed then discarded here before this fix - only
+        // evaluation.live ever reached tradeManager.openPosition. If the
+        // Founder later asks "why was this token allowed to reach a real
+        // BUY," this closes the gap between "the signal looked fine" and
+        // "the gate itself actually ran and passed" - persisted verbatim
+        // by tradeManager.js, immutable, from the exact real decision.
+        live.entryGateResult = {
+            eligible: evaluation.eligible,
+            isReentry: evaluation.isReentry ?? false,
+            marketAgeSeconds: evaluation.marketAgeSeconds ?? null,
+            decayFraction: live.decayFraction ?? null
+        };
 
         const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
 
@@ -402,7 +605,28 @@ async function runCycle(userId, tokens, liveByAddress){
             tokenAddress: token.token_address, tokenSymbol: token.symbol,
             action: live.action, confidence: live.confidence, risk: live.risk,
             tier: rankInfo?.tier ?? null, rank: rankInfo?.rank ?? null, priorityScore: rankInfo?.priorityScore ?? null,
-            reasons: live.reasons?.length ? live.reasons : (live.exclusionReason ? [live.exclusionReason] : [])
+            reasons: live.reasons?.length ? live.reasons : (live.exclusionReason ? [live.exclusionReason] : []),
+            // Production Hotfix V1.1, Section 3: real observability for
+            // every candidate, not just the ones that end up BUY-tier -
+            // lets the Founder see exactly how fresh the data behind
+            // each decision actually is. marketAgeSeconds reuses
+            // entryGateService's own freshness formula (never a second
+            // copy); lastSnapshotAt is the token's own real
+            // gmgn_tokens.updated_at; decisionTime is real "now, this
+            // cycle"; snapshotSource is always the shared trending
+            // snapshot here - candidates never come from the on-demand
+            // fallback (that path is exclusively for already-open
+            // positions, see refreshStaleHeldToken above).
+            marketAgeSeconds: marketAgeSecondsFor(token),
+            lastSnapshotAt: token.updated_at || token.last_seen || null,
+            decisionTime: new Date().toISOString(),
+            snapshotSource: "GMGN_TRENDING",
+            // Transient - used below to compute Section H's Candidate
+            // Card Target price, only for the rows that actually survive
+            // the HOLD top-20 cut. Harmless extra properties:
+            // replaceDecisionSnapshot only ever reads its own named
+            // fields, never these.
+            _token: token, _live: live
         };
         if(live.action === "BUY" || live.action === "STRONG BUY") qualifiedRows.push(row);
         else if(live.action === "HOLD") holdCandidates.push(row);
@@ -411,6 +635,25 @@ async function runCycle(userId, tokens, liveByAddress){
     holdCandidates.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
     const waitRows = holdCandidates.slice(0, 20);
     const avoidRows = avoidCandidates.slice(0, 5);
+
+    // Section H (Candidate Card): a real "if bought right now" Target
+    // price for every BUY/WATCH-tier row - reuses tradePlanService's
+    // buildRiskBands via the active engine, the EXACT same function
+    // tradeManager.js's own openPosition() calls at real BUY time, never
+    // a second target-price formula. AVOID-tier rows never get one -
+    // there's nothing to project for a token the engine is telling the
+    // user to avoid. Computed only for rows that survive the caps above
+    // (qualifiedRows is already the small real BUY-tier set; waitRows is
+    // capped to 20) - never for the full scan universe.
+    const activeEngine = productionEngineResolver.getActiveEngine();
+    function attachTargetPrice(row){
+        const signalStub = { participantScore: row._live.participantScore ?? 50, risk: row._live.risk, confidence: row._live.confidence };
+        const riskBands = activeEngine.buildRiskBands(row._token, signalStub, botConfig.exitOverrides);
+        row.targetPrice = riskBands?.target?.price ?? null;
+    }
+    qualifiedRows.forEach(attachTargetPrice);
+    waitRows.forEach(attachTargetPrice);
+
     tradingBotRepository.replaceDecisionSnapshot(userId, [...qualifiedRows, ...waitRows, ...avoidRows]);
 
     // Trust/UX sprint: the scheduler already console.log's this exact
@@ -463,4 +706,13 @@ async function runCycle(userId, tokens, liveByAddress){
 // top-level require there) since this file already requires
 // tradingBotService.js itself - a top-level require in the other
 // direction would be circular.
-module.exports = { runCycle, orderCandidates, buildLiveExecutionOptions };
+//
+// msSinceTokenSeen/extractFreshPriceAndLiquidity/refreshStaleHeldToken
+// exported purely for this file's own regression test (Production
+// Stabilization V1, Section A) - pure/near-pure functions, no other
+// module calls them directly.
+module.exports = {
+    runCycle, orderCandidates, buildLiveExecutionOptions,
+    msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
+    HELD_POSITION_STALE_AFTER_MS
+};

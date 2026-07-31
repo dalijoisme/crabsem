@@ -304,7 +304,23 @@ module.exports = {
 
         mediumAtRiskReasonCount: 1,
 
-        highAtRiskReasonCount: 4
+        highAtRiskReasonCount: 4,
+
+        // False Positive Reduction V2, Priority 3: confidence must not
+        // ignore this same risk classification (computeConfidence,
+        // researchEngineFactory.js) - a HIGH-risk token no longer reports
+        // confidence as if risk were LOW. Scaled consistently with the
+        // other existing confidence penalties in this file (freshness
+        // maxes at 20, completeness at 25) - not a new, arbitrary number.
+        confidencePenalty: {
+
+            HIGH: 20,
+
+            MEDIUM: 8,
+
+            LOW: 0
+
+        }
 
     },
 

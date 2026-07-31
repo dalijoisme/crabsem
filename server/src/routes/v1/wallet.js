@@ -4,10 +4,14 @@
 // feature). Behind middleware/userAuth.js throughout - every action
 // operates on the caller's own wallets only.
 //
-// requireVerifiedEmail (Phase 4) will gate generate/deposit/withdraw -
-// not wired yet, service-layer preconditions (Owner Wallet verified,
-// Trading Wallet exists, bot stopped + no open positions) already
-// enforce real ordering independent of that gate.
+// requireVerifiedEmail (Phase 4) will gate generate - not wired yet,
+// service-layer preconditions (Owner Wallet verified, Trading Wallet
+// exists) already enforce real ordering independent of that gate.
+//
+// Production Stabilization V1 (Sections D/E/Q): the deposit/withdraw
+// routes are removed - there is no app-side "deposit" ledger action
+// anymore (a real SOL deposit/withdrawal happens on-chain and is
+// reflected automatically by GET /wallet/status's real balance fields).
 
 const express = require("express");
 const controller = require("../../controllers/ownerWalletController");
@@ -22,7 +26,5 @@ router.get("/wallet/challenge", controller.challenge);
 router.post("/wallet/verify", controller.verify);
 router.post("/wallet/trading-wallet/generate", controller.generateTradingWallet);
 router.get("/wallet/status", controller.status);
-router.post("/wallet/trading-wallet/deposit", controller.deposit);
-router.post("/wallet/trading-wallet/withdraw", controller.withdraw);
 
 module.exports = router;

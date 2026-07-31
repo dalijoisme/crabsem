@@ -53,24 +53,4 @@ async function status(req, res, next){
     catch(err){ next(err); }
 }
 
-async function deposit(req, res, next){
-    try{
-        const { amountUsd } = req.body || {};
-        const result = walletService.depositFunds(req.user.id, amountUsd);
-        if(!result.ok) return sendError(res, result.status, result.error, result.details);
-        sendSuccess(res, { depositedBalanceUsd: result.depositedBalanceUsd });
-    }
-    catch(err){ next(err); }
-}
-
-async function withdraw(req, res, next){
-    try{
-        const { amountUsd } = req.body || {};
-        const result = walletService.withdrawFunds(req.user.id, amountUsd);
-        if(!result.ok) return sendError(res, result.status, result.error, result.details);
-        sendSuccess(res, { depositedBalanceUsd: result.depositedBalanceUsd });
-    }
-    catch(err){ next(err); }
-}
-
-module.exports = { connect, challenge, verify, generateTradingWallet, status, deposit, withdraw };
+module.exports = { connect, challenge, verify, generateTradingWallet, status };

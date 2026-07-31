@@ -19,13 +19,21 @@ function findByUserId(userId){
     return db.prepare("SELECT * FROM trading_wallets WHERE user_id = ?").get(userId);
 }
 
-// deposited_balance_usd - CRAB User Journey v1: the self-reported
-// total Trading Wallet balance, separate from Trading Allocation
-// (trading_bot_config.allocation_pct). depositFunds/withdrawFunds in
-// services/walletService.js call this with the new absolute total,
-// never a delta, so this repository never has to reason about +/-.
-function setDepositedBalance(userId, depositedBalanceUsd){
-    db.prepare("UPDATE trading_wallets SET deposited_balance_usd = ? WHERE user_id = ?").run(depositedBalanceUsd, userId);
+// Production Stabilization V1 (Sections D/E/Q): every user_id with a
+// real Trading Wallet - used by scheduler/walletBalanceSyncScheduler.js
+// to keep each user's Trading Balance synced to their real on-chain
+// balance on a timer, independent of whether their dashboard is open.
+function findAllUserIds(){
+    return db.prepare("SELECT user_id FROM trading_wallets").all().map(r => r.user_id);
 }
 
-module.exports = { insertWallet, findByUserId, setDepositedBalance };
+// deposited_balance_usd column is DEPRECATED as of Production
+// Stabilization V1 (Sections D/E/Q) - it was a self-reported balance
+// that could silently drift from the real on-chain wallet (the root
+// cause of a live Trading Allocation/Wallet Balance mismatch this sprint
+// investigated and fixed). Trading Balance is now always derived from
+// walletService.getRealWalletBalance(). The column is left in the
+// schema, unread and unwritten, rather than dropped - this codebase's
+// established additive-only migration convention.
+
+module.exports = { insertWallet, findByUserId, findAllUserIds };

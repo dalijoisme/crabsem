@@ -3,9 +3,12 @@
 // Final Spec section 08/18: fixture-based, no integration harness
 // needed for this milestone. Run with `node --test`.
 //
-// The B/C/A fixture below is hand-verified: 5 factors x 3 tokens with
-// no accidental ties beyond the deliberate ones, producing combinedRank
-// 0/4/10 (max 10) -> priorityScore 100/60/0 -> tier HEATING/WARM/NORMAL.
+// The B/C/A fixture below is hand-verified: 6 factors x 3 tokens (the
+// 6th, riskDanger, ties at 0 for all three whenever riskReasonsByAddress
+// is omitted - a strict no-op on relative order, same convention as
+// acceleration/EMI being absent) with no accidental ties beyond the
+// deliberate ones, producing combinedRank 0/4/10 (max 6*(3-1)=12) ->
+// priorityScore 100/67/17 -> tier HEATING/WARM/NORMAL.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -49,8 +52,8 @@ test("rank() orders by combinedRank and derives the correct baseline tier for ea
     const b = byAddress(result, "B"), c = byAddress(result, "C"), a = byAddress(result, "A");
 
     assert.equal(b.combinedRank, 0); assert.equal(b.priorityScore, 100); assert.equal(b.tier, "HEATING");
-    assert.equal(c.combinedRank, 4); assert.equal(c.priorityScore, 60); assert.equal(c.tier, "WARM");
-    assert.equal(a.combinedRank, 10); assert.equal(a.priorityScore, 0); assert.equal(a.tier, "NORMAL");
+    assert.equal(c.combinedRank, 4); assert.equal(c.priorityScore, 67); assert.equal(c.tier, "WARM");
+    assert.equal(a.combinedRank, 10); assert.equal(a.priorityScore, 17); assert.equal(a.tier, "NORMAL");
 
 });
 
@@ -61,10 +64,10 @@ test("EMI accelerating=true on a NORMAL candidate raises it to WARM, never highe
     const a = byAddress(result, "A");
 
     assert.equal(a.tier, "WARM");
-    // combinedRank/priorityScore are a pure reflection of the 5 real
+    // combinedRank/priorityScore are a pure reflection of the 6 real
     // factors - EMI must never change them, only the Tier bucket.
     assert.equal(a.combinedRank, 10);
-    assert.equal(a.priorityScore, 0);
+    assert.equal(a.priorityScore, 17);
 
 });
 
@@ -76,7 +79,7 @@ test("EMI accelerating=true on a WARM candidate with priorityScore >= 55 raises 
 
     assert.equal(c.tier, "HEATING");
     assert.equal(c.combinedRank, 4);
-    assert.equal(c.priorityScore, 60);
+    assert.equal(c.priorityScore, 67);
 
 });
 
@@ -176,4 +179,41 @@ test("acceleration data is a strict no-op when absent (BALANCED/no-acceleration 
     const withUndefined = opportunityPriorityService.rank(tokens, batchContext, null, undefined);
     const withoutParam = opportunityPriorityService.rank(tokens, batchContext);
     assert.deepEqual(withUndefined, withoutParam);
+});
+
+test("riskReasonsByAddress is a strict no-op when absent - byte-identical to before this factor existed", () => {
+    const withUndefined = opportunityPriorityService.rank(tokens, batchContext, null, undefined, undefined);
+    const withoutParam = opportunityPriorityService.rank(tokens, batchContext);
+    assert.deepEqual(withUndefined, withoutParam);
+});
+
+// Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
+// 3 - Opportunity Ranking): a candidate with real, present risk flags
+// must rank worse than an otherwise-identical candidate with none - the
+// exact "momentum high but overall more dangerous" case the Founder
+// asked ranking to be able to punish. Real proof this was needed:
+// BABYCATE (a real HIGH-risk loser) ranked #0 of a real replay set on
+// momentum alone before this fix - HIGH-risk candidates are already
+// excluded from ranking entirely, so this test proves the same real
+// danger signal now also matters among the MEDIUM/LOW-risk pool that
+// still reaches ranking.
+test("a candidate with more real risk flags ranks worse than an identical one with fewer, all else equal", () => {
+
+    const riskyVsClean = [
+        { token_address: "RISKY", price_change_5m: 10 },
+        { token_address: "CLEAN", price_change_5m: 10 }
+    ];
+    const emptyCtx = { historyByToken: new Map(), trenchesByToken: new Map() };
+    const riskReasonsByAddress = new Map([
+        ["RISKY", ["Snipers hold 40% of top holdings", "High bundled/coordinated trading rate (35%)", "Price has already moved sharply"]],
+        ["CLEAN", []]
+    ]);
+
+    const withoutRisk = opportunityPriorityService.rank(riskyVsClean, emptyCtx);
+    assert.equal(withoutRisk[0].combinedRank, withoutRisk[1].combinedRank); // tied - momentum identical, no risk data supplied
+
+    const withRisk = opportunityPriorityService.rank(riskyVsClean, emptyCtx, null, null, riskReasonsByAddress);
+    assert.deepEqual(withRisk.map(r => r.token.token_address), ["CLEAN", "RISKY"]);
+    assert.ok(withRisk[0].combinedRank < withRisk[1].combinedRank);
+
 });

@@ -52,3 +52,40 @@ test("buyerDominanceRatio override: a looser profile ratio (0.45) accepts a 48% 
     assert.equal(withDefault.shouldClose, true); // 0.48 <= 0.5 default -> not dominant -> closes
     assert.equal(withOverride.shouldClose, false); // 0.48 > 0.45 override -> dominant -> keeps holding
 });
+
+// Production Stabilization Final, Section B: marketContextStale must
+// never let stale/absent momentum evidence justify continuing to hold a
+// winning position - the Stop Loss floor itself is completely unaffected
+// (never reads this flag at all), only the +minTpPct momentum-hold branch.
+test("marketContextStale forces a close above minTpPct even when every individual momentum field looks fine", () => {
+    // Every field here, read in isolation, would normally pass every
+    // momentum check (positive change5m, buyer-dominant trenches, rising
+    // volume, no reversal signs) - marketContextStale must override all
+    // of that, since none of it was actually re-verified this cycle.
+    const token = {
+        price: 1.20, price_change_5m: 5, volume_1h: 5000, marketContextStale: true
+    };
+    const trenchesEntry = { buys_24h: 90, sells_24h: 10, net_buy_24h: 5000 };
+    const result = evaluateDynamicExit({
+        position: position({ last_volume_1h: 1000 }), token, trenchesEntry, engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, true);
+    assert.equal(result.reason, "MOMENTUM_WEAKENING_STALE_CONTEXT");
+});
+
+test("marketContextStale has no effect below minTpPct - still just keeps holding, same as fresh data", () => {
+    const token = { price: 1.10, price_change_5m: 5, volume_1h: 5000, marketContextStale: true }; // +10%, below the 15% floor
+    const result = evaluateDynamicExit({
+        position: position(), token, trenchesEntry: { buys_24h: 90, sells_24h: 10 }, engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, false);
+});
+
+test("marketContextStale has no effect on Stop Loss - a real price crash still closes immediately", () => {
+    const token = { price: 0.5, price_change_5m: 5, volume_1h: 5000, marketContextStale: true }; // real, fresh, crashed price
+    const result = evaluateDynamicExit({
+        position: position(), token, trenchesEntry: null, engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, true);
+    assert.equal(result.reason, "STOP_LOSS");
+});

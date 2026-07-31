@@ -85,6 +85,7 @@ async function attemptLogin(){
 }
 
 async function logout(){
+    stopLiveRefresh();
     const token = getAuthToken();
     sessionStorage.removeItem(AUTH_TOKEN_STORAGE);
     showGate("");
@@ -102,6 +103,21 @@ adminLoginBtn.onclick = attemptLogin;
 adminPasswordInput.addEventListener("keyup", (e) => { if(e.key === "Enter") attemptLogin(); });
 adminLogoutBtn.onclick = logout;
 adminRefreshBtn.onclick = () => { loadAll(); tbSettingsDropdown.classList.add("hidden"); };
+
+// =====================================
+// TABS (Section R, UX cleanup) - the dashboard used to show all 14
+// sections stacked on one long scroll at once. Regrouped into 5 tabs -
+// Overview/Trading/Portfolio/Analytics/Logs - only the active tab's
+// sections are visible. Every section still exists on this one page and
+// keeps loading/auto-refreshing in the background regardless of which
+// tab is active, so switching tabs never shows stale data.
+// =====================================
+document.getElementById("tbTabBar")?.addEventListener("click", (e) => {
+    const tab = e.target.dataset.tab;
+    if(!tab) return;
+    document.querySelectorAll(".tbTabBtn").forEach(btn => btn.classList.toggle("tbTabActive", btn.dataset.tab === tab));
+    document.querySelectorAll(".tbTabPanel").forEach(panel => panel.classList.toggle("hidden", panel.dataset.tabPanel !== tab));
+});
 
 // =====================================
 // SETTINGS MENU - a single "Settings" button revealing Refresh Now +
@@ -143,6 +159,25 @@ function timeAgo(iso){
     return `${Math.round(diffMin/60)}h ago`;
 }
 
+// Section J (Open Position fields): "Next Evaluation" is an ESTIMATE
+// (priceUpdatedAt + the user's own scan_interval_seconds) - "due now" is
+// shown once the estimate has passed, never a stale future time left
+// sitting there looking wrong.
+function timeUntilEstimate(iso){
+    if(!iso) return "—";
+    const target = new Date(iso).getTime();
+    const diffMin = Math.round((target - Date.now())/60000);
+    if(diffMin <= 0) return "due now (est.)";
+    if(diffMin < 60) return `~${diffMin}m (est.)`;
+    return `~${Math.round(diffMin/60)}h (est.)`;
+}
+
+const DYNAMIC_STATE_LABELS = {
+    BELOW_TARGET: "Below Target (Holding)",
+    TRAILING_ABOVE_TARGET: "Trailing Above Target",
+    AWAITING_PRICE_DATA: "Awaiting Price Data"
+};
+
 // =====================================
 // LIVE DECISION CENTER - the dashboard's new home view. Built entirely
 // from real, already-computed data (GET /tradingbot/decision-center):
@@ -156,26 +191,92 @@ const STATUS_LABELS = {
     CONNECTED: "Connected", NOT_CONFIGURED: "Not Configured", UNAVAILABLE: "Unavailable", CONFIGURED_UNVERIFIED: "Configured (unverified)"
 };
 
+// Section H (Candidate Card): condensed to Token/Recommendation/
+// Confidence/short Reason/Target/View Detail - the full reasons list
+// only appears once the user opens it (a plain expand-in-place, keyed
+// by a stable row id so the delegated click handler below can find it).
+let tbCandidateRowSeq = 0;
+// Production Hotfix V1.1, Section 3: Market Data Age shown inline (the
+// quick, at-a-glance freshness signal - the exact thing missing before
+// this sprint), Last Snapshot Time / Decision Time / Snapshot Source in
+// the expandable detail alongside the full reasons.
+function fmtAgeSeconds(seconds){
+    if(seconds == null) return "no data";
+    const s = Math.round(seconds);
+    if(s < 60) return `${s}s ago`;
+    return `${Math.round(s / 60)}m ago`;
+}
+
 function renderCandidateRow(c){
-    const reasonsText = c.reasons && c.reasons.length ? c.reasons.join(" · ") : "No reasons recorded";
+    const rowId = `tbCandDetail_${tbCandidateRowSeq++}`;
+    const shortReason = c.reasons && c.reasons.length ? c.reasons[0] : "No reasons recorded";
+    const fullReasonsText = c.reasons && c.reasons.length ? c.reasons.join(" · ") : "No reasons recorded";
+    // 120s matches entryGateService.js's own MAX_MARKET_DATA_AGE_SECONDS -
+    // display-only threshold, mirrors the real gate, never a second
+    // source of truth (the gate itself already rejected anything over
+    // this before a row could ever become BUY-tier in the first place).
+    const staleLabel = c.marketAgeSeconds != null && c.marketAgeSeconds > 120 ? " tbStaleAge" : "";
     return `
         <div class="tbCandidateRow">
             <span class="tbCandidateSymbol">${c.tokenSymbol || c.tokenAddress.slice(0, 8)}</span>
             <span class="tbPill ${c.action === "AVOID" ? "tbNeg" : (c.action === "HOLD" ? "tbNeutral" : "tbPos")}">${c.action}</span>
             <span class="tbCandidateConfidence">${c.confidence != null ? `${c.confidence}%` : "—"}</span>
-            <span class="tbCandidateReasons">${reasonsText}</span>
+            <span class="tbCandidateReasonShort" title="${shortReason.replace(/"/g, "&quot;")}">${shortReason}</span>
+            <span class="tbCandidateTarget">${c.targetPrice != null ? fmtUsd(c.targetPrice) : "—"}</span>
+            <span class="tbCandidateAge${staleLabel}" title="Market Data Age">${fmtAgeSeconds(c.marketAgeSeconds)}</span>
+            <button class="tbViewDetailBtn" data-detail-toggle="${rowId}" type="button">View Detail</button>
+        </div>
+        <div class="tbCandidateDetail hidden" id="${rowId}">
+            <div>${fullReasonsText}</div>
+            <div class="tbCandidateDetailMeta">
+                Last Snapshot: ${c.lastSnapshotAt || "—"} · Decision Time: ${c.decisionTime || "—"} · Source: ${c.snapshotSource || "—"}
+            </div>
         </div>
     `;
 }
 
+// Section G (Live Decision Center): each queue only shows its Top 5 by
+// default - the same real, already-ordered rows the backend sends
+// (confidence-sorted for WATCH, rank-ordered for BUY) - with a "View
+// All" toggle to reveal the rest, never a second network round-trip.
+const TOP_QUEUE_SIZE = 5;
+let tbQueueRestSeq = 0;
 function renderQueue(title, rows, emptyText){
+    const shown = rows.slice(0, TOP_QUEUE_SIZE);
+    const rest = rows.slice(TOP_QUEUE_SIZE);
+    const restId = `tbQueueRest_${tbQueueRestSeq++}`;
+    const restHtml = rest.length
+        ? `<div class="tbQueueRest hidden" id="${restId}">${rest.map(renderCandidateRow).join("")}</div>
+           <button class="tbViewAllBtn" data-viewall-toggle="${restId}" type="button">View All (${rows.length})</button>`
+        : "";
     return `
         <div class="tbQueueCol">
             <h4>${title} (${rows.length})</h4>
-            ${rows.length ? rows.map(renderCandidateRow).join("") : `<div class="tbEmptyState">${emptyText}</div>`}
+            ${rows.length ? shown.map(renderCandidateRow).join("") : `<div class="tbEmptyState">${emptyText}</div>`}
+            ${restHtml}
         </div>
     `;
 }
+
+// One delegated listener, attached once - tbDecisionCenter's own
+// innerHTML is fully replaced on every render (including the 15s auto-
+// refresh), so per-row onclick handlers would never survive a refresh;
+// delegation on the stable parent container does.
+document.getElementById("tbDecisionCenter").addEventListener("click", (e) => {
+    const detailToggle = e.target.dataset.detailToggle;
+    if(detailToggle){
+        document.getElementById(detailToggle)?.classList.toggle("hidden");
+        return;
+    }
+    const viewAllToggle = e.target.dataset.viewallToggle;
+    if(viewAllToggle){
+        const restEl = document.getElementById(viewAllToggle);
+        if(restEl){
+            restEl.classList.toggle("hidden");
+            e.target.textContent = restEl.classList.contains("hidden") ? e.target.textContent.replace("Hide", "View All") : e.target.textContent.replace("View All", "Hide");
+        }
+    }
+});
 
 function renderDecisionCenter(d){
     const el = document.getElementById("tbDecisionCenter");
@@ -193,9 +294,9 @@ function renderDecisionCenter(d){
             Qualified candidates: ${d.qualifiedCandidateCount}${d.holdCount != null ? ` · Watching: ${d.holdCount}` : ""}${d.avoidCount != null ? ` · Avoided: ${d.avoidCount}` : ""}
         </div>
         <div class="tbQueueGrid">
-            ${renderQueue("BUY Queue", d.buyQueue, "No qualified BUY-tier candidates this cycle.")}
-            ${renderQueue("WAIT Queue", d.waitQueue, "Nothing on watch this cycle.")}
-            ${renderQueue("AVOID (sample)", d.avoidSample, "Nothing avoided this cycle.")}
+            ${renderQueue("Top BUY", d.buyQueue, "No qualified BUY-tier candidates this cycle.")}
+            ${renderQueue("Top WATCH", d.waitQueue, "Nothing on watch this cycle.")}
+            ${renderQueue("Top AVOID", d.avoidSample, "Nothing avoided this cycle.")}
         </div>
     `;
 }
@@ -538,7 +639,7 @@ function renderTradingConfiguration(tc){
             <div class="adminStat"><span>Available Cash</span><strong>${fmtUsd(tc.availableCashUsd)}</strong></div>
         </div>
         <div class="tbDecisionMeta">
-            Wallet source: ${tc.walletBalanceSource === "REAL" ? "real on-chain balance" : (tc.walletBalanceSource === "MANUAL_DEPOSIT" ? "manually entered deposit (no real wallet detected yet)" : "unavailable")}${tc.solUsdPrice ? ` · SOL/USD ${fmtUsd(tc.solUsdPrice)}` : ""}
+            Wallet source: ${tc.walletBalanceSource === "REAL" ? "real on-chain balance" : "unavailable - generate a Trading Wallet and fund it to see real balances"}${tc.solUsdPrice ? ` · SOL/USD ${fmtUsd(tc.solUsdPrice)}` : ""}
         </div>
 
         <h4>Position Sizing</h4>
@@ -803,9 +904,15 @@ function renderPositions(positions){
     const rows = positions.map(p => `
         <tr class="tbPositionRow" data-position-id="${p.id}" title="Click for details">
             <td>${p.tokenSymbol || p.tokenAddress.slice(0,8)}</td>
+            <td><span class="tbModeTag tbMode${p.mode}">${p.mode}</span></td>
             <td>${fmtUsd(p.entryPrice)}</td>
             <td>${p.currentPrice != null ? fmtUsd(p.currentPrice) : "—"}</td>
             <td>${p.roiPct != null ? `<span class="tbPill ${p.roiPct >= 0 ? "tbPos" : "tbNeg"}">${fmtPct(p.roiPct)}</span>` : "—"}</td>
+            <td>${p.stopLossPrice != null ? fmtUsd(p.stopLossPrice) : "—"}</td>
+            <td>${p.targetPrice != null ? fmtUsd(p.targetPrice) : "—"}</td>
+            <td>${DYNAMIC_STATE_LABELS[p.dynamicState] || p.dynamicState || "—"}</td>
+            <td>${timeAgo(p.priceUpdatedAt)}</td>
+            <td>${timeUntilEstimate(p.nextEvaluationAtEstimate)}</td>
             <td>${timeAgo(p.openedAt)}</td>
             <td>${p.confidence != null ? p.confidence : "—"}</td>
             <td>${friendlyReason(p.exitStrategy)}</td>
@@ -816,7 +923,7 @@ function renderPositions(positions){
     el.innerHTML = `
         <div class="adminTableWrap">
             <table class="adminTable">
-                <thead><tr><th>Token</th><th>Entry Price</th><th>Current Price</th><th>ROI</th><th>Holding Time</th><th>AI Confidence</th><th>Exit Strategy</th><th>Status</th><th></th></tr></thead>
+                <thead><tr><th>Token</th><th>Mode</th><th>Entry Price</th><th>Live Price</th><th>ROI</th><th>SL</th><th>TP</th><th>Dynamic State</th><th>Last Update</th><th>Next Evaluation</th><th>Holding Time</th><th>AI Confidence</th><th>Exit Strategy</th><th>Status</th><th></th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>
@@ -901,6 +1008,14 @@ function renderPositionDetail(d){
         ? `<ul class="tbReasonList">${d.weakness.map(r => `<li>${r}</li>`).join("")}</ul>`
         : `<div class="tbEmptyState">No weakness/risk signals recorded.</div>`;
 
+    // False Positive Reduction V2, Priority 5: evidence that simply wasn't
+    // available for this token (never fabricated, never silently folded
+    // into "no strength/weakness signal") - and the real, persisted
+    // narrative explaining why this exact token still passed every gate.
+    const missingHtml = (d.missingEvidence && d.missingEvidence.length)
+        ? `<ul class="tbReasonList tbReasonListMuted">${d.missingEvidence.map(r => `<li>${r}</li>`).join("")}</ul>`
+        : `<div class="tbEmptyState">All evidence categories had real data for this token.</div>`;
+
     const breakdownHtml = d.hasBreakdown ? `
         <h4>Participant Breakdown</h4>
         ${Object.entries(d.breakdown.participant || {}).map(([k,m]) => renderModuleBar(k, m)).join("")}
@@ -912,9 +1027,27 @@ function renderPositionDetail(d){
             : `<div class="tbEmptyState">Not computed for this profile - acceleration/flow only applies to strategies that set it.</div>`}
         <h4>Confidence Breakdown</h4>
         ${d.confidenceBreakdown
-            ? `<div class="tbEmptyState">Participant ${d.confidenceBreakdown.participantPct}% · Market ${d.confidenceBreakdown.marketPct}% · Mismatch penalty -${d.confidenceBreakdown.mismatchPenalty} · Freshness penalty -${d.confidenceBreakdown.freshnessPenalty ?? 0}</div>`
+            ? `<div class="tbEmptyState">Participant ${d.confidenceBreakdown.participantPct}% · Market ${d.confidenceBreakdown.marketPct}% · Mismatch penalty -${d.confidenceBreakdown.mismatchPenalty}${d.confidenceBreakdown.completenessPenalty != null ? ` · Completeness penalty -${d.confidenceBreakdown.completenessPenalty}` : ""}${d.confidenceBreakdown.riskPenalty != null ? ` · Risk penalty -${d.confidenceBreakdown.riskPenalty}` : ""} · Freshness penalty -${d.confidenceBreakdown.freshnessPenalty ?? 0}</div>`
             : `<div class="tbEmptyState">Not recorded for this position.</div>`}
     ` : `<div class="tbEmptyState">No breakdown recorded for this position - it was opened before this feature existed.</div>`;
+
+    const passReasonHtml = d.passReason
+        ? `<div class="tbPassReason">${d.passReason}</div>`
+        : `<div class="tbEmptyState">Not recorded for this position - it was opened before this feature existed.</div>`;
+
+    const entryGateHtml = d.entryGateResult
+        ? `<div class="tbEmptyState">Eligible: ${d.entryGateResult.eligible ? "yes" : "no"} · Re-entry: ${d.entryGateResult.isReentry ? "yes" : "no"} · Market data age at decision: ${d.entryGateResult.marketAgeSeconds != null ? Math.round(d.entryGateResult.marketAgeSeconds) + "s" : "—"} · Decay fraction: ${d.entryGateResult.decayFraction ?? "—"} · Token age at entry: ${d.tokenAgeMinutesAtEntry != null ? Math.round(d.tokenAgeMinutesAtEntry) + "m" : "—"}</div>`
+        : `<div class="tbEmptyState">Not recorded for this position - it was opened before this feature existed.</div>`;
+
+    // Production Stabilization V2 (Close Remaining BUY Blind Spots,
+    // Section 5): the real, raw facts behind every score above - lets a
+    // real BUY be fully explained without guessing at what the numbers
+    // were derived from.
+    const f = d.rawFactsAtEntry;
+    const pct = (v) => v != null ? (Number(v) * 100).toFixed(1) + "%" : "—";
+    const rawFactsHtml = f
+        ? `<div class="tbEmptyState">Liquidity ${f.liquidity != null ? fmtUsd(f.liquidity) : "—"} · MC ${f.marketCap != null ? fmtUsd(f.marketCap) : "—"} · Holders ${f.holders ?? "—"} · Rug ratio ${pct(f.rugRatio)} · Top-10 ${pct(f.top10HolderRate)} · Dev balance ${pct(f.developerBalanceRate)} · Sniper hold ${pct(f.sniperHoldRate)} · Bundler MHR ${pct(f.bundlerMhr)} · Insider hold ${pct(f.insiderHoldRate)}</div>`
+        : `<div class="tbEmptyState">Not recorded for this position - it was opened before this feature existed.</div>`;
 
     const timelineHtml = `
         <div class="tbTimeline">
@@ -966,6 +1099,14 @@ function renderPositionDetail(d){
         ${strengthHtml}
         <h4>Weakness (risk)</h4>
         ${weaknessHtml}
+        <h4>Missing evidence</h4>
+        ${missingHtml}
+        <h4>Why this passed</h4>
+        ${passReasonHtml}
+        <h4>Entry gate result</h4>
+        ${entryGateHtml}
+        <h4>Raw facts at entry</h4>
+        ${rawFactsHtml}
         ${breakdownHtml}
         ${siblingsHtml}
     `;
@@ -995,10 +1136,12 @@ function renderTrades(trades){
     }
     const rows = trades.map(t => `
         <tr>
+            <td><span class="tbModeTag tbMode${t.mode}">${t.mode}</span></td>
             <td>${timeAgo(t.closedAt || t.openedAt)}</td>
             <td>${fmtUsd(t.entryPrice)}</td>
             <td>${t.exitPrice != null ? fmtUsd(t.exitPrice) : "—"}</td>
             <td>${t.roiPct != null ? `<span class="tbPill ${t.roiPct >= 0 ? "tbPos" : "tbNeg"}">${fmtPct(t.roiPct)}</span>` : "—"}</td>
+            <td>${t.profitUsd != null ? `<span class="tbPill ${t.profitUsd >= 0 ? "tbPos" : "tbNeg"}">${fmtUsd(t.profitUsd)}</span>` : "—"}</td>
             <td>${fmtUsd(t.feeUsd)}</td>
             <td>${t.slippagePct != null ? fmtPct(t.slippagePct) : "—"}</td>
             <td>${fmtDuration(t.durationSeconds)}</td>
@@ -1009,7 +1152,7 @@ function renderTrades(trades){
     el.innerHTML = `
         <div class="adminTableWrap">
             <table class="adminTable">
-                <thead><tr><th>Time</th><th>Buy</th><th>Sell</th><th>ROI</th><th>Fee</th><th>Slippage</th><th>Duration</th><th>Reason</th><th>Tx Hash</th></tr></thead>
+                <thead><tr><th>Mode</th><th>Time</th><th>Entry</th><th>Exit</th><th>ROI</th><th>Profit</th><th>Fee</th><th>Slippage</th><th>Duration</th><th>Exit Reason</th><th>Transaction</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>
@@ -1050,18 +1193,55 @@ function friendlyLogLine(e){
 // (services/tradingBotEngine.js), so the real log entries themselves
 // already show the bot is alive - nothing synthetic needs to stand in
 // for that anymore.
+// Section L (Activity filters): SYSTEM/BUY/SELL/WARNING/ERROR - the
+// exact real log_type values already written by the backend (see
+// repositories/tradingBotRepository.js's insertLog callers), never a
+// new category invented for the filter UI. Client-side, over whatever
+// bounded page of entries was already fetched - no new API surface.
+// activeLogFilter is module-level state so it survives the 15s auto-
+// refresh re-render (Section F) instead of silently resetting to "All"
+// every tick.
+const LOG_FILTER_TYPES = ["SYSTEM", "BUY", "SELL", "WARNING", "ERROR"];
+let activeLogFilter = "ALL";
+let lastLogEntries = [];
+let lastLogBotIsRunning = false;
+
+function renderLogFilterBar(){
+    const bar = document.getElementById("tbLogFilterBar");
+    if(!bar) return;
+    const counts = { ALL: lastLogEntries.length };
+    for(const type of LOG_FILTER_TYPES) counts[type] = lastLogEntries.filter(e => e.type === type).length;
+    const chips = ["ALL", ...LOG_FILTER_TYPES].map(type => `
+        <button class="tbLogFilterChip ${activeLogFilter === type ? "tbLogFilterActive" : ""}" data-log-filter="${type}" type="button">
+            ${type === "ALL" ? "All" : type} (${counts[type]})
+        </button>
+    `).join("");
+    bar.innerHTML = chips;
+}
+
 function renderLog(entries, botIsRunning){
+    lastLogEntries = entries;
+    lastLogBotIsRunning = botIsRunning;
+    renderLogFilterBar();
     const el = document.getElementById("tbLog");
-    if(!entries.length){
-        el.innerHTML = `<div class="tbEmptyState">${botIsRunning ? "The bot is monitoring the market for new opportunities." : "Start the bot to see activity here."}</div>`;
+    const filtered = activeLogFilter === "ALL" ? entries : entries.filter(e => e.type === activeLogFilter);
+    if(!filtered.length){
+        el.innerHTML = `<div class="tbEmptyState">${entries.length ? `No ${activeLogFilter} activity in the current log.` : (botIsRunning ? "The bot is monitoring the market for new opportunities." : "Start the bot to see activity here.")}</div>`;
         return;
     }
-    el.innerHTML = entries.map(e => `
+    el.innerHTML = filtered.map(e => `
         <div class="tbLogLine">
             <span class="tbLogTime">${e.at}</span><span class="tbLogTag ${e.type}">${e.type}</span>${friendlyLogLine(e)}
         </div>
     `).join("");
 }
+
+document.getElementById("tbLogFilterBar")?.addEventListener("click", (e) => {
+    const filter = e.target.dataset.logFilter;
+    if(!filter) return;
+    activeLogFilter = filter;
+    renderLog(lastLogEntries, lastLogBotIsRunning);
+});
 
 // =====================================
 // CONTROL BUTTONS
@@ -1140,6 +1320,40 @@ async function loadLog(){
     try{ renderLog(await adminFetch("/tradingbot/log"), currentTradingStatus === "RUNNING"); } catch(e){ noData("tbLog"); }
 }
 
+// Production Stabilization V1 (Section F): the dashboard used to only
+// ever refresh once, on page load, plus whenever the user clicked
+// "Refresh Now" - for a bot scanning/trading every 15-60s, that meant
+// prices/ROI/positions could sit visibly stale indefinitely just from
+// leaving the tab open. LIVE_SECTIONS below auto-refresh on a timer;
+// Strategy Profile, Trading Configuration, and the AI Advisor form are
+// deliberately excluded - they hold editable inputs a Founder could be
+// mid-typing into, and a blind full re-render would silently wipe
+// unsaved input. Manual "Refresh Now" still calls the FULL loadAll()
+// (every section, including those three) since that's a deliberate,
+// one-off action, not a background tick.
+const LIVE_REFRESH_INTERVAL_MS = 15000;
+let liveRefreshTimer = null;
+let liveRefreshInFlight = false;
+
+function loadLiveSections(){
+    if(liveRefreshInFlight) return Promise.resolve(); // never stack overlapping ticks if one is still in flight
+    liveRefreshInFlight = true;
+    return Promise.all([
+        loadDecisionCenter(), loadTargetAchievement(), loadMomentumKpi(), loadSelfAudit(),
+        loadBottleneckReport(), loadSystemThroughput(), loadMissedWinners(),
+        loadStatusAndControls(), loadPortfolio(), loadPositions(), loadTrades(), loadLog()
+    ]).finally(() => { liveRefreshInFlight = false; });
+}
+
+function startLiveRefresh(){
+    stopLiveRefresh();
+    liveRefreshTimer = setInterval(loadLiveSections, LIVE_REFRESH_INTERVAL_MS);
+}
+
+function stopLiveRefresh(){
+    if(liveRefreshTimer){ clearInterval(liveRefreshTimer); liveRefreshTimer = null; }
+}
+
 async function loadAll(){
     adminLoading.classList.remove("hidden");
     adminContent.classList.add("hidden");
@@ -1153,6 +1367,7 @@ async function loadAll(){
     adminContent.classList.remove("hidden");
     if(adminLiveDot) adminLiveDot.classList.add("on");
     if(adminLiveText) adminLiveText.textContent = "LIVE";
+    startLiveRefresh();
 }
 
 (function tryAutoResume(){

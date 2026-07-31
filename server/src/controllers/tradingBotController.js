@@ -131,7 +131,7 @@ async function getEquityCurve(req, res, next){
 
 async function start(req, res, next){
     try{
-        const result = tradingBotService.startBot(req.user.id);
+        const result = await tradingBotService.startBot(req.user.id);
         if(!result.ok) return sendError(res, 409, "Cannot start", result.error);
         sendSuccess(res, result.state);
     }
@@ -188,7 +188,7 @@ async function emergencyStop(req, res, next){
 async function setAllocation(req, res, next){
     try{
         const { allocationPct } = req.body || {};
-        const result = tradingBotService.setAllocation(req.user.id, allocationPct);
+        const result = await tradingBotService.setAllocation(req.user.id, allocationPct);
         if(!result.ok) return sendError(res, 400, "Invalid allocation", result.error);
         sendSuccess(res, result.config);
     }

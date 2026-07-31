@@ -18,18 +18,20 @@
 //     by matching the derived public key against
 //     FOUNDER_WALLET_PUBLIC_KEY, not by caller identity.
 //
-// Deposit/Allocation: deposited_balance_usd (this file) and
-// allocation_pct (services/tradingBotService.js's setAllocation) are
-// two distinct, separately-tracked numbers - the user always thinks in
-// percentages, trading_bot_config.initial_capital is always a derived
-// recomputation of the two, never independently settable.
+// Allocation: allocation_pct (services/tradingBotService.js's
+// setAllocation) is a percentage of the REAL on-chain Trading Wallet
+// balance (getRealWalletBalance below) - trading_bot_config.initial_capital
+// is always a derived recomputation of the two, never independently
+// settable.
 //
-// Withdraw follows the exact same safety philosophy as Wallet Change:
-// allowed only when the bot is STOPPED and zero positions are open.
-// Either failing returns a specific error - this file never force-stops
-// the bot, never force-closes a position, never auto-adjusts
-// allocation. See the "Never silently modify user funds or settings"
-// principle in the sprint plan.
+// Production Stabilization V1 (Sections D/E/Q): this file used to also
+// own a self-reported "deposit" ledger (deposited_balance_usd) with its
+// own depositFunds()/withdrawFunds() actions - removed. A real SOL
+// deposit or withdrawal happens on-chain, outside this app entirely;
+// the real balance (getRealWalletBalance) already reflects it on the
+// very next read, with nothing here to keep manually in sync. Removing
+// the two functions closes the exact gap that let the self-reported
+// figure drift from the real wallet balance indefinitely.
 
 const crypto = require("crypto");
 const { Keypair, PublicKey } = require("@solana/web3.js");
@@ -38,7 +40,6 @@ const bs58 = require("bs58");
 const config = require("../config/env");
 const userWalletRepository = require("../repositories/userWalletRepository");
 const tradingWalletRepository = require("../repositories/tradingWalletRepository");
-const tradingBotRepository = require("../repositories/tradingBotRepository");
 // Safe as a top-level require - pure math plus one function taking
 // gmgnClient as a parameter, no requires of its own, so no circular-
 // dependency risk (unlike ./execution below, which requires this file).
@@ -297,7 +298,6 @@ async function getStatus(userId){
         ownerWallet: owner ? { address: owner.wallet_address, verified: Boolean(owner.verified_at) } : null,
         tradingWallet: trading ? {
             publicKey: trading.public_key,
-            depositedBalanceUsd: trading.deposited_balance_usd,
             realSolBalanceLamports: realBalance?.solLamports ?? null,
             realSolAmount: realBalance?.solAmount ?? null,
             realSolUsdPrice: realBalance?.solUsdPrice ?? null,
@@ -307,78 +307,8 @@ async function getStatus(userId){
     };
 }
 
-function depositFunds(userId, amountUsd){
-
-    const amount = Number(amountUsd);
-    if(!Number.isFinite(amount) || amount <= 0){
-        return { ok: false, status: 400, error: "Bad request", details: "amountUsd must be a positive number." };
-    }
-
-    const tradingWallet = tradingWalletRepository.findByUserId(userId);
-    if(!tradingWallet) return { ok: false, status: 403, error: "Forbidden", details: "Generate a Trading Wallet before depositing." };
-
-    const newDeposit = tradingWallet.deposited_balance_usd + amount;
-    tradingWalletRepository.setDepositedBalance(userId, newDeposit);
-
-    // Recomputes initial_capital from the EXISTING allocation_pct - the
-    // percentage itself didn't change, so this must never touch
-    // allocation_set_at (see tradingBotRepository.js's comment on
-    // updateInitialCapital for why).
-    const botConfig = tradingBotRepository.getConfig(userId);
-    const newCapital = newDeposit * botConfig.allocation_pct / 100;
-    tradingBotRepository.updateInitialCapital(userId, newCapital);
-
-    return { ok: true, depositedBalanceUsd: newDeposit };
-
-}
-
-// "Never silently modify user funds or settings" - every precondition
-// below is checked and returns a SPECIFIC error on failure. This
-// function never force-stops the bot, never force-closes a position,
-// never auto-reduces allocation - the user must act first.
-function withdrawFunds(userId, amountUsd){
-
-    const amount = Number(amountUsd);
-    if(!Number.isFinite(amount) || amount <= 0){
-        return { ok: false, status: 400, error: "Bad request", details: "amountUsd must be a positive number." };
-    }
-
-    const tradingWallet = tradingWalletRepository.findByUserId(userId);
-    if(!tradingWallet) return { ok: false, status: 403, error: "Forbidden", details: "No Trading Wallet exists for this account." };
-
-    const state = tradingBotRepository.getState(userId);
-    if(state.status !== "STOPPED"){
-        return { ok: false, status: 409, error: "Conflict", details: "Stop the bot before withdrawing." };
-    }
-
-    if(tradingBotRepository.countOpenPositions(userId) > 0){
-        return { ok: false, status: 409, error: "Conflict", details: "Close all open positions before withdrawing." };
-    }
-
-    // The one remaining hard invariant under the percentage-allocation
-    // model (CRAB User Journey v1) - ordinary solvency. Allocation
-    // itself can never become "invalid" here: it's a % of whatever the
-    // deposit is, so it simply recomputes down below, it never needs
-    // to be rejected or auto-adjusted.
-    if(amount > tradingWallet.deposited_balance_usd){
-        return { ok: false, status: 400, error: "Bad request", details: "Withdrawal exceeds your deposited balance." };
-    }
-
-    const newDeposit = tradingWallet.deposited_balance_usd - amount;
-    tradingWalletRepository.setDepositedBalance(userId, newDeposit);
-
-    // Same reasoning as depositFunds above - recompute only, never
-    // touches allocation_set_at.
-    const botConfig = tradingBotRepository.getConfig(userId);
-    const newCapital = newDeposit * botConfig.allocation_pct / 100;
-    tradingBotRepository.updateInitialCapital(userId, newCapital);
-
-    return { ok: true, depositedBalanceUsd: newDeposit };
-
-}
-
 module.exports = {
     connectWallet, issueOwnershipChallenge, verifyOwnership,
-    generateTradingWallet, importTradingWallet, getStatus, getRealWalletBalance, depositFunds, withdrawFunds,
+    generateTradingWallet, importTradingWallet, getStatus, getRealWalletBalance,
     decryptSecretKey
 };

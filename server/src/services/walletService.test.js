@@ -1,7 +1,9 @@
 // services/walletService.test.js - Trust/UX sprint: getRealWalletBalance()
-// is the real on-chain counterpart to depositedBalanceUsd (a self-
-// reported figure - see the file's own header). These tests cover only
-// the network-free path (no Trading Wallet yet) - exercising the real
+// is the real on-chain balance Production Stabilization V1 later made
+// the ONLY source of Trading Balance (the old self-reported
+// deposited_balance_usd model was removed - see the file's own header).
+// These tests cover only the network-free path (no Trading Wallet yet) -
+// exercising the real
 // RPC/GMGN-quote path would require a real funded keypair and a live
 // network call, out of scope for a fast, offline unit suite. Real
 // end-to-end verification of the RPC/quote path is covered by manual

@@ -53,13 +53,12 @@ function setControlMsg(text, cls){
 // TECHNICAL CONFIGURATION - same fields as the old main-dashboard
 // config form, minus fee_pct (now read-only, see renderFee below) and
 // initial_capital (CRAB User Journey v1 - no longer directly settable
-// here; it's now DERIVED from Trading Wallet deposit x Trading
+// here; it's now DERIVED from the real Trading Wallet balance x Trading
 // Allocation %, see renderBalances below and
-// services/tradingBotService.js's setAllocation()/
-// services/walletService.js's depositFunds()). Leaving it editable
-// here would let a user silently overwrite a value that must always
-// equal deposit x allocation - exactly the "never silently modify"
-// principle this sprint is built around.
+// services/tradingBotService.js's setAllocation()/getTradingConfiguration()).
+// Leaving it editable here would let a user silently overwrite a value
+// that must always match the real wallet - exactly the "never silently
+// modify" principle this sprint is built around.
 // =====================================
 
 const CONFIG_FIELDS = [
@@ -172,20 +171,22 @@ function renderSlippage(c){
 }
 
 // =====================================
-// BALANCES - read-only. CRAB User Journey v1 terminology: "Starting
-// Balance" is what you deposited into the Trading Wallet; "Trading
-// Balance" is what's actually allocated to the bot (deposit x
-// allocation %, see js/onboardingWizard - Phase 6). Both derived
-// elsewhere (Deposit/Withdraw, Trading Allocation) - never editable
-// here, same reasoning as removing initial_capital from CONFIG_FIELDS
-// above.
+// BALANCES - read-only. Production Stabilization V1 (Section Q): only
+// the clean, real-data terms - Real Wallet, Trading Balance, Trading
+// Allocation. The self-reported "Starting Balance" (deposited_balance_usd)
+// is gone - Trading Balance is now always derived from the REAL wallet
+// balance (services/tradingBotService.js's getTradingConfiguration/
+// setAllocation), never a manually-entered figure. The full Real
+// Wallet/Trading Balance/Reserved/Available Cash breakdown lives on the
+// Trading Configuration section of trading-bot.html - this page only
+// needs a quick, consistent-terminology snapshot.
 // =====================================
 
 function renderBalances(walletStatus, botConfig){
-    const depositedBalanceUsd = walletStatus?.tradingWallet?.depositedBalanceUsd ?? 0;
+    const realWalletUsd = walletStatus?.tradingWallet?.realSolUsd ?? null;
     document.getElementById("tbBalances").innerHTML = `
         <div class="adminGrid4">
-            <div class="adminStat"><span>Starting Balance</span><strong>${fmtUsd(depositedBalanceUsd)}</strong></div>
+            <div class="adminStat"><span>Real Wallet</span><strong>${fmtUsd(realWalletUsd)}</strong></div>
             <div class="adminStat"><span>Trading Balance</span><strong>${fmtUsd(botConfig.initial_capital)}</strong></div>
             <div class="adminStat"><span>Trading Allocation</span><strong>${botConfig.allocation_pct}%</strong></div>
         </div>

@@ -22,6 +22,8 @@ const crypto = require("crypto");
 
 const tradingBotService = require("./tradingBotService");
 const userAuthService = require("./userAuthService");
+const walletService = require("./walletService");
+const tradingWalletRepository = require("../repositories/tradingWalletRepository");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
@@ -271,6 +273,118 @@ test("getTradingConfiguration reports honest unavailable wallet state and real s
 
 });
 
+// Monkey-patch-a-required-module technique (same one
+// scheduler/tradingBotScheduler.test.js already uses) - avoids a real
+// RPC/GMGN network call (SOLANA_RPC_URL is genuinely configured in this
+// dev environment), learning directly from this sprint's own hang
+// incident on a similar real-network test.
+function stub(obj, method, fn){
+    const original = obj[method];
+    obj[method] = fn;
+    return () => { obj[method] = original; };
+}
+
+// Production Stabilization V1 (Sections D/E/Q): the self-reported
+// deposited_balance_usd/MANUAL_DEPOSIT fallback is gone -
+// getTradingConfiguration must sync Trading Balance (initial_capital)
+// from the REAL wallet balance and persist it (write-through), not just
+// return it in-memory.
+test("getTradingConfiguration syncs Trading Balance from a real wallet balance (write-through) and never reports MANUAL_DEPOSIT", async () => {
+
+    const testEmail = `tradingbotservice.test.realbal.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const rbUserId = registerResult.userId;
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        solLamports: 1666666667, solAmount: 1.666666667, solUsdPrice: 150, solUsd: 250, unavailableReason: null
+    }));
+
+    try{
+
+        const tc = await tradingBotService.getTradingConfiguration(rbUserId);
+
+        assert.equal(tc.walletBalanceSource, "REAL");
+        assert.equal(tc.walletBalanceUsd, 250);
+        // default allocation_pct is 100% - must equal the real $250, a
+        // DIFFERENT number than the untouched default initial_capital
+        // (100), proving this actually synced rather than coincidentally
+        // matching a leftover default.
+        assert.equal(tc.tradingAllocationUsd, 250);
+
+        const configRow = tradingBotRepository.getConfig(rbUserId);
+        assert.equal(configRow.initial_capital, 250, "initial_capital must be PERSISTED (write-through), not just returned in-memory");
+
+    }
+    finally{
+        restore();
+        deleteTestUser(rbUserId);
+    }
+
+});
+
+// Production Stabilization V1 (Sections D/E/Q): setAllocation's basis is
+// now the real wallet balance, never tradingWallet.deposited_balance_usd
+// (removed).
+test("setAllocation computes Trading Balance from the real wallet balance, never a deposit figure", async () => {
+
+    const testEmail = `tradingbotservice.test.alloc.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const allocUserId = registerResult.userId;
+
+    tradingWalletRepository.insertWallet({ userId: allocUserId, publicKey: `FakeAllocWallet${crypto.randomBytes(4).toString("hex")}`, encryptedPrivateKey: "unused" });
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        solLamports: 1000000000, solAmount: 1, solUsdPrice: 300, solUsd: 300, unavailableReason: null
+    }));
+
+    try{
+
+        const result = await tradingBotService.setAllocation(allocUserId, 40);
+        assert.equal(result.ok, true);
+        assert.equal(result.config.allocation_pct, 40);
+        assert.equal(result.config.initial_capital, 120, "40% of a real $300 wallet balance, never a deposit-derived figure");
+
+    }
+    finally{
+        restore();
+        deleteTestUser(allocUserId);
+    }
+
+});
+
+// Never fabricate a Trading Balance when no real balance exists yet -
+// the Founder can still set an allocation % ahead of funding their
+// wallet, it just starts at $0 until a real balance is available.
+test("setAllocation writes initial_capital: 0 (never fabricated) when no real balance is available yet", async () => {
+
+    const testEmail = `tradingbotservice.test.alloc2.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const allocUserId = registerResult.userId;
+
+    tradingWalletRepository.insertWallet({ userId: allocUserId, publicKey: `FakeAllocWalletNone${crypto.randomBytes(4).toString("hex")}`, encryptedPrivateKey: "unused" });
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        solLamports: null, solAmount: null, solUsdPrice: null, solUsd: null, unavailableReason: "RPC balance read failed (simulated)"
+    }));
+
+    try{
+
+        const result = await tradingBotService.setAllocation(allocUserId, 50);
+        assert.equal(result.ok, true);
+        assert.equal(result.config.allocation_pct, 50);
+        assert.equal(result.config.initial_capital, 0);
+
+    }
+    finally{
+        restore();
+        deleteTestUser(allocUserId);
+    }
+
+});
+
 test("a smuggled bundle-field override alongside a profile switch never wins over the real bundle", () => {
     const result = tradingBotService.updateConfig(userId, { strategy_profile: "STABLE", min_confidence: 999, opportunity_priority_enabled: 1 });
     assert.equal(result.ok, true);
@@ -293,7 +407,7 @@ test("global fields (not profile-owned) remain directly settable regardless of p
     tradingBotService.updateConfig(userId, { scan_interval_seconds: before.scan_interval_seconds }); // restore
 });
 
-test("bot state/config are scoped per user - a second user never sees the first's settings", () => {
+test("bot state/config are scoped per user - a second user never sees the first's settings", async () => {
     const otherEmail = `tradingbotservice.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const otherResult = userAuthService.register(null, otherEmail, "test-password-12345");
     assert.equal(otherResult.ok, true);
@@ -304,7 +418,7 @@ test("bot state/config are scoped per user - a second user never sees the first'
         const otherConfig = tradingBotService.getConfig(otherUserId);
         assert.equal(otherConfig.strategy_profile, "STABLE"); // untouched default, not AGGRESSIVE
 
-        tradingBotService.startBot(userId);
+        await tradingBotService.startBot(userId);
         const otherState = tradingBotService.getStatusBar(otherUserId);
         assert.equal(otherState.tradingStatus, "STOPPED"); // untouched, unaffected by userId's start
         tradingBotService.stopBot(userId);
@@ -409,6 +523,11 @@ test("getTrades() builds a real explorer URL when tx_hash is present, stays null
     assert.equal(withoutHash.txHash, null);
     assert.equal(withoutHash.txExplorerUrl, null);
 
+    // Section K (Trade History): real dollar profit, net of fees - size_usd
+    // 10 * roi_pct 10% = 1, minus fee_usd 0.2 = 0.8. Same formula
+    // sumClosedTrades() uses for the Portfolio's own realizedPnl.
+    assert.equal(Number(withHash.profitUsd.toFixed(2)), 0.8);
+
 });
 
 test("getPositionDetail returns null for a nonexistent/other-user's position - never a fake row", () => {
@@ -469,6 +588,55 @@ test("getPositionDetail exposes Strength/Weakness and a real Confidence Breakdow
     assert.equal(detail.confidenceBreakdown.marketPct, 60);
     assert.equal(detail.confidenceBreakdown.freshnessPenalty, 2.5);
     assert.ok(detail.confidenceBreakdown.mismatchPenalty > 0); // real |70-60| mismatch, never zero when scores genuinely differ
+
+});
+
+// False Positive Reduction V2, Priority 5: a position opened AFTER this
+// sprint persists its own real, full confidenceBreakdown (with
+// completeness/risk penalties the old re-derivation could never see) plus
+// missingEvidence and a real passReason narrative - all surfaced verbatim,
+// never re-derived or guessed.
+test("getPositionDetail prefers the persisted confidenceBreakdown and surfaces missingEvidence/passReason when present", () => {
+
+    const positionId = insertTestOpenPosition(userId, "TestTokenEvidenceV2111");
+    db.prepare("UPDATE trading_bot_positions SET breakdown_json = ? WHERE id = ?").run(
+        JSON.stringify({
+            breakdown: { participant: {}, market: {} },
+            reasons: ["Net accumulation detected"],
+            riskReasons: ["Snipers hold 32% of top holdings"],
+            acceleration: null,
+            participantScore: 62, participantMax: 100, marketHealth: 55, marketHealthMax: 100,
+            freshnessPenalty: 0,
+            missingEvidence: ["Smart-money trade activity", "KOL trade activity"],
+            confidenceBreakdown: { value: 38, blended: 59, mismatchPenalty: 2.8, completenessPenalty: 12, freshnessPenalty: 0, riskPenalty: 8 },
+            passReason: "Action tier BUY at participantScore 62/100. Confidence 38 (floor 45). Risk classified MEDIUM (HIGH is hard-rejected before a BUY can ever reach this point). Evidence not available for this token: Smart-money trade activity, KOL trade activity."
+        }),
+        positionId
+    );
+
+    const detail = tradingBotService.getPositionDetail(userId, positionId);
+
+    assert.deepEqual(detail.missingEvidence, ["Smart-money trade activity", "KOL trade activity"]);
+    assert.ok(detail.passReason.includes("participantScore 62/100"));
+    assert.ok(detail.passReason.includes("Confidence 38 (floor 45)"));
+
+    // The real persisted breakdown - including completeness/risk penalties
+    // the old re-derivation-only path never had - must be used verbatim,
+    // not silently recomputed into a thinner shape.
+    assert.equal(detail.confidenceBreakdown.completenessPenalty, 12);
+    assert.equal(detail.confidenceBreakdown.riskPenalty, 8);
+    assert.equal(detail.confidenceBreakdown.mismatchPenalty, 2.8);
+    assert.equal(detail.confidenceBreakdown.participantPct, 62);
+    assert.equal(detail.confidenceBreakdown.marketPct, 55);
+
+});
+
+test("getPositionDetail reports missingEvidence: [] and passReason: null for a legacy position predating this sprint", () => {
+
+    const positionId = insertTestOpenPosition(userId, "TestTokenEvidenceLegacy111");
+    const detail = tradingBotService.getPositionDetail(userId, positionId);
+    assert.deepEqual(detail.missingEvidence, []);
+    assert.equal(detail.passReason, null);
 
 });
 
@@ -591,8 +759,12 @@ test("getMomentumKpi computes real holding time/throughput and a real avgRankAtE
         db.prepare("UPDATE trading_bot_positions SET rank_at_entry = 2 WHERE id = ?").run(positionId);
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
 
+        // Production Hotfix V1.1, Section 5: getMomentumKpi is now
+        // LIVE-only (Founder Live Trading evaluation must never count a
+        // SIMULATION-mode paper trade) - a fake but real-shaped
+        // closeExecutionId is what marks this as a genuine LIVE close.
         tradingBotRepository.closePosition(kpiUserId, position, {
-            exitPrice: 1.1, roiPct: 10, feeUsd: 0.1, slippagePct: 0, durationSeconds: 600, reason: "SELL_MANUAL"
+            exitPrice: 1.1, roiPct: 10, feeUsd: 0.1, slippagePct: 0, durationSeconds: 600, reason: "SELL_MANUAL", closeExecutionId: 999001
         });
 
         const kpi = tradingBotService.getMomentumKpi(kpiUserId);
@@ -600,7 +772,8 @@ test("getMomentumKpi computes real holding time/throughput and a real avgRankAtE
         assert.equal(kpi.avgHoldingTimeSeconds, 600);
         assert.equal(kpi.avgRankAtEntry, 2);
         assert.ok(kpi.tradesPerHour > 0);
-        // No real execution behind this SIMULATION-style trade - honestly N/A, not zero
+        // avgTimeToSellSeconds measures a different, narrower real-execution
+        // timing signal not populated by this fixture - honestly N/A, not zero
         assert.equal(kpi.avgTimeToSellSeconds, null);
         assert.equal(kpi.avgTimeToSellSampleSize, 0);
     }
@@ -631,11 +804,15 @@ test("getMomentumKpi computes a real avgEntryDelaySeconds and avgTimeToPeakSecon
             .run(kpiUserId, tokenAddress);
 
         const positionId = insertTestOpenPosition(kpiUserId, tokenAddress);
-        db.prepare("UPDATE trading_bot_positions SET opened_at = datetime('now', '-10 minutes'), mfe_pct = 15, mfe_at = datetime('now', '-3 minutes') WHERE id = ?").run(positionId);
+        // Production Hotfix V1.1, Section 5: findEntryDelayValues/
+        // findTimeToPeakValues are now LIVE-only (position.execution_id
+        // IS NOT NULL) - a fake but real-shaped id marks this fixture as
+        // a genuine LIVE position, matching what this test means to prove.
+        db.prepare("UPDATE trading_bot_positions SET opened_at = datetime('now', '-10 minutes'), mfe_pct = 15, mfe_at = datetime('now', '-3 minutes'), execution_id = 999002 WHERE id = ?").run(positionId);
 
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         tradingBotRepository.closePosition(kpiUserId, position, {
-            exitPrice: 1.15, roiPct: 15, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason: "MOMENTUM_WEAKENING"
+            exitPrice: 1.15, roiPct: 15, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason: "MOMENTUM_WEAKENING", closeExecutionId: 999003
         });
 
         const kpi = tradingBotService.getMomentumKpi(kpiUserId);
@@ -748,6 +925,12 @@ test("getSelfAudit categorizes real close reasons correctly and reports honest z
     assert.equal(registerResult.ok, true);
     const auditUserId = registerResult.userId;
 
+    // Production Hotfix V1.1, Section 5: getSelfAudit's underlying
+    // findTradesClosedSince is now LIVE-only (close_execution_id IS NOT
+    // NULL) - every trade this helper closes needs a fake but
+    // real-shaped closeExecutionId to count, matching what this test
+    // means to prove about real trading activity.
+    let fakeExecutionIdSeq = 999100;
     function openAndClose(tokenAddress, reason, roiPct, rankAtEntry){
         const positionId = tradingBotRepository.insertPosition(auditUserId, {
             tokenAddress, tokenSymbol: "AUD", entryPrice: 1.0, sizeUsd: 10, confidence: 60,
@@ -757,7 +940,7 @@ test("getSelfAudit categorizes real close reasons correctly and reports honest z
         });
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         tradingBotRepository.closePosition(auditUserId, position, {
-            exitPrice: 1 + roiPct / 100, roiPct, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason
+            exitPrice: 1 + roiPct / 100, roiPct, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason, closeExecutionId: fakeExecutionIdSeq++
         });
     }
 
@@ -813,6 +996,9 @@ test("getSelfAudit reports a windowed avgEntryDelaySeconds and missedWinnerCount
         db.prepare("UPDATE trading_bot_candidate_sightings SET first_seen_at = datetime('now', '-10 minutes') WHERE user_id = ? AND token_address = ?")
             .run(auditUserId, tokenAddress);
         const positionId = insertTestOpenPosition(auditUserId, tokenAddress);
+        // Production Hotfix V1.1, Section 5: findEntryDelayValuesSince is
+        // now LIVE-only (position.execution_id IS NOT NULL).
+        db.prepare("UPDATE trading_bot_positions SET execution_id = 999200 WHERE id = ?").run(positionId);
 
         // A real, evaluated missed-opportunity outcome, well inside a 24h window.
         tradingBotMissedOpportunityRepository.upsertPending(auditUserId, {
@@ -862,11 +1048,12 @@ test("getSystemThroughput computes real per-cycle averages and per-hour rates fr
         tradingBotRepository.insertEquitySnapshot(throughputUserId, 100, 2, 30);
         tradingBotRepository.insertEquitySnapshot(throughputUserId, 105, 4, 10);
 
-        // One real closed trade.
+        // One real closed trade. Production Hotfix V1.1, Section 5:
+        // findTradesClosedSince is now LIVE-only.
         const positionId = insertTestOpenPosition(throughputUserId, "ThroughputToken111");
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         tradingBotRepository.closePosition(throughputUserId, position, {
-            exitPrice: 1.1, roiPct: 10, feeUsd: 0.1, slippagePct: 0, durationSeconds: 900, reason: "SELL_MANUAL"
+            exitPrice: 1.1, roiPct: 10, feeUsd: 0.1, slippagePct: 0, durationSeconds: 900, reason: "SELL_MANUAL", closeExecutionId: 999300
         });
 
         // One real cycle-summary log row with a real qualifiedCount.
@@ -955,4 +1142,119 @@ test.after(() => {
     // remove the disposable test user/bot rows this suite created.
     tradingBotService.updateConfig(userId, { strategy_profile: "STABLE" });
     deleteTestUser(userId);
+});
+
+// Section J (Open Position fields): SL/TP must be the position's own
+// real stored risk bands, dynamicState must reflect real ROI vs the
+// real MIN_TP_PCT floor, and priceUpdatedAt/nextEvaluationAtEstimate
+// must be real/derived, never fabricated.
+test("getOpenPositions surfaces real SL/TP, a real dynamicState, and a real priceUpdatedAt-derived next evaluation estimate", async () => {
+
+    const testEmail = `tradingbotservice.test.openpos.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const opUserId = registerResult.userId;
+
+    try{
+
+        const belowTargetId = tradingBotRepository.insertPosition(opUserId, {
+            tokenAddress: "TestOpenPosBelow111", tokenSymbol: "BELOW",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.15, targetMarketCap: null, stopLossPrice: 0.85, stopLossMarketCap: null
+        });
+        // +5% - real ROI, still below the real MIN_TP_PCT (15) floor.
+        tradingBotRepository.updatePositionTracking(belowTargetId, { currentPrice: 1.05, mfePct: 5, maePct: 0, lastVolume1h: null });
+
+        const trailingId = tradingBotRepository.insertPosition(opUserId, {
+            tokenAddress: "TestOpenPosTrailing111", tokenSymbol: "TRAIL",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.15, targetMarketCap: null, stopLossPrice: 0.85, stopLossMarketCap: null
+        });
+        // +20% - real ROI, above the real MIN_TP_PCT floor.
+        tradingBotRepository.updatePositionTracking(trailingId, { currentPrice: 1.20, mfePct: 20, maePct: 0, lastVolume1h: null });
+
+        const positions = tradingBotService.getOpenPositions(opUserId);
+        const below = positions.find(p => p.id === belowTargetId);
+        const trailing = positions.find(p => p.id === trailingId);
+
+        assert.equal(below.stopLossPrice, 0.85);
+        assert.equal(below.targetPrice, 1.15);
+        assert.equal(below.dynamicState, "BELOW_TARGET");
+        assert.ok(below.priceUpdatedAt, "priceUpdatedAt must be a real timestamp once updatePositionTracking has run");
+        assert.ok(below.nextEvaluationAtEstimate, "must be a real, derived estimate, not null, once priceUpdatedAt exists");
+        assert.ok(new Date(below.nextEvaluationAtEstimate).getTime() > new Date(below.priceUpdatedAt.replace(" ", "T") + "Z").getTime());
+
+        assert.equal(trailing.dynamicState, "TRAILING_ABOVE_TARGET");
+
+    }
+    finally{
+        deleteTestUser(opUserId);
+    }
+
+});
+
+// Production Hotfix V1.1, Section 5: a SIMULATION-mode paper trade must
+// never count toward Momentum KPI / Self-Audit / System Throughput
+// (Founder Live Trading evaluation surfaces), while a real LIVE trade
+// does - both trades are otherwise identical (same ROI, same reason).
+test("a SIMULATION trade never counts toward Momentum KPI/Self-Audit, a LIVE trade does", () => {
+
+    const testEmail = `tradingbotservice.test.simsep.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        // A SIMULATION trade - no execution_id anywhere, exactly what a
+        // real paper trade (or a stray position auto-closed on a
+        // SIMULATION->LIVE mode switch, see Production Stabilization V1's
+        // own validation report) looks like.
+        const simPositionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestSimSepSim111", tokenSymbol: "SIMSEP", entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.2, targetMarketCap: null, stopLossPrice: 0.9, stopLossMarketCap: null
+        });
+        const simPosition = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(simPositionId);
+        tradingBotRepository.closePosition(userId, simPosition, {
+            exitPrice: 0.5, roiPct: -50, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason: "SELL_EXTERNAL"
+        });
+
+        // A real LIVE trade - a real (if fake-numbered, for this test)
+        // execution_id on both the position and the close.
+        const livePositionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestSimSepLive111", tokenSymbol: "LIVESEP", entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.2, targetMarketCap: null, stopLossPrice: 0.9, stopLossMarketCap: null,
+            executionId: 999400
+        });
+        const livePosition = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(livePositionId);
+        tradingBotRepository.closePosition(userId, livePosition, {
+            exitPrice: 1.1, roiPct: 10, feeUsd: 0.1, slippagePct: 0, durationSeconds: 300, reason: "SELL_MANUAL", closeExecutionId: 999401
+        });
+
+        const kpi = tradingBotService.getMomentumKpi(userId);
+        assert.equal(kpi.totalTrades, 1, "only the LIVE trade counts toward Momentum KPI");
+
+        const audit = tradingBotService.getSelfAudit(userId, 24);
+        assert.equal(audit.closed, 1, "only the LIVE trade counts toward Self-Audit");
+        assert.equal(audit.manual, 1);
+        assert.equal(audit.external, 0, "the SIMULATION SELL_EXTERNAL close must not be counted at all, real or otherwise");
+
+        // Trade History (the LIST view) still shows BOTH, but each row is
+        // now clearly labeled - nothing is hidden, just never blended
+        // unlabeled into an aggregate.
+        const trades = tradingBotService.getTrades(userId, 10);
+        const simRow = trades.find(t => t.tokenSymbol === "SIMSEP");
+        const liveRow = trades.find(t => t.tokenSymbol === "LIVESEP");
+        assert.equal(simRow.mode, "SIMULATION");
+        assert.equal(liveRow.mode, "LIVE");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
 });

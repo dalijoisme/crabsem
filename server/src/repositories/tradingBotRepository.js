@@ -182,19 +182,19 @@ function updateConfig(userId, partial){
 // it derives are owned exclusively by this function, never the generic
 // updateConfig/CONFIG_FIELDS path above (the same "only via its own
 // flow" convention strategy_profile-owned fields already follow).
-// initial_capital is passed in pre-computed (deposited_balance_usd *
-// allocation_pct / 100) by services/tradingBotService.js's
+// initial_capital is passed in pre-computed (real wallet balance x
+// allocation_pct / 100, Production Stabilization V1 - previously the
+// self-reported deposited_balance_usd) by services/tradingBotService.js's
 // setAllocation() - this repository never does that arithmetic
 // itself, so there is exactly one place (the service layer) that ever
 // computes it.
 //
 // allocation_set_at is stamped here ONLY - this function is called
 // exclusively from the explicit setAllocation() action (the user
-// actually choosing a percentage), never from a deposit/withdraw-
-// triggered recompute (see updateInitialCapital below, which those use
-// instead) - stamping it here would otherwise falsely mark "the user
-// confirmed their allocation" every time they just deposited more
-// money, which they didn't do.
+// actually choosing a percentage), never from the periodic real-balance
+// resync (see updateInitialCapital below, which that uses instead) -
+// stamping it here would otherwise falsely mark "the user confirmed
+// their allocation" every time their real wallet balance simply moved.
 const setAllocationStmt = db.prepare(`
     UPDATE trading_bot_config SET allocation_pct = @allocationPct, initial_capital = @initialCapital, allocation_set_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
     WHERE user_id = @userId
@@ -205,8 +205,10 @@ function setAllocationAndCapital(userId, allocationPct, initialCapital){
     return getConfig(userId);
 }
 
-// Deposit/withdraw (services/walletService.js) recompute initial_capital
-// from the EXISTING allocation_pct - the percentage itself didn't
+// services/tradingBotService.js's getTradingConfiguration() write-through
+// and scheduler/walletBalanceSyncScheduler.js's periodic sync both
+// recompute initial_capital from the EXISTING allocation_pct against a
+// freshly-read real wallet balance - the percentage itself didn't
 // change, so allocation_set_at must not be touched here (see the
 // comment above setAllocationStmt for why).
 const updateInitialCapitalStmt = db.prepare(`
@@ -334,27 +336,29 @@ const insertPositionStmt = db.prepare(`
         confidence, exit_strategy, engine_version,
         target_price, target_market_cap, stop_loss_price, stop_loss_market_cap,
         last_volume_1h, status, execution_id, breakdown_json,
-        rank_at_entry, priority_score_at_entry, risk, siblings_json
+        rank_at_entry, priority_score_at_entry, risk, siblings_json, config_snapshot_json
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @entryPrice, @sizeUsd,
         @confidence, @exitStrategy, @engineVersion,
         @targetPrice, @targetMarketCap, @stopLossPrice, @stopLossMarketCap,
         @lastVolume1h, 'OPEN', @executionId, @breakdownJson,
-        @rankAtEntry, @priorityScoreAtEntry, @risk, @siblingsJson
+        @rankAtEntry, @priorityScoreAtEntry, @risk, @siblingsJson, @configSnapshotJson
     )
 `);
 
 // executionId (migration 046), breakdownJson (migration 047),
-// rankAtEntry/priorityScoreAtEntry/risk (migration 048), and
-// siblingsJson (migration 051) are nullable and default to null here -
-// only services/tradeManager.js's real per-cycle path ever passes them;
-// every SIMULATION-mode/benchmark/ab-test caller (whose signal stubs
-// never set live.breakdown/rankAtEntry/risk/siblings) keeps writing
-// null, exactly as before either column existed.
+// rankAtEntry/priorityScoreAtEntry/risk (migration 048),
+// siblingsJson (migration 051), and configSnapshotJson (migration 056)
+// are nullable and default to null here - only services/tradeManager.js's
+// real per-cycle path ever passes them; every SIMULATION-mode/benchmark/
+// ab-test caller (whose signal stubs never set
+// live.breakdown/rankAtEntry/risk/siblings, and whose config isn't a real
+// trading_bot_config row) keeps writing null, exactly as before either
+// column existed.
 function insertPosition(userId, row){
     const info = insertPositionStmt.run({
         lastVolume1h: null, executionId: null, breakdownJson: null,
-        rankAtEntry: null, priorityScoreAtEntry: null, risk: null, siblingsJson: null,
+        rankAtEntry: null, priorityScoreAtEntry: null, risk: null, siblingsJson: null, configSnapshotJson: null,
         ...row, userId
     });
     return info.lastInsertRowid;
@@ -363,7 +367,8 @@ function insertPosition(userId, row){
 const updatePositionTrackingStmt = db.prepare(`
     UPDATE trading_bot_positions
     SET current_price = @currentPrice, mfe_pct = @mfePct, mae_pct = @maePct, last_volume_1h = @lastVolume1h,
-        mfe_at = @mfeAt, mae_at = @maeAt, crossed_5pct_at = @crossed5pctAt, crossed_10pct_at = @crossed10pctAt
+        mfe_at = @mfeAt, mae_at = @maeAt, crossed_5pct_at = @crossed5pctAt, crossed_10pct_at = @crossed10pctAt,
+        price_updated_at = CURRENT_TIMESTAMP
     WHERE id = @id
 `);
 
@@ -382,8 +387,25 @@ function updatePositionTracking(id, { currentPrice, mfePct, maePct, lastVolume1h
     });
 }
 
+// Production Stabilization V1 Final Sprint (Section I - Scheduler
+// Safety): the WHERE clause below used to be a bare `WHERE id = ?`, with
+// no status guard - closePosition() was NOT idempotent. The scheduler's
+// own automatic closeIfDue() and the dashboard's manual forceSellAll/
+// sellPosition (services/tradingBotService.js) are two genuinely
+// independent call paths with no shared lock between them; if both
+// reached the same OPEN position within the same real on-chain balance-
+// check window (a real, awaited RPC round-trip, not instant), both could
+// call closePosition() for the same position.id - the old UPDATE would
+// silently re-fire for the second caller too, and insertTradeStmt below
+// ran UNCONDITIONALLY regardless of whether the UPDATE actually changed
+// anything, meaning a second call inserted a genuine DUPLICATE
+// trading_bot_trades row (double-counted in Trade History, ROI/KPI
+// aggregates, everywhere). `AND status = 'OPEN'` makes the UPDATE itself
+// the real idempotency guard - a database CAN only transition a row
+// from OPEN to CLOSED once, and closePosition() below now checks
+// info.changes to know whether THIS call was the one that actually did it.
 const closePositionStmt = db.prepare(`
-    UPDATE trading_bot_positions SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP WHERE id = ?
+    UPDATE trading_bot_positions SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'OPEN'
 `);
 
 const insertTradeStmt = db.prepare(`
@@ -404,9 +426,17 @@ const insertTradeStmt = db.prepare(`
 // null, exactly as before these columns existed. openExecutionId comes
 // from the position's own execution_id (the BUY that opened it);
 // closeExecutionId and txHash describe the SELL that's closing it now.
+// Returns { closed: boolean } - false when this exact position was
+// already CLOSED by a concurrent caller (the real, idempotent guard is
+// closePositionStmt's own `AND status = 'OPEN'`, checked here via
+// info.changes) - the trade row is only ever inserted once, by whichever
+// caller's UPDATE genuinely won the race, never by both.
 function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason, txHash, closeExecutionId }){
+    let closed = false;
     const tx = db.transaction(() => {
-        closePositionStmt.run(position.id);
+        const info = closePositionStmt.run(position.id);
+        closed = info.changes > 0;
+        if(!closed) return; // already closed by a concurrent caller - never a duplicate trade row
         insertTradeStmt.run({
             userId,
             tokenAddress: position.token_address,
@@ -432,6 +462,7 @@ function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePc
         });
     });
     tx();
+    return { closed };
 }
 
 function findRecentTrades(userId, limit){
@@ -442,8 +473,19 @@ function findRecentTrades(userId, limit){
 // Time / Trades Per Hour / Closes Per Hour are all real GROUP BY-style
 // arithmetic over opened_at/closed_at/duration_seconds, already fully
 // populated columns, no new computation needed.
+//
+// Production Hotfix V1.1, Section 5: LIVE-only - close_execution_id
+// IS NOT NULL is the same real signal (Production Stabilization V1)
+// that already distinguishes a genuine real on-chain close from a
+// SIMULATION-mode paper trade. This function feeds Momentum KPI, an
+// explicit "Founder Live Trading evaluation" surface - a virtual
+// SIMULATION trade (however realistic its own ROI% looks) must never
+// count toward it. sumClosedTrades()/sumOpenPositions() below are
+// DELIBERATELY left untouched - those feed getPortfolio(), the
+// engine's own real-time ledger, which must keep reflecting a
+// SIMULATION account's own paper P&L correctly regardless of mode.
 function findAllTradesChronological(userId){
-    return db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY opened_at ASC").all(userId);
+    return db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND close_execution_id IS NOT NULL ORDER BY opened_at ASC").all(userId);
 }
 
 // Average Rank At Entry (Momentum KPI sprint) - real rank_at_entry values
@@ -451,12 +493,14 @@ function findAllTradesChronological(userId){
 // 049). Only ever non-null for a position opened after both migrations
 // AND while Opportunity Priority was actually enabled for that cycle -
 // every other trade is correctly excluded here, never counted as rank 0.
+// LIVE-only (Production Hotfix V1.1, Section 5) - see the comment above
+// findAllTradesChronological for why.
 function findRankAtEntryValues(userId){
     return db.prepare(`
         SELECT p.rank_at_entry as rankAtEntry
         FROM trading_bot_trades t
         JOIN trading_bot_positions p ON p.id = t.position_id
-        WHERE t.user_id = ? AND p.rank_at_entry IS NOT NULL
+        WHERE t.user_id = ? AND p.rank_at_entry IS NOT NULL AND t.close_execution_id IS NOT NULL
     `).all(userId);
 }
 
@@ -467,24 +511,29 @@ function findRankAtEntryValues(userId){
 // populated going forward, for positions opened after this sprint's
 // sightings table started recording - never backfilled or guessed for
 // older positions, which simply have no matching sighting row.
+// LIVE-only (Production Hotfix V1.1, Section 5) - see the comment above
+// findAllTradesChronological for why (p.execution_id, the position's
+// own real-execution marker, is the position-level equivalent of a
+// trade's close_execution_id).
 function findEntryDelayValues(userId){
     return db.prepare(`
         SELECT (julianday(p.opened_at) - julianday(s.first_seen_at)) * 86400 as delaySeconds
         FROM trading_bot_positions p
         JOIN trading_bot_candidate_sightings s ON s.user_id = p.user_id AND s.token_address = p.token_address
-        WHERE p.user_id = ?
+        WHERE p.user_id = ? AND p.execution_id IS NOT NULL
     `).all(userId);
 }
 
 // Phase 2 (Live Validation & Bottleneck Elimination): same real join,
 // scoped to positions opened within a rolling window - "dalam 1 jam,
 // berapa Average Entry Delay" needs this, not the all-time figure.
+// LIVE-only (Production Hotfix V1.1, Section 5).
 function findEntryDelayValuesSince(userId, hours){
     return db.prepare(`
         SELECT (julianday(p.opened_at) - julianday(s.first_seen_at)) * 86400 as delaySeconds
         FROM trading_bot_positions p
         JOIN trading_bot_candidate_sightings s ON s.user_id = p.user_id AND s.token_address = p.token_address
-        WHERE p.user_id = ? AND datetime(p.opened_at) >= datetime('now', '-' || ? || ' hours')
+        WHERE p.user_id = ? AND p.execution_id IS NOT NULL AND datetime(p.opened_at) >= datetime('now', '-' || ? || ' hours')
     `).all(userId, hours);
 }
 
@@ -493,23 +542,24 @@ function findEntryDelayValuesSince(userId, hours){
 // new peak was set, migration 048/051) - works for both still-OPEN and
 // CLOSED positions. Only positions that ever recorded a real positive
 // excursion have a non-null mfe_at - never guessed for the rest.
+// LIVE-only (Production Hotfix V1.1, Section 5).
 function findTimeToPeakValues(userId){
     return db.prepare(`
         SELECT (julianday(mfe_at) - julianday(opened_at)) * 86400 as delaySeconds
         FROM trading_bot_positions
-        WHERE user_id = ? AND mfe_at IS NOT NULL
+        WHERE user_id = ? AND mfe_at IS NOT NULL AND execution_id IS NOT NULL
     `).all(userId);
 }
 
 // Self-Audit / Performance Report (Momentum Validation System sprint):
 // same real rank_at_entry join as above, scoped to trades closed within
-// the rolling window.
+// the rolling window. LIVE-only (Production Hotfix V1.1, Section 5).
 function findRankAtEntryValuesSince(userId, hours){
     return db.prepare(`
         SELECT p.rank_at_entry as rankAtEntry
         FROM trading_bot_trades t
         JOIN trading_bot_positions p ON p.id = t.position_id
-        WHERE t.user_id = ? AND p.rank_at_entry IS NOT NULL
+        WHERE t.user_id = ? AND p.rank_at_entry IS NOT NULL AND t.close_execution_id IS NOT NULL
           AND datetime(t.closed_at) >= datetime('now', '-' || ? || ' hours')
     `).all(userId, hours);
 }
@@ -525,18 +575,23 @@ function findRecentLog(userId, limit){
 // Self-Audit / Performance Report (Momentum Validation System sprint):
 // every real trade CLOSED within the rolling window - the proven
 // datetime(col) >= datetime('now', '-N hours') convention already used
-// by 5 other repositories in this codebase, no new date-math.
+// by 5 other repositories in this codebase, no new date-math. LIVE-only
+// (Production Hotfix V1.1, Section 5) - see the comment above
+// findAllTradesChronological for why.
 function findTradesClosedSince(userId, hours){
     return db.prepare(`
         SELECT * FROM trading_bot_trades
-        WHERE user_id = ? AND datetime(closed_at) >= datetime('now', '-' || ? || ' hours')
+        WHERE user_id = ? AND close_execution_id IS NOT NULL AND datetime(closed_at) >= datetime('now', '-' || ? || ' hours')
     `).all(userId, hours);
 }
 
+// LIVE-only (Production Hotfix V1.1, Section 5) - "how many positions
+// did we really open" for Founder Live Trading evaluation must never
+// count a SIMULATION-mode paper position.
 function countPositionsOpenedSince(userId, hours){
     return db.prepare(`
         SELECT COUNT(*) as c FROM trading_bot_positions
-        WHERE user_id = ? AND datetime(opened_at) >= datetime('now', '-' || ? || ' hours')
+        WHERE user_id = ? AND execution_id IS NOT NULL AND datetime(opened_at) >= datetime('now', '-' || ? || ' hours')
     `).get(userId, hours).c;
 }
 
@@ -657,9 +712,11 @@ function computeMaxDrawdownPct(userId){
 const deleteDecisionSnapshotStmt = db.prepare("DELETE FROM trading_bot_decision_snapshot WHERE user_id = ?");
 const insertDecisionSnapshotStmt = db.prepare(`
     INSERT INTO trading_bot_decision_snapshot (
-        user_id, token_address, token_symbol, action, confidence, risk, tier, rank, priority_score, reasons_json
+        user_id, token_address, token_symbol, action, confidence, risk, tier, rank, priority_score, reasons_json, target_price,
+        market_age_seconds, last_snapshot_at, decision_time, snapshot_source
     ) VALUES (
-        @userId, @tokenAddress, @tokenSymbol, @action, @confidence, @risk, @tier, @rank, @priorityScore, @reasonsJson
+        @userId, @tokenAddress, @tokenSymbol, @action, @confidence, @risk, @tier, @rank, @priorityScore, @reasonsJson, @targetPrice,
+        @marketAgeSeconds, @lastSnapshotAt, @decisionTime, @snapshotSource
     )
 `);
 
@@ -677,7 +734,19 @@ function replaceDecisionSnapshot(userId, rows){
                 tier: row.tier ?? null,
                 rank: row.rank ?? null,
                 priorityScore: row.priorityScore ?? null,
-                reasonsJson: row.reasons ? JSON.stringify(row.reasons) : null
+                reasonsJson: row.reasons ? JSON.stringify(row.reasons) : null,
+                // Section H (Candidate Card): real "if bought now" target
+                // price for BUY/WATCH-tier candidates only - null for
+                // AVOID (never computed) and honestly null when
+                // buildRiskBands itself couldn't produce one (no real
+                // market_cap yet).
+                targetPrice: row.targetPrice ?? null,
+                // Production Hotfix V1.1, Section 3: real freshness
+                // observability for every candidate.
+                marketAgeSeconds: row.marketAgeSeconds ?? null,
+                lastSnapshotAt: row.lastSnapshotAt ?? null,
+                decisionTime: row.decisionTime ?? null,
+                snapshotSource: row.snapshotSource ?? null
             });
         }
     });

@@ -7,6 +7,26 @@
 // just with more named collaborators since this service coordinates
 // real chain I/O, not only the database.
 //
+// Production Hotfix V1.1, Section 6 (investigated, deliberately NOT
+// implemented this pass): execute() below returns only
+// { executionId, outcome, txHash } - no real on-chain fill price is
+// captured anywhere in this file or transactionConfirmationService.js
+// (that file only polls connection.getSignatureStatus() for
+// success/fail/slot, never connection.getParsedTransaction() for the
+// confirmed transaction's own pre/post token+SOL balance deltas). Every
+// entry_price/exit_price tradeManager.js records for a real trade is
+// therefore CRAB's own off-chain estimate at decision time, never
+// reconciled against the real swap. This IS additively fixable - a new
+// post-confirmation read, no change to how transactions are built/
+// signed/submitted - but it means adding real Solana transaction-
+// balance-delta parsing to money-execution-adjacent code, unverifiable
+// against a real confirmed swap in this environment, sized well beyond
+// this hotfix's primary scope (the freshness gate). Deliberately
+// deferred rather than shipped half-verified - see the existing
+// getPortfolioReconciliation()/Sync Delta mechanism (services/tradingBotService.js)
+// for the real, already-built safety net that would surface a growing
+// discrepancy if this estimate ever drifted meaningfully from reality.
+//
 // `transactionBuilder` is the Sprint 2 seam: this file never builds a
 // transaction itself, only calls transactionBuilder.build(...) and
 // signs/submits whatever comes back. Sprint 1 injects

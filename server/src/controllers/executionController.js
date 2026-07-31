@@ -35,8 +35,8 @@ async function getLog(req, res, next){
 
 // Real on-chain read, never a client-supplied number (see
 // services/execution/balanceValidationService.js's header) - the fix
-// for the gap the earlier migration audit flagged in
-// services/walletService.js's depositFunds().
+// for the gap the earlier migration audit flagged in the old
+// self-reported deposit model (removed, Production Stabilization V1).
 async function checkBalance(req, res, next){
     try{
 

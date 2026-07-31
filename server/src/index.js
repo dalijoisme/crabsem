@@ -62,6 +62,7 @@ const tradingBotScheduler = require("./scheduler/tradingBotScheduler");
 const missedOpportunityOutcomeScheduler = require("./scheduler/missedOpportunityOutcomeScheduler");
 const abTestScheduler = require("./scheduler/abTestScheduler");
 const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
+const walletBalanceSyncScheduler = require("./scheduler/walletBalanceSyncScheduler");
 const engineVersionService = require("./services/engineVersionService");
 const { executionService } = require("./services/execution");
 const app = require("./app");
@@ -137,6 +138,8 @@ const abTestSchedulerHandle = abTestScheduler.start();
 
 const benchmarkSchedulerHandle = benchmarkScheduler.start();
 
+const walletBalanceSyncSchedulerHandle = walletBalanceSyncScheduler.start();
+
 const server = app.listen(config.PORT, () => {
 
     console.log(`[startup] API ready - CRAB AGENT server listening on port ${config.PORT}`);
@@ -170,6 +173,8 @@ function shutdown(signal){
     abTestSchedulerHandle.stop();
 
     benchmarkSchedulerHandle.stop();
+
+    walletBalanceSyncSchedulerHandle.stop();
 
     // Previously never closed the shared better-sqlite3 connection,
     // relying on process exit to release the file handle - in WAL

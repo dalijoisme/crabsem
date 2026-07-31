@@ -215,7 +215,12 @@ async function tick(){
     // (services/tradingBotService.js's getBottleneckReport).
     const { tokens, collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap } = freshUniverseService.getBuyCandidateUniverse();
 
+    // TEMPORARY DIAGNOSTIC LOGGING - remove once snapshot insertion is
+    // confirmed running in production. No try/catch here on purpose: if
+    // insertSnapshot() throws, PM2 must print the real stack trace.
+    console.log(`[trading-bot-scheduler] DIAG about to insertSnapshot: collectorTotalCount=${collectorTotalCount} freshUniverseCount=${freshUniverseCount} maxAgeSeconds=${maxAgeSeconds} minMarketCap=${minMarketCap}`);
     tradingBotFreshUniverseSnapshotRepository.insertSnapshot({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
+    console.log("[trading-bot-scheduler] DIAG Fresh universe snapshot inserted successfully.");
 
     console.log(`[trading-bot-scheduler] fresh universe: collector=${collectorTotalCount} fresh=${freshUniverseCount}`);
 

@@ -134,6 +134,7 @@ function createEntryGateService(repository){
         }
 
         if(live.confidence < config.min_confidence){
+            console.log(`[confidence-below-floor-trace] token=${token.symbol || token.token_address} live.confidence=${live.confidence} min_confidence=${config.min_confidence} reason=CONFIDENCE_BELOW_FLOOR`); // TEMP DIAGNOSTIC - remove after verification
             return { eligible: false, reason: "CONFIDENCE_BELOW_FLOOR" };
         }
 

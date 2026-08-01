@@ -706,7 +706,9 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
             decayFraction: live.decayFraction ?? null
         };
 
+        console.log("[OPEN CALL]", token.symbol); // TEMP DIAGNOSTIC - remove after verification
         const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
+        console.log("[OPEN RESULT]", result); // TEMP DIAGNOSTIC - remove after verification
 
         if(result.opened){
             opened++;

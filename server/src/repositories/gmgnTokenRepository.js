@@ -43,7 +43,29 @@ const upsertStmt = db.prepare(`
         name = excluded.name,
         chain = excluded.chain,
         logo = excluded.logo,
-        market_cap = excluded.market_cap,
+        -- ROOT CAUSE FIX (fresh-universe-goes-to-zero investigation):
+        -- this was 'market_cap = excluded.market_cap' - an unconditional
+        -- overwrite. getFreshTokens()'s WHERE clause is
+        -- 'updated_at >= <window> AND market_cap > @minMarketCap' - a
+        -- SINGLE collector tick where GMGN's response is missing/null
+        -- market_cap for its refreshed batch (transformToken()'s
+        -- numberOrNull(token.market_cap) correctly maps "field absent"
+        -- to null, per this file's own existing "honest null, never
+        -- fabricate" convention) used to null out market_cap for every
+        -- token in that batch, while updated_at still legitimately
+        -- advanced to CURRENT_TIMESTAMP - so those rows looked perfectly
+        -- fresh (collector "healthy", scheduler "healthy") yet were
+        -- excluded by market_cap > @minMarketCap, and since the fresh
+        -- window only ever holds the last ~1-2 ticks' worth of refreshed
+        -- rows anyway, this alone was enough to drive freshUniverseCount
+        -- to 0 while gmgn_tokens.updated_at proved the pipeline was
+        -- alive. Reproduced deterministically in
+        -- gmgnTokenRepository.test.js. COALESCE(excluded.market_cap,
+        -- market_cap) means "no market_cap in THIS response" no longer
+        -- erases the last known-good value - it only ever updates when
+        -- GMGN actually reports a number (including a real, honest 0,
+        -- which is not NULL and still overwrites as before).
+        market_cap = COALESCE(excluded.market_cap, market_cap),
         liquidity = excluded.liquidity,
         price = excluded.price,
         price_change_5m = excluded.price_change_5m,

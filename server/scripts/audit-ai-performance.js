@@ -8,7 +8,7 @@
 // statistics over it. Safe to run repeatedly, in production, at any time.
 //
 // Usage:
-//   node scripts/audit-ai-performance.js [--user=<id>] [--min-sample=<n>] [--fn-days=<n>] [--db=<path>]
+//   node scripts/audit-ai-performance.js [--user=<id>] [--min-sample=<n>] [--fn-days=<n>] [--fn-target-pct=<n>] [--db=<path>]
 //
 //   --user=<id>       Scope every section to one user_id. Default: no
 //                      filter (every user_id in the tables, including
@@ -22,15 +22,25 @@
 //                      controls what's allowed into "top 20 best/worst"
 //                      style rankings, so a single lucky trade can't look
 //                      like a validated pattern.
-//   --fn-days=<n>     Lookback window (days) for the False Negative scan
-//                      over token_price_history (default 14) - bounds an
+//   --fn-days=<n>     Lookback window (days) for the token_price_history
+//                      False Negative scan (default 14) - bounds an
 //                      otherwise-unbounded aggregate over a large table.
+//   --fn-target-pct=<n>  "Target movement" threshold (mfe_pct, %) for the
+//                      Section D False Negative Analyzer over
+//                      prediction_history (default 20). Deliberately a
+//                      standalone, explicit CLI knob rather than reusing
+//                      trading_bot_config.fixed_tp_pct - prediction_history
+//                      is the platform-wide "house" pipeline, not this
+//                      bot's own exit config, so borrowing that number
+//                      silently would assert a link between two unrelated
+//                      systems that isn't actually true.
 //   --db=<path>       Override the database file (default: server/data/crabsem.sqlite,
 //                      or DB_PATH env var).
 //
 // Output: prints a summary to the terminal AND writes all three formats
-// to server/reports/: ai-performance-report.md, .json, .csv (trade-level
-// detail rows - the aggregate tables live in the .md/.json).
+// to server/reports/: ai-performance-report.md, .json, .csv. Sections 1-15
+// (first sprint) and Sections A-G (this sprint's forensic extension) are
+// BOTH always written - this sprint only adds, never removes.
 
 "use strict";
 
@@ -43,12 +53,13 @@ const Database = require("better-sqlite3");
 // ---------------------------------------------------------------------
 
 function parseArgs(argv){
-    const args = { user: null, minSample: 3, fnDays: 14, db: null };
+    const args = { user: null, minSample: 3, fnDays: 14, fnTargetPct: 20, db: null };
     for(const raw of argv){
         const [key, value] = raw.replace(/^--/, "").split("=");
         if(key === "user") args.user = Number(value);
         else if(key === "min-sample") args.minSample = Number(value);
         else if(key === "fn-days") args.fnDays = Number(value);
+        else if(key === "fn-target-pct") args.fnTargetPct = Number(value);
         else if(key === "db") args.db = value;
     }
     return args;
@@ -222,6 +233,44 @@ function loadConfig(){
     return db.prepare("SELECT * FROM trading_bot_config WHERE user_id = ?").all(args.user);
 }
 
+// AI Feature Forensic Analyzer sprint (Section C - False Positive
+// Analyzer). Filtered entirely in SQL (confidence/roi_pct are plain
+// columns on the two real tables, no JSON parsing needed for the filter
+// itself) - only the small matched subset ever reaches JS, and only
+// there to format its own breakdown_json.reasons for display.
+function loadFalsePositiveTrades(){
+    return db.prepare(`
+        SELECT
+            t.id, t.token_address, t.token_symbol, t.roi_pct, t.duration_seconds,
+            t.reason AS exit_reason, p.confidence, p.breakdown_json
+        FROM trading_bot_trades t
+        JOIN trading_bot_positions p ON p.id = t.position_id
+        WHERE t.closed_at IS NOT NULL AND t.roi_pct < 0 AND p.confidence >= 50 ${userClause.replace("user_id", "t.user_id")}
+        ORDER BY p.confidence DESC
+    `).all(bindUser);
+}
+
+// AI Feature Forensic Analyzer sprint (Section D - False Negative
+// Analyzer). prediction_history is the platform-wide "house" pipeline
+// (see this file's header + section10/11's own notes) - the only table
+// in this database with a real, historical HOLD/AVOID recommendation
+// PLUS a real tracked outcome (mfe_pct: the highest ROI this token ever
+// actually reached while tracked). Filtered/sorted/limited entirely in
+// SQL against a 700k+ row table using its existing
+// idx_prediction_history_recommendation/idx_prediction_history_status
+// indexes - never a full-table JS scan.
+function loadFalseNegativePredictions(targetPct){
+    return db.prepare(`
+        SELECT token_address, token_symbol, recommendation, confidence, mfe_pct, status, close_reason, reason_json
+        FROM prediction_history
+        WHERE recommendation IN ('HOLD', 'AVOID')
+          AND status IN ('EXPIRED', 'SL_HIT', 'SIGNAL_REVERSED', 'TP_HIT')
+          AND mfe_pct >= @targetPct
+        ORDER BY mfe_pct DESC
+        LIMIT 50
+    `).all({ targetPct });
+}
+
 // ---------------------------------------------------------------------
 // Section builders - pure functions over already-loaded data.
 // ---------------------------------------------------------------------
@@ -269,14 +318,18 @@ function section2_confidenceCalibration(trades){
     const withoutConfidence = trades.length - withConfidence.length;
     const buckets = CONFIDENCE_BUCKETS.map(b => {
         const inBucket = withConfidence.filter(t => t.confidence >= b.min && t.confidence < b.max);
-        const { wins } = winLoss(inBucket);
+        const { wins, losses } = winLoss(inBucket);
         return {
             bucket: b.label,
             n: inBucket.length,
+            wins: wins.length,
+            losses: losses.length,
             winRatePct: round(pct(wins.length, inBucket.length)),
             avgRoiPct: round(mean(inBucket.map(t => t.roi_pct))),
             medianRoiPct: round(median(inBucket.map(t => t.roi_pct))),
-            avgHoldingTime: fmtSeconds(mean(inBucket.map(t => t.duration_seconds)))
+            avgHoldingTime: fmtSeconds(mean(inBucket.map(t => t.duration_seconds))),
+            // AI Feature Forensic Analyzer sprint (Section F addition):
+            totalPnlContributionUsd: round(inBucket.reduce((sum, t) => sum + (realizedPnl(t) || 0), 0), 4)
         };
     });
     const corr = pearson(withConfidence.map(t => [t.confidence, t.roi_pct]));
@@ -316,7 +369,11 @@ function buildFeatureTally(trades, key){
             winRatePct: round(pct(wins.length, ts.length)),
             avgRoiPct: round(mean(ts.map(t => t.roi_pct))),
             medianRoiPct: round(median(ts.map(t => t.roi_pct))),
-            avgConfidence: round(mean(ts.map(t => t.confidence)))
+            avgConfidence: round(mean(ts.map(t => t.confidence))),
+            // AI Feature Forensic Analyzer sprint (Section A additions):
+            avgHoldingTime: fmtSeconds(mean(ts.map(t => t.duration_seconds))),
+            avgHoldingSeconds: round(mean(ts.map(t => t.duration_seconds)), 1),
+            totalPnlContributionUsd: round(ts.reduce((sum, t) => sum + (realizedPnl(t) || 0), 0), 4)
         };
     }).sort((a, b) => b.n - a.n);
     return { coveredTrades: withFeatures.length, totalTrades: trades.length, rows };
@@ -343,10 +400,12 @@ function section4_featureCombinations(trades, minSample){
         }
     }
     const rows = [...tally.entries()].map(([combo, ts]) => {
-        const { wins } = winLoss(ts);
+        const { wins, losses } = winLoss(ts);
         return {
             combo,
             n: ts.length,
+            wins: wins.length,
+            losses: losses.length,
             winRatePct: round(pct(wins.length, ts.length)),
             avgRoiPct: round(mean(ts.map(t => t.roi_pct))),
             medianRoiPct: round(median(ts.map(t => t.roi_pct)))
@@ -355,6 +414,51 @@ function section4_featureCombinations(trades, minSample){
     const eligible = rows.filter(r => r.n >= minSample);
     return {
         note: `${withFeatures.length} trade punya >=2 fitur positif untuk dikombinasikan. Hanya kombinasi dengan n >= ${minSample} (--min-sample) masuk ranking di bawah - kombinasi dengan sample lebih kecil TETAP dihitung tapi tidak ditampilkan sebagai ranking supaya tidak terbaca sebagai pola tervalidasi.`,
+        totalCombosFound: rows.length,
+        eligibleCombos: eligible.length,
+        top20Best: eligible.slice().sort((a, b) => b.avgRoiPct - a.avgRoiPct).slice(0, 20),
+        top20Worst: eligible.slice().sort((a, b) => a.avgRoiPct - b.avgRoiPct).slice(0, 20)
+    };
+}
+
+// AI Feature Forensic Analyzer sprint (Section B - triplets). Same exact
+// method as the pair combinator above (co-occurrence within a single
+// trade's own normalized `reasons` list), one more nested loop for
+// 3-way combinations instead of 2-way. Kept as a separate function
+// rather than generalizing pairs+triplets into one N-way combinator -
+// pairs and triplets are the two shapes actually requested, and a
+// generic combinatorial engine would be speculative generality for a
+// third shape nobody asked for.
+function section4b_featureTriplets(trades, minSample){
+    const withFeatures = trades.filter(t => extractFeatures(t, "reasons") != null && extractFeatures(t, "reasons").length >= 3);
+    const tally = new Map();
+    for(const t of withFeatures){
+        const feats = extractFeatures(t, "reasons").sort();
+        for(let i = 0; i < feats.length; i++){
+            for(let j = i + 1; j < feats.length; j++){
+                for(let k = j + 1; k < feats.length; k++){
+                    const key = `${feats[i]} + ${feats[j]} + ${feats[k]}`;
+                    if(!tally.has(key)) tally.set(key, []);
+                    tally.get(key).push(t);
+                }
+            }
+        }
+    }
+    const rows = [...tally.entries()].map(([combo, ts]) => {
+        const { wins, losses } = winLoss(ts);
+        return {
+            combo,
+            n: ts.length,
+            wins: wins.length,
+            losses: losses.length,
+            winRatePct: round(pct(wins.length, ts.length)),
+            avgRoiPct: round(mean(ts.map(t => t.roi_pct))),
+            medianRoiPct: round(median(ts.map(t => t.roi_pct)))
+        };
+    });
+    const eligible = rows.filter(r => r.n >= minSample);
+    return {
+        note: `${withFeatures.length} trade punya >=3 fitur positif untuk ditriplet-kan. Sama seperti pair: hanya n >= ${minSample} masuk ranking.`,
         totalCombosFound: rows.length,
         eligibleCombos: eligible.length,
         top20Best: eligible.slice().sort((a, b) => b.avgRoiPct - a.avgRoiPct).slice(0, 20),
@@ -566,6 +670,71 @@ function section15_recommendations(s3, s4, s2, minSample){
     };
 }
 
+// =======================================================================
+// AI FEATURE FORENSIC ANALYZER (this sprint's extension) - Sections A-G.
+// Additive only: every function below is NEW, nothing above this line
+// was removed or behaviorally changed by this sprint (buildFeatureTally/
+// section2's bucket builder only gained extra fields - see the "Section A
+// additions"/"Section F addition" comments above - existing fields are
+// untouched).
+// =======================================================================
+
+// Section C - False Positive Analyzer: real per-trade rows (not an
+// aggregate), confidence >= 50 AND roi_pct < 0, sorted by confidence
+// DESC - exactly the definition requested, filtered in SQL (see
+// loadFalsePositiveTrades above).
+function sectionC_falsePositives(rows){
+    return rows.map(r => {
+        const feats = extractFeatures(r, "reasons");
+        return {
+            tokenSymbol: r.token_symbol, tokenAddress: r.token_address,
+            confidence: r.confidence, roiPct: round(r.roi_pct),
+            holdingTime: fmtSeconds(r.duration_seconds),
+            reasons: feats ? feats.join("; ") : "(no breakdown_json)",
+            exitReason: r.exit_reason
+        };
+    });
+}
+
+// Section D - False Negative Analyzer: see loadFalseNegativePredictions's
+// own header comment for the exact table/definition used and why. Honest
+// "INSUFFICIENT DATA" when nothing matches - never a fabricated row.
+function sectionD_falseNegatives(rows, targetPct){
+    if(!rows.length){
+        return {
+            available: false,
+            message: `INSUFFICIENT DATA - tidak ada baris prediction_history dengan recommendation HOLD/AVOID, status settled, dan mfe_pct >= ${targetPct}%. Coba turunkan --fn-target-pct kalau ingin threshold lebih longgar.`
+        };
+    }
+    return {
+        available: true,
+        source: "prediction_history (platform-wide 'house' STABLE profile - lihat catatan Section 10/11 di atas; BUKAN keputusan strategy_profile akun ini).",
+        targetMovementPct: targetPct,
+        definition: "recommendation IN (HOLD, AVOID) AND status settled (EXPIRED/SL_HIT/SIGNAL_REVERSED/TP_HIT) AND mfe_pct >= target - token yang AI 'lewatkan' tapi nyatanya pernah bergerak sejauh target.",
+        rows: rows.map(r => ({
+            tokenSymbol: r.token_symbol, tokenAddress: r.token_address,
+            recommendation: r.recommendation, confidence: r.confidence,
+            mfePct: round(r.mfe_pct), status: r.status, closeReason: r.close_reason
+        }))
+    };
+}
+
+// Section E - Feature Recommendation. Same underlying stats as Section
+// 15/A, re-labeled to the exact English verdict vocabulary requested
+// ("Increase weight" / "Decrease weight") instead of duplicating the
+// classification thresholds a second time.
+function sectionE_recommendation(rows, minSample){
+    return rows.filter(r => r.n >= minSample).map(r => {
+        let recommendation;
+        if(r.winRatePct == null) recommendation = "Insufficient data";
+        else if(r.winRatePct >= 66) recommendation = "Increase weight";
+        else if(r.winRatePct >= 40) recommendation = "Maintain";
+        else if(r.winRatePct >= 20) recommendation = "Decrease weight";
+        else recommendation = "Consider removing";
+        return { feature: r.feature, trades: r.n, winRatePct: r.winRatePct, avgRoiPct: r.avgRoiPct, recommendation };
+    }).sort((a, b) => b.trades - a.trades);
+}
+
 // ---------------------------------------------------------------------
 // Assemble
 // ---------------------------------------------------------------------
@@ -592,6 +761,16 @@ function buildReport(){
     const s14 = section14_topLosers(trades);
     const s15 = section15_recommendations(s3, s4, s2, args.minSample);
 
+    // AI Feature Forensic Analyzer sprint - Sections A-G. A/F reuse s3/s2
+    // (now enriched with holding-time/PnL fields) directly rather than
+    // recomputing the same aggregation a second time under a new name.
+    const sB_triplets = section4b_featureTriplets(trades, args.minSample);
+    const falsePositiveTradeRows = loadFalsePositiveTrades();
+    const sC = sectionC_falsePositives(falsePositiveTradeRows);
+    const falseNegativeRows = loadFalseNegativePredictions(args.fnTargetPct);
+    const sD = sectionD_falseNegatives(falseNegativeRows, args.fnTargetPct);
+    const sE = sectionE_recommendation(s3.positiveFeatures.rows, args.minSample);
+
     return {
         generatedAt: new Date().toISOString(),
         dbPath: DB_PATH,
@@ -614,7 +793,15 @@ function buildReport(){
             correlations: s12,
             topWinners: s13,
             topLosers: s14,
-            recommendations: s15
+            recommendations: s15,
+            // Sections A-G (AI Feature Forensic Analyzer sprint) - additive,
+            // sits alongside every section above, none of which changed shape.
+            sectionA_featureForensicRanking: s3,
+            sectionB_combinations: { pairs: s4, triplets: sB_triplets },
+            sectionC_falsePositiveTrades: sC,
+            sectionD_falseNegativePredictions: sD,
+            sectionE_featureRecommendation: sE,
+            sectionF_confidenceCalibration: s2
         },
         tradesForCsv: trades
     };
@@ -738,6 +925,71 @@ function renderMarkdown(report){
         { key: "feature", label: "Feature" }, { key: "n", label: "n" }, { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "verdict", label: "Verdict" }
     ]);
 
+    // =====================================================================
+    // AI FEATURE FORENSIC ANALYZER (Sections A-G) - appended after the
+    // original 15 sections above, which are untouched.
+    // =====================================================================
+
+    md += `\n\n---\n\n# AI Feature Forensic Analyzer (Sections A-G)\n\n`;
+
+    md += `## Section A: Feature Forensic Ranking\n\nFitur dinormalisasi (angka/persen/parenthetical dihapus) sebelum ditally - lihat \`normalizeFeature()\`. Diurutkan dari sample (n) terbesar.\n\n`;
+    md += mdTable(s.sectionA_featureForensicRanking.positiveFeatures.rows, [
+        { key: "feature", label: "Feature" }, { key: "n", label: "Trades" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" },
+        { key: "avgHoldingTime", label: "Avg Holding" }, { key: "totalPnlContributionUsd", label: "Total PnL (USD)" }
+    ]);
+
+    md += `\n## Section B: Feature Combinations\n\n### Pairs - Top Winning\n\n`;
+    md += mdTable(s.sectionB_combinations.pairs.top20Best, [
+        { key: "combo", label: "Pair" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    md += `\n### Pairs - Top Losing\n\n`;
+    md += mdTable(s.sectionB_combinations.pairs.top20Worst, [
+        { key: "combo", label: "Pair" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    md += `\n### Triplets - Top Winning\n\n`;
+    md += mdTable(s.sectionB_combinations.triplets.top20Best, [
+        { key: "combo", label: "Triplet" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    md += `\n### Triplets - Top Losing\n\n`;
+    md += mdTable(s.sectionB_combinations.triplets.top20Worst, [
+        { key: "combo", label: "Triplet" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+
+    md += `\n## Section C: False Positive Analyzer (confidence >= 50 AND ROI < 0)\n\n`;
+    md += mdTable(s.sectionC_falsePositiveTrades, [
+        { key: "tokenSymbol", label: "Token" }, { key: "confidence", label: "Confidence" }, { key: "roiPct", label: "ROI %" },
+        { key: "holdingTime", label: "Holding Time" }, { key: "reasons", label: "Reasons" }, { key: "exitReason", label: "Exit Reason" }
+    ]);
+
+    md += `\n## Section D: False Negative Analyzer\n\n`;
+    if(!s.sectionD_falseNegativePredictions.available){
+        md += `**${s.sectionD_falseNegativePredictions.message}**\n\n`;
+    }
+    else{
+        md += `${s.sectionD_falseNegativePredictions.source}\n\nTarget movement: >= ${s.sectionD_falseNegativePredictions.targetMovementPct}% (mfe_pct). ${s.sectionD_falseNegativePredictions.definition}\n\n`;
+        md += mdTable(s.sectionD_falseNegativePredictions.rows, [
+            { key: "tokenSymbol", label: "Token" }, { key: "recommendation", label: "Recommendation" }, { key: "confidence", label: "Confidence" },
+            { key: "mfePct", label: "MFE %" }, { key: "status", label: "Status" }, { key: "closeReason", label: "Close Reason" }
+        ]);
+    }
+
+    md += `\n## Section E: Feature Recommendation\n\n`;
+    md += mdTable(s.sectionE_featureRecommendation, [
+        { key: "feature", label: "Feature" }, { key: "trades", label: "Trades" }, { key: "winRatePct", label: "Win Rate %" },
+        { key: "avgRoiPct", label: "Avg ROI %" }, { key: "recommendation", label: "Recommendation" }
+    ]);
+
+    md += `\n## Section F: Confidence Calibration (extended)\n\n`;
+    md += mdTable(s.sectionF_confidenceCalibration.buckets, [
+        { key: "bucket", label: "Confidence" }, { key: "n", label: "Trades" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }, { key: "totalPnlContributionUsd", label: "Total PnL (USD)" }
+    ]);
+
     return md;
 }
 
@@ -748,7 +1000,23 @@ function csvEscape(v){
     return s;
 }
 
-function renderCsv(trades){
+// One CSV file, multiple tables: each block is a "# Section ..." single-
+// cell title row, a header row, its data rows, then a blank line. Not
+// strictly single-schema CSV, but every spreadsheet tool (and the plain
+// eye) reads this convention fine, and it's the only way to satisfy
+// "one .csv file" while adding Sections A-G without discarding the
+// original trade-level export (per this sprint's own "tambahkan, jangan
+// hapus" instruction).
+function csvBlock(title, rows, columns){
+    const lines = [csvEscape(`# ${title}`)];
+    lines.push(columns.map(c => csvEscape(c.label)).join(","));
+    for(const row of rows) lines.push(columns.map(c => csvEscape(row[c.key])).join(","));
+    lines.push("");
+    return lines.join("\n");
+}
+
+function renderCsv(report){
+    const s = report.sections;
     const columns = [
         "id", "user_id", "token_address", "token_symbol", "opened_at", "closed_at",
         "duration_seconds", "size_usd", "roi_pct", "realized_pnl_usd", "fee_usd",
@@ -756,7 +1024,7 @@ function renderCsv(trades){
         "reasons", "position_id", "engine_version"
     ];
     const lines = [columns.join(",")];
-    for(const t of trades){
+    for(const t of report.tradesForCsv){
         const feats = extractFeatures(t, "reasons");
         const row = {
             ...t,
@@ -765,7 +1033,55 @@ function renderCsv(trades){
         };
         lines.push(columns.map(c => csvEscape(row[c])).join(","));
     }
-    return lines.join("\n");
+    lines.push("");
+
+    let out = lines.join("\n");
+
+    out += csvBlock("Section A: Feature Forensic Ranking", s.sectionA_featureForensicRanking.positiveFeatures.rows, [
+        { key: "feature", label: "Feature" }, { key: "n", label: "Trades" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" },
+        { key: "avgHoldingTime", label: "Avg Holding" }, { key: "totalPnlContributionUsd", label: "Total PnL USD" }
+    ]);
+    out += csvBlock("Section B: Pair Combinations - Top Winning", s.sectionB_combinations.pairs.top20Best, [
+        { key: "combo", label: "Pair" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    out += csvBlock("Section B: Pair Combinations - Top Losing", s.sectionB_combinations.pairs.top20Worst, [
+        { key: "combo", label: "Pair" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    out += csvBlock("Section B: Triplet Combinations - Top Winning", s.sectionB_combinations.triplets.top20Best, [
+        { key: "combo", label: "Triplet" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    out += csvBlock("Section B: Triplet Combinations - Top Losing", s.sectionB_combinations.triplets.top20Worst, [
+        { key: "combo", label: "Triplet" }, { key: "n", label: "Sample" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "winRatePct", label: "Win Rate %" }, { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }
+    ]);
+    out += csvBlock("Section C: False Positives (confidence>=50 AND ROI<0)", s.sectionC_falsePositiveTrades, [
+        { key: "tokenSymbol", label: "Token" }, { key: "confidence", label: "Confidence" }, { key: "roiPct", label: "ROI %" },
+        { key: "holdingTime", label: "Holding Time" }, { key: "reasons", label: "Reasons" }, { key: "exitReason", label: "Exit Reason" }
+    ]);
+    out += csvBlock(
+        "Section D: False Negatives",
+        s.sectionD_falseNegativePredictions.available ? s.sectionD_falseNegativePredictions.rows : [{ tokenSymbol: s.sectionD_falseNegativePredictions.message }],
+        s.sectionD_falseNegativePredictions.available
+            ? [
+                { key: "tokenSymbol", label: "Token" }, { key: "recommendation", label: "Recommendation" }, { key: "confidence", label: "Confidence" },
+                { key: "mfePct", label: "MFE %" }, { key: "status", label: "Status" }, { key: "closeReason", label: "Close Reason" }
+            ]
+            : [{ key: "tokenSymbol", label: "INSUFFICIENT_DATA" }]
+    );
+    out += csvBlock("Section E: Feature Recommendation", s.sectionE_featureRecommendation, [
+        { key: "feature", label: "Feature" }, { key: "trades", label: "Trades" }, { key: "winRatePct", label: "Win Rate %" },
+        { key: "avgRoiPct", label: "Avg ROI %" }, { key: "recommendation", label: "Recommendation" }
+    ]);
+    out += csvBlock("Section F: Confidence Calibration", s.sectionF_confidenceCalibration.buckets, [
+        { key: "bucket", label: "Confidence" }, { key: "n", label: "Trades" }, { key: "wins", label: "Wins" }, { key: "losses", label: "Losses" },
+        { key: "avgRoiPct", label: "Avg ROI %" }, { key: "medianRoiPct", label: "Median ROI %" }, { key: "totalPnlContributionUsd", label: "Total PnL USD" }
+    ]);
+
+    return out;
 }
 
 // ---------------------------------------------------------------------
@@ -788,6 +1104,19 @@ function main(){
     console.table([report.sections.predictionAccuracy]);
     console.log(`\nFull report: ${report.sections.topWinners.length} winners, ${report.sections.topLosers.length} losers, ${report.sections.featureCombinations.eligibleCombos} eligible feature combos.`);
 
+    console.log("\n=== AI Feature Forensic Analyzer (Sections A-G) ===");
+    console.log("Section A - Feature Forensic Ranking:");
+    console.table(report.sections.sectionA_featureForensicRanking.positiveFeatures.rows);
+    console.log(`Section B - Combinations: ${report.sections.sectionB_combinations.pairs.eligibleCombos} eligible pairs, ${report.sections.sectionB_combinations.triplets.eligibleCombos} eligible triplets.`);
+    console.log(`Section C - False Positives (confidence>=50, ROI<0): ${report.sections.sectionC_falsePositiveTrades.length} trade(s).`);
+    console.log(
+        report.sections.sectionD_falseNegativePredictions.available
+            ? `Section D - False Negatives: ${report.sections.sectionD_falseNegativePredictions.rows.length} token(s) found.`
+            : `Section D - False Negatives: ${report.sections.sectionD_falseNegativePredictions.message}`
+    );
+    console.log("Section E - Feature Recommendation:");
+    console.table(report.sections.sectionE_featureRecommendation);
+
     fs.mkdirSync(REPORTS_DIR, { recursive: true });
 
     const mdPath = path.join(REPORTS_DIR, "ai-performance-report.md");
@@ -796,7 +1125,7 @@ function main(){
 
     fs.writeFileSync(mdPath, renderMarkdown(report), "utf8");
     fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2), "utf8");
-    fs.writeFileSync(csvPath, renderCsv(report.tradesForCsv), "utf8");
+    fs.writeFileSync(csvPath, renderCsv(report), "utf8");
 
     console.log(`\nWritten:\n  ${mdPath}\n  ${jsonPath}\n  ${csvPath}`);
 

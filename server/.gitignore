@@ -5,3 +5,4 @@ data/*.sqlite-journal
 data/*.sqlite-wal
 data/*.sqlite-shm
 keys/
+reports/

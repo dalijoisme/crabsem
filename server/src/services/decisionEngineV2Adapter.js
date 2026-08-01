@@ -129,13 +129,83 @@ function applyDecisionEngineV2(baseSignal, token){
     };
 }
 
+// Root-cause diagnosis sprint (Qualified BUY = 0): UNCONDITIONAL - does
+// NOT depend on config.DECISION_ENGINE_V2_EXPLAIN (that flag's own
+// worker_thread env-propagation is exactly one of the things under
+// suspicion, so this trace must not depend on it to be trustworthy).
+// Runs BEFORE applyDecisionEngineV2()/evaluateV2() - describes the base
+// engine's OWN raw output, never anything Decision Engine V2 touched.
+// Read-only: only console.log/console.error calls, every try/catch
+// rethrows the exact original error unchanged - control flow and the
+// final return value are byte-identical to before this instrumentation.
+function tallyByAction(signals){
+    const counts = {};
+    for(const s of signals){
+        const key = s?.action || "(no action field)";
+        counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+}
+
+function labelFor(token, index){
+    return token?.symbol || token?.token_address || `(candidate #${index}, no token identity)`;
+}
+
+// AVOID is deliberately excluded from the per-candidate lines (it is
+// always the large majority - see prior "Filtering:" log evidence - and
+// is never diagnostically relevant to "why isn't BUY passing"); the
+// aggregate actionBreakdown count above still includes it, so nothing
+// about its true volume is hidden.
+function logPreV2Trace(tokens, baseSignals){
+    console.log(`[decision-engine-v2-pretrace] candidatesSentToV2=${tokens.length} baseSignalsReturned=${baseSignals.length} actionBreakdown=${JSON.stringify(tallyByAction(baseSignals))}`);
+    if(baseSignals.length !== tokens.length){
+        console.error(`[decision-engine-v2-pretrace] MISMATCH: productionV2.analyzeTokens returned ${baseSignals.length} signals for ${tokens.length} input tokens - base engine (Layer 1) silently dropped ${tokens.length - baseSignals.length} candidate(s) BEFORE Decision Engine V2 ever saw them.`);
+    }
+    for(let i = 0; i < baseSignals.length; i++){
+        const signal = baseSignals[i];
+        if(signal?.action === "AVOID") continue;
+        console.log(`[decision-engine-v2-pretrace] token=${labelFor(tokens[i], i)} baseAction=${signal?.action ?? "(none)"} baseConfidence=${signal?.confidence ?? "(none)"} evaluateV2WillBeCalled=true`);
+    }
+}
+
 function analyzeToken(token, ctx, philosophyOverride){
-    const base = productionV2.analyzeToken(token, ctx, philosophyOverride);
-    return applyDecisionEngineV2(base, token);
+    let base;
+    try{
+        base = productionV2.analyzeToken(token, ctx, philosophyOverride);
+    }
+    catch(err){
+        console.error(`[decision-engine-v2-pretrace] productionV2.analyzeToken THREW for token=${labelFor(token, 0)} - Decision Engine V2 was NEVER reached: ${err.message}`, err.stack);
+        throw err;
+    }
+    console.log(`[decision-engine-v2-pretrace] token=${labelFor(token, 0)} baseAction=${base?.action ?? "(none)"} baseConfidence=${base?.confidence ?? "(none)"} evaluateV2WillBeCalled=true`);
+    try{
+        return applyDecisionEngineV2(base, token);
+    }
+    catch(err){
+        console.error(`[decision-engine-v2-pretrace] applyDecisionEngineV2/evaluateV2 THREW for token=${labelFor(token, 0)}: ${err.message}`, err.stack);
+        throw err;
+    }
 }
 
 function analyzeTokens(tokens, philosophyOverride){
-    return productionV2.analyzeTokens(tokens, philosophyOverride).map((signal, i) => applyDecisionEngineV2(signal, tokens[i]));
+    let baseSignals;
+    try{
+        baseSignals = productionV2.analyzeTokens(tokens, philosophyOverride);
+    }
+    catch(err){
+        console.error(`[decision-engine-v2-pretrace] productionV2.analyzeTokens THREW for a batch of ${tokens.length} tokens - Decision Engine V2 was NEVER reached for ANY of them: ${err.message}`, err.stack);
+        throw err;
+    }
+
+    logPreV2Trace(tokens, baseSignals);
+
+    try{
+        return baseSignals.map((signal, i) => applyDecisionEngineV2(signal, tokens[i]));
+    }
+    catch(err){
+        console.error(`[decision-engine-v2-pretrace] applyDecisionEngineV2/evaluateV2 THREW while processing a batch of ${baseSignals.length} base signals: ${err.message}`, err.stack);
+        throw err;
+    }
 }
 
 function buildRiskBands(token, signal, exitOverrides){

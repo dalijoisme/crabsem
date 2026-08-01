@@ -131,6 +131,93 @@ test("logExplainTrace stays silent when explicitly disabled, regardless of actio
     assert.equal(calls.length, 0);
 });
 
+// ---------------------------------------------------------------------
+// Root-cause diagnosis sprint (Qualified BUY = 0) - unconditional pre-V2
+// trace. Does NOT depend on DECISION_ENGINE_V2_EXPLAIN - these tests
+// never pass/enable that flag, proving the trace fires regardless.
+// ---------------------------------------------------------------------
+
+function captureConsole(fn){
+    const logs = [];
+    const errors = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = (...args) => logs.push(args);
+    console.error = (...args) => errors.push(args);
+    try{ fn(); }
+    finally{ console.log = originalLog; console.error = originalError; }
+    return { logs, errors };
+}
+
+test("analyzeTokens pre-trace fires unconditionally and reports the real action breakdown, with no explain flag involved", () => {
+    decisionEngineV2.loadHistoricalTrades = () => [];
+    productionV2.analyzeTokens = () => ([
+        { action: "AVOID", confidence: 10, risk: "HIGH", reasons: [], riskReasons: [] },
+        { action: "HOLD", confidence: 30, risk: "LOW", reasons: [], riskReasons: [] },
+        { action: "BUY", confidence: 65, risk: "MEDIUM", reasons: ["Z"], riskReasons: [] }
+    ]);
+
+    const { logs } = captureConsole(() =>
+        adapter.analyzeTokens([{ token_address: `${PREFIX}AVOID` }, { token_address: `${PREFIX}HOLD` }, { token_address: `${PREFIX}BUY`, symbol: "BUYSYM" }])
+    );
+
+    const summaryLine = logs.find(l => String(l[0]).includes("candidatesSentToV2"));
+    assert.ok(summaryLine, "expected the unconditional summary line");
+    assert.match(summaryLine[0], /candidatesSentToV2=3/);
+    assert.match(summaryLine[0], /"AVOID":1/);
+    assert.match(summaryLine[0], /"HOLD":1/);
+    assert.match(summaryLine[0], /"BUY":1/);
+
+    // AVOID must be excluded from per-candidate lines (volume control),
+    // HOLD and BUY must both appear (both diagnostically relevant).
+    const perCandidateLines = logs.filter(l => String(l[0]).includes("token=") && String(l[0]).includes("baseAction"));
+    assert.equal(perCandidateLines.length, 2);
+    assert.ok(perCandidateLines.some(l => l[0].includes("BUYSYM") && l[0].includes("baseAction=BUY") && l[0].includes("baseConfidence=65")));
+    assert.ok(!perCandidateLines.some(l => l[0].includes(`${PREFIX}AVOID`)));
+});
+
+test("analyzeTokens pre-trace reports a MISMATCH error when the base engine returns fewer signals than input tokens", () => {
+    decisionEngineV2.loadHistoricalTrades = () => [];
+    productionV2.analyzeTokens = () => ([{ action: "HOLD", confidence: 20, risk: "LOW", reasons: [], riskReasons: [] }]); // 1 signal for 2 tokens
+
+    const { errors } = captureConsole(() =>
+        adapter.analyzeTokens([{ token_address: `${PREFIX}A` }, { token_address: `${PREFIX}B` }])
+    );
+
+    assert.ok(errors.some(e => String(e[0]).includes("MISMATCH") && e[0].includes("dropped 1")));
+});
+
+test("analyzeTokens surfaces (and rethrows unchanged) an exception from productionV2.analyzeTokens BEFORE Decision Engine V2 is ever reached", () => {
+    productionV2.analyzeTokens = () => { throw new Error("simulated base engine failure"); };
+
+    const { errors } = captureConsole(() => {
+        assert.throws(() => adapter.analyzeTokens([{ token_address: `${PREFIX}A` }]), /simulated base engine failure/);
+    });
+
+    assert.ok(errors.some(e => String(e[0]).includes("productionV2.analyzeTokens THREW") && e[0].includes("NEVER reached")));
+});
+
+test("analyzeTokens surfaces (and rethrows unchanged) an exception from inside Decision Engine V2 itself", () => {
+    productionV2.analyzeTokens = () => ([{ action: "BUY", confidence: 50, risk: "LOW", reasons: [], riskReasons: [] }]);
+    decisionEngineV2.loadHistoricalTrades = () => { throw new Error("simulated DB failure inside Decision Engine V2"); };
+    adapter._resetCacheForTests();
+
+    const { errors } = captureConsole(() => {
+        assert.throws(() => adapter.analyzeTokens([{ token_address: `${PREFIX}A` }]), /simulated DB failure inside Decision Engine V2/);
+    });
+
+    assert.ok(errors.some(e => String(e[0]).includes("applyDecisionEngineV2/evaluateV2 THREW")));
+});
+
+test("analyzeToken (singular) pre-trace also fires unconditionally, before Decision Engine V2 runs", () => {
+    decisionEngineV2.loadHistoricalTrades = () => [];
+    productionV2.analyzeToken = () => ({ action: "STRONG BUY", confidence: 80, risk: "LOW", reasons: [], riskReasons: [] });
+
+    const { logs } = captureConsole(() => adapter.analyzeToken({ token_address: `${PREFIX}X`, symbol: "SINGLESYM" }));
+
+    assert.ok(logs.some(l => l[0].includes("SINGLESYM") && l[0].includes("baseAction=STRONG BUY") && l[0].includes("baseConfidence=80")));
+});
+
 test("real historical data changes the live decision: a BUY with a historically-losing combination is downgraded to HOLD", () => {
     // Seed 6 real closed trades (>= minSampleHardFloor=5) all sharing the
     // same feature, all losses - real DB rows, real join through

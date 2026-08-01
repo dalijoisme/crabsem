@@ -51,6 +51,12 @@ const { marketAgeSecondsFor } = entryGateService;
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const gmgnOndemandService = require("./gmgnOndemandService");
+// Arjuna vNext sprint, Priority 1 (Synthetic Market Filter): a local
+// SQLite read, not a GMGN API call - the same gmgn_trenches row
+// entryGateService.js's own MISSING_QUALITY_DATA gate already required
+// to exist before a candidate could reach this point.
+const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
+const syntheticMarketFilterService = require("./syntheticMarketFilterService");
 // Section H (Candidate Card): read-only reuse of buildRiskBands for a
 // real "if bought now" Target price on qualified/watch candidates -
 // never used here to score/decide anything (this file still never
@@ -705,6 +711,48 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
             marketAgeSeconds: evaluation.marketAgeSeconds ?? null,
             decayFraction: live.decayFraction ?? null
         };
+
+        // Arjuna vNext sprint, Priority 1 (Synthetic Market Filter): the
+        // LAST step before a real BUY, after Arjuna's own entry gate has
+        // already qualified this candidate - never runs earlier, never
+        // changes ranking/scoring/which tokens qualify. Only vetoes an
+        // already-qualified candidate whose real orderflow pattern looks
+        // bot-driven/bundled/wash-traded (see syntheticMarketFilterService.js).
+        // trenchesEntry here is a local SQLite read (gmgn_trenches), not a
+        // GMGN API call - no added latency, no added failure surface on
+        // the BUY path.
+        const trenchesEntryForFilter = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
+        const syntheticCheck = syntheticMarketFilterService.evaluateSyntheticMarketFilter(token, trenchesEntryForFilter);
+
+        console.log(
+            `[synthetic-filter] token=${token.symbol || token.token_address} ` +
+            `decision=${syntheticCheck.pass ? "PASS" : "REJECT"} syntheticScore=${syntheticCheck.syntheticScore.toFixed(1)} ` +
+            `breakdown=${JSON.stringify(syntheticCheck.breakdown)} reasons=${syntheticCheck.reasons.join("; ")}`
+        );
+
+        if(!syntheticCheck.pass){
+            skipped++;
+            skipReasons.SYNTHETIC_MARKET_REJECTED = (skipReasons.SYNTHETIC_MARKET_REJECTED || 0) + 1;
+            tradingBotRepository.insertLog(userId, {
+                logType: "WARNING",
+                tokenSymbol: token.symbol,
+                message: `Rejected: Synthetic Orderflow - ${token.symbol || token.token_address.slice(0, 8)} (score ${syntheticCheck.syntheticScore.toFixed(1)}/${100})`,
+                meta: {
+                    tokenAddress: token.token_address,
+                    syntheticScore: syntheticCheck.syntheticScore,
+                    breakdown: syntheticCheck.breakdown,
+                    reasons: syntheticCheck.reasons
+                }
+            });
+            if(rankInfo){
+                tradingBotMissedOpportunityRepository.upsertPending(userId, {
+                    tokenAddress: token.token_address, tokenSymbol: token.symbol,
+                    rankAtSkip: rankInfo.rank, priorityScoreAtSkip: rankInfo.priorityScore,
+                    reason: "SYNTHETIC_MARKET_REJECTED", priceAtSkip: token.price
+                });
+            }
+            continue;
+        }
 
         const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
 

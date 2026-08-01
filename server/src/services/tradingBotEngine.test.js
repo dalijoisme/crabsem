@@ -1195,6 +1195,89 @@ test("a real, fresh BUY persists both breakdown_json and config_snapshot_json", 
 
 });
 
+// Arjuna vNext sprint, Priority 1 (Synthetic Market Filter) - proves the
+// filter is wired in as the LAST step before a real BUY: an otherwise
+// fully-qualified candidate (passes entryGateService exactly like the
+// test above) is still vetoed when its real gmgn_trenches data looks
+// bot-driven/bundled/wash-traded, and the rejection is real and
+// observable (skipReasons + a WARNING log row), never silent.
+test("SYNTHETIC_MARKET_REJECTED: an otherwise-qualified candidate is vetoed at BUY time by real bot/bundle/wash-pattern trenches data", async () => {
+
+    const testEmail = `tradingbotengine.test.synthetic.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalFindByTokenAddressForThisTest = gmgnTrenchesRepository.findByTokenAddress;
+
+    try{
+
+        tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
+        tradingBotRepository.updateConfig(userId, { min_confidence: 1, min_decay_fraction: 0, max_open_positions: 20 });
+
+        const token = gmgnTokenRepository.getAllTokens().find(t => t.market_cap > 0 && t.price > 0);
+        assert.ok(token, "local dev DB must have at least one real priced token for this test to mean anything");
+
+        const config = tradingBotRepository.getConfig(userId);
+        const philosophy = strategyProfileTranslator.translate(config).philosophy;
+        const ctx = researchEngineFactory.preloadContext([token]);
+        const [signal] = researchEngineFactory.analyzeTokensWithOverride([token], ctx, "momentumHunter", philosophy);
+
+        const liveByAddress = new Map([[token.token_address, {
+            action: "STRONG BUY", confidence: signal.confidence, risk: signal.risk === "HIGH" ? "MEDIUM" : signal.risk,
+            excludeFromTrending: false, hasDecision: true, decayFraction: 1,
+            reasons: signal.reasons, breakdown: signal.breakdown,
+            riskReasons: signal.riskReasons, freshnessPenalty: signal.freshnessPenalty,
+            participantScore: signal.participantScore, marketHealth: signal.marketHealth,
+            participantMax: signal.participantMax, marketHealthMax: signal.marketHealthMax,
+            acceleration: signal.acceleration
+        }]]);
+
+        // Overrides this file's own default clean-trenches monkey-patch
+        // (test.beforeEach above) with a real multi-signal bot/bundle/
+        // wash pattern - the SAME fixture syntheticMarketFilterService.test.js
+        // proves rejects on its own.
+        gmgnTrenchesRepository.findByTokenAddress = () => ({
+            rug_ratio: 0, top_10_holder_rate: 0.1, holders: 5, swaps_24h: 500, buys_24h: 250, sells_24h: 250,
+            raw_json: JSON.stringify({
+                bot_degen_rate: 0.6, bundler_trader_amount_rate: 0.5, rat_trader_amount_rate: 0.08,
+                entrapment_ratio: 0.32, fresh_wallet_rate: 0.6, suspected_insider_hold_rate: 0.08
+            })
+        });
+
+        const freshToken = { ...token, updated_at: nowSqliteTimestamp() };
+        const result = await runCycle(userId, [freshToken], liveByAddress);
+
+        assert.equal(result.opened, 0, "the synthetic-looking candidate must never open a real position");
+        assert.equal(result.skipReasons.SYNTHETIC_MARKET_REJECTED, 1);
+
+        const positions = db.prepare("SELECT id FROM trading_bot_positions WHERE user_id = ?").all(userId);
+        assert.equal(positions.length, 0);
+
+        const warningLog = db.prepare(
+            "SELECT message FROM trading_bot_log WHERE user_id = ? AND message LIKE 'Rejected: Synthetic Orderflow%'"
+        ).get(userId);
+        assert.ok(warningLog, "the rejection must be a real, observable log row, never silent");
+
+    }
+    finally{
+        gmgnTrenchesRepository.findByTokenAddress = originalFindByTokenAddressForThisTest;
+        db.prepare("DELETE FROM trading_bot_trades WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_missed_opportunity WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_candidate_sightings WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_decision_snapshot WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_equity_snapshot WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_positions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
 // Section H (Candidate Card): a real BUY-tier candidate's decision-
 // snapshot row must carry a real, non-null targetPrice (buildRiskBands'
 // own real projection, the exact same function tradeManager.js's

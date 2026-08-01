@@ -7,7 +7,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { evaluateDynamicExit, MIN_TP_PCT } = require("./dynamicExitService");
+const { evaluateDynamicExit, MIN_TP_PCT, computeMomentumHealth } = require("./dynamicExitService");
 
 function position(overrides = {}){
     return { entry_price: 1, current_price: 1, mfe_pct: 0, mae_pct: 0, last_volume_1h: 1000, ...overrides };
@@ -88,4 +88,95 @@ test("marketContextStale has no effect on Stop Loss - a real price crash still c
     });
     assert.equal(result.shouldClose, true);
     assert.equal(result.reason, "STOP_LOSS");
+});
+
+// Arjuna vNext sprint, Priority 2/3 (Exit Intelligence / Profit
+// Protection) - momentumHealthConfig.js's hardBreakdownFloor=25,
+// profitProtectionDecayFloor=45.
+
+const badMomentumToken = {
+    token_address: "TEST_MOMENTUM_HEALTH_BREAKDOWN",
+    price: 1.05, price_change_5m: -5, price_change_1h: 10, // decelerating hard, reversing
+    volume_1h: 100, liquidity: 100, market_cap: 100000, // volume collapsing, liquidity/mcap near nothing
+    buys_5m: 1, sells_5m: 9 // seller-dominated
+};
+const badMomentumTrenches = {
+    net_buy_24h: -500,
+    raw_json: JSON.stringify({
+        bot_degen_rate: 0.6, bundler_trader_amount_rate: 0.5, rat_trader_amount_rate: 0.08,
+        entrapment_ratio: 0.32, fresh_wallet_rate: 0.6, suspected_insider_hold_rate: 0.08,
+        is_wash_trading: false
+    })
+};
+
+test("MOMENTUM_HEALTH_BREAKDOWN: real multi-signal deterioration closes even below minTpPct and above Stop Loss", () => {
+    // The SUKI-shaped case: still technically above its Stop Loss and
+    // nowhere near its +15% TP floor, but every real signal available
+    // (decelerating price, seller-dominated 5m flow, collapsing volume,
+    // thin liquidity/mcap, negative 24h net buy, bot-heavy orderflow) is
+    // bad at once - "keluar sebelum rug pull, bukan sesudah."
+    const result = evaluateDynamicExit({
+        position: position({ last_volume_1h: 1000 }), token: badMomentumToken, trenchesEntry: badMomentumTrenches,
+        engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, true);
+    assert.equal(result.reason, "MOMENTUM_HEALTH_BREAKDOWN");
+    assert.ok(result.momentumHealth.score <= 25);
+});
+
+test("MOMENTUM_HEALTH_BREAKDOWN never fires on stale context - the same real bad data just keeps holding below minTpPct", () => {
+    const token = { ...badMomentumToken, marketContextStale: true };
+    const result = evaluateDynamicExit({
+        position: position({ last_volume_1h: 1000 }), token, trenchesEntry: badMomentumTrenches,
+        engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, false); // never force-close below minTpPct on uncertain/stale data
+});
+
+test("PROFIT_PROTECTION_MOMENTUM_DECAY: moderate momentum decay above minTpPct sells without waiting for the full 4-condition check", () => {
+    const token = {
+        token_address: "TEST_PROFIT_PROTECTION_DECAY",
+        price: 1.20, price_change_5m: 1, price_change_1h: 20, // decelerating but still nominally positive
+        volume_1h: 800, liquidity: 2000, market_cap: 100000,
+        buys_5m: 4, sells_5m: 6
+    };
+    const trenchesEntry = {
+        net_buy_24h: -100,
+        raw_json: JSON.stringify({
+            bot_degen_rate: 0.3, bundler_trader_amount_rate: 0.25, rat_trader_amount_rate: 0.04,
+            entrapment_ratio: 0.16, fresh_wallet_rate: 0.3, suspected_insider_hold_rate: 0.04
+        })
+    };
+    const result = evaluateDynamicExit({
+        position: position({ last_volume_1h: 1000 }), token, trenchesEntry, engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, true);
+    assert.equal(result.reason, "PROFIT_PROTECTION_MOMENTUM_DECAY");
+    assert.ok(result.momentumHealth.score > 25 && result.momentumHealth.score <= 45);
+});
+
+test("A genuinely healthy winner above minTpPct is NOT touched by the new momentum-health triggers - Arjuna's character is unchanged", () => {
+    const token = {
+        token_address: "TEST_HEALTHY_WINNER",
+        price: 1.25, price_change_5m: 5, price_change_1h: 10,
+        volume_1h: 1500, liquidity: 10000, market_cap: 100000,
+        buys_5m: 8, sells_5m: 2
+    };
+    const trenchesEntry = {
+        buys_24h: 80, sells_24h: 20, net_buy_24h: 500,
+        raw_json: JSON.stringify({
+            bot_degen_rate: 0, bundler_trader_amount_rate: 0, rat_trader_amount_rate: 0,
+            entrapment_ratio: 0, fresh_wallet_rate: 0, suspected_insider_hold_rate: 0
+        })
+    };
+    const result = evaluateDynamicExit({
+        position: position({ last_volume_1h: 1000 }), token, trenchesEntry, engineAction: "BUY", stopLossPrice: 0.8
+    });
+    assert.equal(result.shouldClose, false);
+    assert.ok(result.momentumHealth.score > 45);
+});
+
+test("computeMomentumHealth returns a neutral score, never a fabricated 0 or 100, when no real component data exists", () => {
+    const health = computeMomentumHealth({ token_address: "TEST_NO_DATA" }, position(), null);
+    assert.equal(health.score, 50);
 });

@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 
-const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, HELD_POSITION_STALE_AFTER_MS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
+const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
@@ -620,6 +620,198 @@ test("refreshStaleHeldToken applies a real fresh price/liquidity from a successf
     // price_change_5m/volume_1h/trenches were not - never silently
     // trusted as fresh momentum evidence.
     assert.equal(result.marketContextStale, true);
+
+});
+
+// Exit Engine realtime-latency fix - real production incident: a
+// position that peaked well past its own +15% minimum take-profit floor
+// rode all the way back down to a loss before ever closing, even though
+// its token never fell out of the trending snapshot at all (so the
+// staleness fix above never triggered). Root cause: price for a
+// still-trending token only ever updates once every 30s
+// (collectors/gmgn/trendingCollector.js), regardless of how low
+// exit_evaluation_interval_seconds is configured (as fine as 1s). This
+// proves the pure ROI-floor decision, independent of the wiring tests
+// below.
+test("isInProfitProtectionTerritory is true once ROI reaches the position's own take-profit floor, false below it", () => {
+
+    const position = { entry_price: 1.0 };
+
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.05 }, {}), false, "5% ROI is below the default 15% floor");
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.14999 }, {}), false, "just under the floor");
+    // Not 1.15 exactly - (1.15/1.0 - 1) * 100 is 14.999999999999991 in
+    // floating point, not 15 - a real boundary-precision fact about
+    // computed ratios, not something either isInProfitProtectionTerritory
+    // or this test should paper over with an artificial rounding step.
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.150001 }, {}), true, "just past the floor");
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.20 }, {}), true, "20% ROI is past the floor");
+
+    // A profile's own exitOverrides.fixedTpPct (Strategy Profile refactor)
+    // must govern this too, never a second hardcoded floor drifting apart
+    // from the one dynamicExitService.js itself actually exits on.
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.08 }, { exitOverrides: { fixedTpPct: 5 } }), true, "a tighter profile-owned floor must be respected");
+
+    // No real price/entry_price at all - never a fabricated "in profit".
+    assert.equal(isInProfitProtectionTerritory({ entry_price: null }, { price: 1.20 }, {}), false);
+    assert.equal(isInProfitProtectionTerritory(position, {}, {}), false);
+
+});
+
+// markContextStale: false is the Exit Engine realtime-latency fix's own
+// new call shape (services/tradingBotEngine.js's manageOpenPositions,
+// profit-protection branch) - the token is still genuinely fresh (still
+// in this cycle's shared trending snapshot), only its price/liquidity
+// are being re-verified early, so dynamicExitService's momentum-hold
+// check must keep treating price_change_5m/volume_1h/trenches as real,
+// current evidence, never as stale just because a refresh happened.
+test("refreshStaleHeldToken honors markContextStale=false for the profit-protection refresh path, and passes ttlSeconds through to the on-demand client", async () => {
+
+    const freshToken = { token_address: "TestProfitToken333", symbol: "PROFIT3", price: 1.20, price_change_5m: 5, market_cap: 5000, last_seen: nowSqliteTimestamp() };
+    const position = { token_address: "TestProfitToken333", token_symbol: "PROFIT3", id: 997, entry_price: 1.0 };
+
+    const seenTtlSeconds = [];
+    const workingOndemand = {
+        async getTokenPoolInfo(chain, address, ttlSeconds){ seenTtlSeconds.push(ttlSeconds); return { data: { liquidity: "500" } }; },
+        async getTokenKline(chain, address, resolution, ttlSeconds){ seenTtlSeconds.push(ttlSeconds); return { data: { list: [{ close: "1.22" }] } }; }
+    };
+
+    const result = await refreshStaleHeldToken(1, position, freshToken, workingOndemand, {
+        markContextStale: false,
+        ttlSeconds: PROFIT_PROTECTION_REFRESH_TTL_SECONDS
+    });
+
+    assert.equal(result.price, 1.22, "the refreshed price must win over the shared snapshot's own (potentially up to 30s stale) price");
+    assert.equal(result.marketContextStale, false, "a still-fresh token's momentum evidence must never be marked stale just because its price was re-verified early");
+    assert.deepEqual(seenTtlSeconds, [PROFIT_PROTECTION_REFRESH_TTL_SECONDS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS], "both on-demand calls must use the short profit-protection TTL, never the 60s default");
+
+});
+
+// End-to-end wiring proof, the exact real-world shape this fix targets:
+// a token that never leaves the trending snapshot at all (so the
+// staleness branch above never fires) but has already crossed its own
+// take-profit floor must still be re-verified on demand every single
+// exit cycle - proving the 30s trending-tick latency the bug report
+// asked to close is actually gone, not just theoretically fixed.
+test("runExitCycle refreshes an in-profit position's price on demand even while its token is still fresh in the shared trending snapshot", async () => {
+
+    const testEmail = `tradingbotengine.test.profitprotect.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalGetTokenByAddress = gmgnTokenRepository.getTokenByAddress;
+    const nowStamp = nowSqliteTimestamp();
+
+    try{
+
+        tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestProfitProtectToken111", tokenSymbol: "PROFITPROT",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
+        });
+
+        // +20% ROI (past the 15% floor) and genuinely fresh (last_seen/
+        // updated_at = now, still in the shared trending snapshot) - the
+        // distinguishing shape from the already-covered "fallen out of
+        // trending entirely" case above.
+        gmgnTokenRepository.getTokenByAddress = () => ({
+            token_address: "TestProfitProtectToken111", symbol: "PROFITPROT", price: 1.20,
+            price_change_5m: 5, volume_1h: 1000,
+            market_cap: 1000, last_seen: nowStamp, updated_at: nowStamp
+        });
+
+        let refreshCalls = 0;
+        let seenTtlSeconds;
+        const spyOndemand = {
+            async getTokenPoolInfo(chain, address, ttlSeconds){
+                refreshCalls++;
+                seenTtlSeconds = ttlSeconds;
+                return { data: { liquidity: "9000" } };
+            },
+            async getTokenKline(){
+                return { data: { list: [{ close: "1.22" }] } }; // a genuinely newer real price
+            }
+        };
+
+        await runExitCycle(userId, spyOndemand);
+
+        assert.equal(refreshCalls, 1, "an in-profit, still-fresh position must still get an on-demand refresh every exit cycle - never wait out the trending collector's own 30s tick");
+        assert.equal(seenTtlSeconds, PROFIT_PROTECTION_REFRESH_TTL_SECONDS, "the profit-protection refresh must request a short TTL, never reuse the 60s default built for occasional dashboard lookups");
+
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.current_price, 1.22, "the freshly-refreshed price must be what this cycle actually tracked, not the shared snapshot's own (up to 30s stale) 1.20");
+
+    }
+    finally{
+        gmgnTokenRepository.getTokenByAddress = originalGetTokenByAddress;
+        db.prepare("DELETE FROM trading_bot_trades WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_positions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+// Cost guard, mirroring the existing "does NOT call the on-demand
+// fallback for a position whose token is still fresh" test above at a
+// higher ROI just under the floor - proves the new profit-protection
+// trigger is genuinely bounded to positions actually AT/ABOVE their own
+// take-profit floor, never a blanket "always refresh" that would defeat
+// the whole point of gating GMGN load in the first place.
+test("runExitCycle does NOT call the on-demand fallback for a still-fresh position whose ROI has not yet reached its take-profit floor", async () => {
+
+    const testEmail = `tradingbotengine.test.belowfloor.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    const originalGetTokenByAddress = gmgnTokenRepository.getTokenByAddress;
+    const nowStamp = nowSqliteTimestamp();
+
+    try{
+
+        tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
+
+        tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestBelowFloorToken111", tokenSymbol: "BELOWFLOOR",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
+        });
+
+        // +10% ROI - genuinely below the default 15% floor.
+        gmgnTokenRepository.getTokenByAddress = () => ({
+            token_address: "TestBelowFloorToken111", symbol: "BELOWFLOOR", price: 1.10,
+            price_change_5m: 2, volume_1h: 1000,
+            market_cap: 1000, last_seen: nowStamp, updated_at: nowStamp
+        });
+
+        const mustNeverBeCalled = {
+            async getTokenPoolInfo(){ throw new Error("must never be called - ROI has not reached the take-profit floor yet"); },
+            async getTokenKline(){ throw new Error("must never be called - ROI has not reached the take-profit floor yet"); }
+        };
+
+        await runExitCycle(userId, mustNeverBeCalled);
+
+    }
+    finally{
+        gmgnTokenRepository.getTokenByAddress = originalGetTokenByAddress;
+        db.prepare("DELETE FROM trading_bot_trades WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_positions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
 
 });
 

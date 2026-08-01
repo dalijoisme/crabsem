@@ -148,3 +148,38 @@ test("no RUNNING users - tick() is a cheap no-op, never calls getConfig at all",
     }
 
 });
+
+// BUY-halt root-cause fix: a real production incident where this exact
+// scheduler's own tick() (and every other scheduler in the same process)
+// silently stopped running for hours, with trading_bot_state.status
+// still reading 'RUNNING' the whole time - nothing anywhere could prove
+// whether SELL/exit checks were still actually happening. getTickHealth()
+// must reflect a real, just-updated timestamp immediately after tick()
+// runs - even the cheap "no RUNNING users" no-op path above, since a
+// dead process can't distinguish "no users" from "never got a chance to
+// check" and this heartbeat exists specifically to prove the scheduler
+// itself is still alive, independent of what it finds.
+test("getTickHealth reflects a real, just-updated timestamp after every tick(), even the no-RUNNING-users no-op path", () => {
+
+    const restores = [ stub(tradingBotRepository, "findRunningUserIds", () => []) ];
+
+    try{
+
+        const before = scheduler.getTickHealth();
+        assert.equal(before.stuck, false, "never having ticked yet must never itself count as stuck");
+
+        const beforeTickAt = Date.now();
+        scheduler.tick();
+
+        const after = scheduler.getTickHealth();
+        assert.ok(after.lastTickAt, "a real ISO timestamp must be recorded after tick() runs");
+        assert.ok(Date.parse(after.lastTickAt) >= beforeTickAt, "the recorded timestamp must be from this actual tick, not a stale/fabricated one");
+        assert.equal(after.secondsSinceLastTick, 0);
+        assert.equal(after.stuck, false, "a tick that just completed must never be reported as stuck");
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});

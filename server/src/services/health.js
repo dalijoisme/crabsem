@@ -25,6 +25,20 @@ const db = require("../database/connection");
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const gmgnSnapshotRepository = require("../repositories/gmgnSnapshotRepository");
 const gmgnTrendingScheduler = require("../scheduler/gmgnTrendingScheduler");
+// BUY-halt root-cause fix: a real, proven incident (2026-07-31 15:11:51
+// -> 2026-08-01) where THIS process's own tradingBotScheduler/
+// exitEvaluationScheduler ticks silently stopped running entirely -
+// trading_bot_state.status stayed 'RUNNING' the whole time (a static DB
+// flag, never revalidated against a live tick), so nothing surfaced the
+// halt as anything other than "no error, no explanation". Both
+// schedulers' own getTickHealth() (real in-process last-tick timestamps,
+// same shape gmgnTrendingScheduler already proved for its own
+// collectors) are folded into this endpoint below so a dead tick becomes
+// a real, provable /health fact within one tick interval, never
+// something that can only be found later by manually diffing timestamps
+// across tables.
+const tradingBotScheduler = require("../scheduler/tradingBotScheduler");
+const exitEvaluationScheduler = require("../scheduler/exitEvaluationScheduler");
 
 const COLLECTOR_ENDPOINT = "market_rank";
 
@@ -79,17 +93,38 @@ function checkHealth(){
 
     const unhealthyCollectors = collectors.filter(c => !c.healthy).map(c => c.name);
 
+    // BUY-halt root-cause fix: the two schedulers that actually drive
+    // real trading decisions (BUY-side scan/scoring and the independent,
+    // faster exit-only cadence) have their own real liveness now, not
+    // merely inferred from the GMGN collector's own freshness. In the
+    // real incident this closes, every scheduler in the process died
+    // together (proven from the database, see tradingBotScheduler.js's
+    // own header comment) so the two would normally agree - but they are
+    // checked independently here so a FUTURE incident where only one of
+    // them wedges (e.g. a single stuck synchronous DB call inside just
+    // that scheduler's own code path) is still caught, not silently
+    // masked by the other schedulers looking fine.
+    const tradingBotTick = tradingBotScheduler.getTickHealth();
+    const exitEvaluationTick = exitEvaluationScheduler.getTickHealth();
+
     // Previously hardcoded to "ok" regardless of scheduler.status, so
     // a monitor/orchestrator gating on this one field could never see
     // a degraded collector - see the production-readiness audit.
     // "stale"/"never_run" both mean real data has stopped flowing in.
     // Now ALSO degraded when a SPECIFIC collector has failed 3+ times in
     // a row (invisible before - only the "trending" collector's own
-    // freshness ever showed up here) or when a tick is stuck beyond what
-    // a normal batch could ever take (see TICK_STUCK_AFTER_MS).
+    // freshness ever showed up here), when a tick is stuck beyond what
+    // a normal batch could ever take (see TICK_STUCK_AFTER_MS), or when
+    // either the BUY-side or exit-side trading scheduler's own tick has
+    // gone stuck/stale.
 
-    const status = (scheduler.status === "active" && !unhealthyCollectors.length && !tick.stuck)
-        ? "ok" : "degraded";
+    const status = (
+        scheduler.status === "active"
+        && !unhealthyCollectors.length
+        && !tick.stuck
+        && !tradingBotTick.stuck
+        && !exitEvaluationTick.stuck
+    ) ? "ok" : "degraded";
 
     return {
 
@@ -108,6 +143,10 @@ function checkHealth(){
         unhealthyCollectors,
 
         tick,
+
+        tradingBotScheduler: tradingBotTick,
+
+        exitEvaluationScheduler: exitEvaluationTick,
 
         uptime: process.uptime()
 

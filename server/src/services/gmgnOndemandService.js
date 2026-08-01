@@ -80,7 +80,16 @@ function getTokenSecurity(chain, address){
 
 }
 
-function getTokenPoolInfo(chain, address){
+// ttlSeconds is overridable (default unchanged at 60s, every existing
+// caller unaffected) - Exit Engine realtime-latency fix
+// (services/tradingBotEngine.js's refreshStaleHeldToken): an OPEN
+// position already at/above its own take-profit floor needs this cache
+// to expire close to that user's own configured
+// exit_evaluation_interval_seconds (as low as 1s), never the 60s default
+// built for occasional dashboard/wallet-intelligence lookups - otherwise
+// re-checking every exit cycle just replays the same 60s-old cached
+// response instead of ever fetching a genuinely newer price.
+function getTokenPoolInfo(chain, address, ttlSeconds = 60){
 
     return fetchCached({
 
@@ -88,7 +97,7 @@ function getTokenPoolInfo(chain, address){
 
         params: { chain, address },
 
-        ttlSeconds: 60,
+        ttlSeconds,
 
         fetcher: client => client.getTokenPoolInfo(chain, address)
 
@@ -128,7 +137,8 @@ function getTokenTopTraders(chain, address){
 
 }
 
-function getTokenKline(chain, address, resolution){
+// ttlSeconds overridable - see getTokenPoolInfo's own comment above.
+function getTokenKline(chain, address, resolution, ttlSeconds = 60){
 
     return fetchCached({
 
@@ -136,7 +146,7 @@ function getTokenKline(chain, address, resolution){
 
         params: { chain, address, resolution },
 
-        ttlSeconds: 60,
+        ttlSeconds,
 
         fetcher: client => client.getTokenKline(chain, address, resolution)
 

@@ -27,6 +27,25 @@ const DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS = 5;
 const lastCycleAtByUser = new Map(); // userId -> ms epoch of that user's last exit-evaluation cycle
 const userCycleInFlight = new Set(); // userId currently mid-cycle - so one user's slow cycle can't overlap ITSELF; never blocks another user's
 
+// BUY-halt root-cause fix (see scheduler/tradingBotScheduler.js's own
+// header comment on currentTickStartedAt for the real incident this
+// closes - a scheduler's own tick() dying silently, with nothing
+// anywhere able to prove it, is exactly what let SELL/Dynamic Exit look
+// "stuck" with no explanation). Same shape, applied here too since this
+// scheduler is the one actually driving real-time exit checks.
+let lastTickAt = null;
+
+function getTickHealth(){
+    const secondsSinceLastTick = lastTickAt != null ? Math.round((Date.now() - lastTickAt) / 1000) : null;
+    // Generous relative to this scheduler's own 1s outer tick - 10x
+    // gives real slack for a slow findRunningUserIds() call before
+    // calling this scheduler itself stuck, same "generous multiple of an
+    // established real cadence" convention used throughout this codebase
+    // (see health.js's own STALE_AFTER_SECONDS).
+    const stuck = secondsSinceLastTick != null && secondsSinceLastTick > (10 * TICK_MS / 1000);
+    return { lastTickAt: lastTickAt != null ? new Date(lastTickAt).toISOString() : null, secondsSinceLastTick, stuck };
+}
+
 function isDue(userId, now){
     if(userCycleInFlight.has(userId)) return false;
     const config = tradingBotRepository.getConfig(userId);
@@ -67,6 +86,8 @@ async function runUserExitCycle(userId){
 
 function tick(){
 
+    lastTickAt = Date.now();
+
     const runningUserIds = tradingBotRepository.findRunningUserIds();
     if(!runningUserIds.length) return;
 
@@ -93,4 +114,5 @@ function start(){
 
 // tick is exported alongside start purely for this file's own regression
 // test, same convention scheduler/tradingBotScheduler.js already uses.
-module.exports = { start, tick, DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS };
+// getTickHealth is exported for services/health.js.
+module.exports = { start, tick, DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS, getTickHealth };

@@ -45,6 +45,7 @@ const tradingBotCandidateFilter = require("./tradingBotCandidateFilter");
 const opportunityPriorityService = require("./opportunityPriorityService");
 const emiService = require("./emiService");
 const tradeManager = require("./tradeManager");
+const dynamicExitService = require("./dynamicExitService");
 const entryGateService = require("./entryGateService");
 const { marketAgeSecondsFor } = entryGateService;
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
@@ -85,6 +86,39 @@ const productionEngineResolver = require("./productionEngineResolver");
 // bot cycles for every existing scan_interval_seconds default.
 const HELD_POSITION_CHAIN = "sol";
 const HELD_POSITION_STALE_AFTER_MS = 90 * 1000;
+
+// Exit Engine realtime-latency fix (real incident: a position peaked
+// well past its own take-profit floor, then rode all the way back down
+// to a loss before ever closing). Proven root cause, distinct from the
+// staleness case above: even a token that NEVER falls out of trending
+// (so HELD_POSITION_STALE_AFTER_MS above never trips) still only gets a
+// new price once every 30s - collectors/gmgn/trendingCollector.js's own
+// tick - no matter how low a user sets exit_evaluation_interval_seconds
+// (as fine as 1s, scheduler/exitEvaluationScheduler.js). Once a position
+// reaches its own take-profit floor, services/dynamicExitService.js's
+// "ride the winner, but must see reversal fast" branch is what's
+// actually deciding whether to keep holding - exactly where a 30s-old
+// price is the most costly to get wrong. Fix: from that point on, every
+// exit cycle re-verifies price on demand too, not only once genuinely
+// stale - bounded to positions that have already reached
+// profit-protection territory (a small subset of an already-small open-
+// position set), never the full open-position set, so this can never
+// increase GMGN load for a position still below its own floor.
+function isInProfitProtectionTerritory(position, token, botConfig){
+    const currentPrice = Number(token?.price) || position.current_price || position.entry_price;
+    if(!currentPrice || !position.entry_price) return false;
+    const roiPct = ((currentPrice / position.entry_price) - 1) * 100;
+    const minTpPct = botConfig?.exitOverrides?.fixedTpPct ?? dynamicExitService.MIN_TP_PCT;
+    return roiPct >= minTpPct;
+}
+
+// Generous relative to the tightest allowed exit_evaluation_interval_seconds
+// (1s) while still respectful of GMGN's own rate limit - a profit-
+// protection refresh is bounded to positions already at/above their own
+// TP floor, never the full open-position set, so a short TTL here is
+// cheap in aggregate. Deliberately still well under the trending
+// collector's own 30s tick (the exact latency this fix exists to beat).
+const PROFIT_PROTECTION_REFRESH_TTL_SECONDS = 5;
 
 function msSinceTokenSeen(token){
     const lastSeen = token?.last_seen || token?.updated_at;
@@ -128,13 +162,29 @@ function extractFreshPriceAndLiquidity(poolResult, klineResult){
 // zero response, logs a real WARNING and keeps using whatever token
 // data was already in hand - never crashes the cycle, never fabricates
 // a price.
-async function refreshStaleHeldToken(userId, position, token, ondemandService){
+// markContextStale (default true, preserving every existing caller's
+// exact behavior): true for the ORIGINAL staleness case (token fell out
+// of the shared trending snapshot entirely - price_change_5m/volume_1h/
+// trenches really are stale, possibly hours old, alongside the price).
+// The Exit Engine realtime-latency fix's NEW trigger (a position already
+// in profit-protection territory, refreshed purely to beat the trending
+// collector's own 30s cadence) passes markContextStale=false when the
+// token is otherwise still fresh (still in this cycle's shared trending
+// snapshot) - only its price/liquidity were up to 30s old, not its
+// momentum fields, so forcing dynamicExitService.js's momentum-hold
+// check to treat them as stale would falsely close a genuinely still-
+// pumping winner on its very next cycle, a strictly worse regression
+// than the latency this fix exists to close.
+// ttlSeconds (optional): overrides the on-demand cache's own default
+// 60s TTL - see services/gmgnOndemandService.js's own comment on why the
+// profit-protection path needs a much shorter one.
+async function refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale = true, ttlSeconds } = {}){
 
     try{
 
         const [poolResult, klineResult] = await Promise.all([
-            ondemandService.getTokenPoolInfo(HELD_POSITION_CHAIN, position.token_address),
-            ondemandService.getTokenKline(HELD_POSITION_CHAIN, position.token_address, "1h")
+            ondemandService.getTokenPoolInfo(HELD_POSITION_CHAIN, position.token_address, ttlSeconds),
+            ondemandService.getTokenKline(HELD_POSITION_CHAIN, position.token_address, "1h", ttlSeconds)
         ]);
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
@@ -148,14 +198,14 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService){
             // refresh only re-verifies price/liquidity (the two Hard Stop
             // Loss/rug-check actually depend on) - price_change_5m,
             // volume_1h, and this token's trenches row are NOT re-fetched
-            // here and may be hours stale, carried through unchanged from
-            // whatever `token` was (or absent entirely). Flagged so
-            // dynamicExitService's momentum-hold logic (the +15% "let it
-            // ride while real evidence supports it" branch, never the
-            // Stop Loss floor, which always uses the fresh price above)
-            // never treats stale/absent momentum evidence as license to
-            // keep holding.
-            marketContextStale: true
+            // here and may be stale, carried through unchanged from
+            // whatever `token` was (or absent entirely). Flagged (when
+            // markContextStale is true) so dynamicExitService's
+            // momentum-hold logic (the +15% "let it ride while real
+            // evidence supports it" branch, never the Stop Loss floor,
+            // which always uses the fresh price above) never treats
+            // stale/absent momentum evidence as license to keep holding.
+            marketContextStale: markContextStale
         };
 
     }
@@ -373,8 +423,34 @@ async function manageOpenPositions(userId, tradeManagerForUser, botConfig, token
         // shared trending snapshot (or was never in it at all) gets its
         // own on-demand freshness check here, so a held position is
         // never evaluated against a price that stopped being real.
-        if(msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS){
-            token = await refreshStaleHeldToken(userId, position, token, ondemandService);
+        const stale = msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS;
+
+        // Exit Engine realtime-latency fix (see isInProfitProtectionTerritory's
+        // own header comment above) - a position already at/above its own
+        // take-profit floor is refreshed EVERY exit cycle regardless of
+        // staleness, since that is exactly where a 30s-old trending-tick
+        // price costs the most. Skipped when `stale` already covers it
+        // (avoids a redundant duplicate check/log) or when there is no
+        // token at all yet (nothing to compute an ROI against - the
+        // `stale` branch above already handles token==null via
+        // msSinceTokenSeen's own Infinity fallback).
+        const needsProfitProtectionRefresh = !stale && token && isInProfitProtectionTerritory(position, token, botConfig);
+
+        if(stale){
+            token = await refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale: true });
+        }
+        else if(needsProfitProtectionRefresh){
+            // markContextStale: false - the token is still in this
+            // cycle's shared trending snapshot (or was seen within the
+            // last HELD_POSITION_STALE_AFTER_MS), so its price_change_5m/
+            // volume_1h/trenches are still genuinely fresh; only price/
+            // liquidity are being re-verified early here, so
+            // dynamicExitService's momentum-hold check must keep treating
+            // that momentum evidence as real, never as stale.
+            token = await refreshStaleHeldToken(userId, position, token, ondemandService, {
+                markContextStale: false,
+                ttlSeconds: PROFIT_PROTECTION_REFRESH_TTL_SECONDS
+            });
         }
         if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
 
@@ -809,10 +885,11 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
 // tradingBotService.js itself - a top-level require in the other
 // direction would be circular.
 //
-// msSinceTokenSeen/extractFreshPriceAndLiquidity/refreshStaleHeldToken
-// exported purely for this file's own regression test (Production
-// Stabilization V1, Section A) - pure/near-pure functions, no other
-// module calls them directly.
+// msSinceTokenSeen/extractFreshPriceAndLiquidity/refreshStaleHeldToken/
+// isInProfitProtectionTerritory exported purely for this file's own
+// regression test (Production Stabilization V1, Section A; Exit Engine
+// realtime-latency fix) - pure/near-pure functions, no other module
+// calls them directly.
 //
 // runExitCycle is exported for scheduler/exitEvaluationScheduler.js - the
 // independent, faster exit-only cadence (Exit Evaluation Interval
@@ -821,6 +898,7 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
 module.exports = {
     runCycle, orderCandidates, buildLiveExecutionOptions,
     msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
-    HELD_POSITION_STALE_AFTER_MS,
+    isInProfitProtectionTerritory,
+    HELD_POSITION_STALE_AFTER_MS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS,
     manageOpenPositions, runExitCycle
 };

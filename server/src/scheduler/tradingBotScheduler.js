@@ -53,6 +53,50 @@ const TICK_MS = 15000;
 const lastCycleAtByUser = new Map(); // userId -> ms epoch of that user's last cycle
 const userCycleInFlight = new Set(); // userId currently mid-cycle - so one user's slow cycle can't overlap ITSELF; never blocks another user's
 
+// BUY-halt root-cause fix (real production incident, 2026-07-31 15:11:51
+// -> 2026-08-01: this exact scheduler's own tick() stopped running
+// entirely - proven by every independently-scheduled table in the
+// database (gmgn_tokens, gmgn_trenches, token_price_history,
+// trading_bot_log - each fed by a DIFFERENT scheduler on a DIFFERENT
+// interval) all going silent at the same moment, which only a dead/
+// frozen process explains. trading_bot_state.status stayed 'RUNNING'
+// the entire time - it is a static DB flag, never revalidated against
+// whether a cycle is actually still happening - so nothing anywhere
+// could tell "BUY stopped because every coin was rejected" apart from
+// "BUY stopped because this scheduler's own tick() silently died",
+// exactly the ambiguity the bug report asked to close. Same
+// currentTickStartedAt/lastTickFinishedAt/lastTickDurationMs shape
+// scheduler/gmgnTrendingScheduler.js already proved for this - getTickHealth()
+// below is read by services/health.js so a dead tick is a real, provable
+// /health fact within one tick interval, not something that can only be
+// discovered hours later by manually diffing timestamps across tables.
+let currentTickStartedAt = null;
+let lastTickFinishedAt = null;
+let lastTickDurationMs = null;
+let lastTickError = null;
+
+// Generous relative to a real tick (scoring + fan-out for every due
+// user) - same "generous multiple of an established real cadence"
+// convention health.js's own STALE_AFTER_SECONDS already uses (3x the
+// producer's own interval).
+const TICK_STUCK_AFTER_MS = 3 * TICK_MS;
+
+function getTickHealth(){
+    const stuck = currentTickStartedAt != null && (Date.now() - currentTickStartedAt) > TICK_STUCK_AFTER_MS;
+    const secondsSinceLastFinish = lastTickFinishedAt != null ? Math.round((Date.now() - lastTickFinishedAt) / 1000) : null;
+    return {
+        currentTickStartedAt,
+        lastTickFinishedAt: lastTickFinishedAt != null ? new Date(lastTickFinishedAt).toISOString() : null,
+        lastTickDurationMs,
+        lastTickError,
+        secondsSinceLastFinish,
+        // Never having finished a tick yet (fresh process start) is not
+        // itself "stuck" - only a tick that started and never returned
+        // within TICK_STUCK_AFTER_MS is.
+        stuck
+    };
+}
+
 function isDue(userId, now){
     if(userCycleInFlight.has(userId)) return false;
     const config = tradingBotRepository.getConfig(userId);
@@ -191,19 +235,13 @@ async function computeLiveByAddressForPhilosophy(tokens, philosophy){
 
 }
 
-async function tick(){
-
-    // TEMPORARY DIAGNOSTIC LOGGING - remove once it's confirmed tick()
-    // is actually being invoked in production.
-    console.log("[trading-bot-scheduler] tick() entered");
+async function runTick(){
 
     const runningUserIds = tradingBotRepository.findRunningUserIds();
-    console.log("[trading-bot-scheduler] runningUserIds =", runningUserIds.length);
     if(!runningUserIds.length) return;
 
     const now = Date.now();
     const dueUserIds = runningUserIds.filter(userId => isDue(userId, now));
-    console.log("[trading-bot-scheduler] dueUserIds =", dueUserIds.length);
     if(!dueUserIds.length) return;
 
     // Compute the candidate universe ONCE this tick, not once per due
@@ -221,12 +259,7 @@ async function tick(){
     // (services/tradingBotService.js's getBottleneckReport).
     const { tokens, collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap } = freshUniverseService.getBuyCandidateUniverse();
 
-    // TEMPORARY DIAGNOSTIC LOGGING - remove once snapshot insertion is
-    // confirmed running in production. No try/catch here on purpose: if
-    // insertSnapshot() throws, PM2 must print the real stack trace.
-    console.log(`[trading-bot-scheduler] DIAG about to insertSnapshot: collectorTotalCount=${collectorTotalCount} freshUniverseCount=${freshUniverseCount} maxAgeSeconds=${maxAgeSeconds} minMarketCap=${minMarketCap}`);
     tradingBotFreshUniverseSnapshotRepository.insertSnapshot({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
-    console.log("[trading-bot-scheduler] DIAG Fresh universe snapshot inserted successfully.");
 
     console.log(`[trading-bot-scheduler] fresh universe: collector=${collectorTotalCount} fresh=${freshUniverseCount}`);
 
@@ -268,6 +301,40 @@ async function tick(){
 
 }
 
+// BUY-halt root-cause fix: thin wrapper around runTick() (the actual,
+// unchanged scan/score/fan-out logic above) whose only job is to make
+// this scheduler's own liveness a real, always-updated fact -
+// currentTickStartedAt is set BEFORE runTick() does anything, so even a
+// runTick() that throws or never resolves still leaves a real,
+// queryable "this is when it last started" behind for getTickHealth()/
+// services/health.js to report. See this file's own header comment on
+// currentTickStartedAt above for the incident this closes.
+async function tick(){
+
+    currentTickStartedAt = Date.now();
+
+    try{
+
+        await runTick();
+        lastTickError = null;
+
+    }
+    catch(err){
+
+        lastTickError = err.message;
+        throw err; // unchanged behavior - start()'s own .catch() still logs it
+
+    }
+    finally{
+
+        lastTickDurationMs = Date.now() - currentTickStartedAt;
+        lastTickFinishedAt = Date.now();
+        currentTickStartedAt = null;
+
+    }
+
+}
+
 function start(){
 
     console.log(`[trading-bot-scheduler] Starting - checking every ${TICK_MS / 1000}s for any RUNNING user's bot due for its own cycle`);
@@ -286,4 +353,8 @@ function start(){
 // test (tradingBotScheduler.test.js) - proves the per-distinct-profile
 // wiring fix, same convention services/tradingBotEngine.js already uses
 // for orderCandidates. No other module calls it directly.
-module.exports = { start, tick };
+//
+// getTickHealth is exported for services/health.js - see this file's own
+// header comment on currentTickStartedAt for why this scheduler's own
+// liveness needed to become a real, externally-checkable fact.
+module.exports = { start, tick, getTickHealth };

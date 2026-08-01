@@ -178,3 +178,69 @@ test("tick() sources tokens from freshUniverseService (never getAllTokens direct
     assert.deepEqual(snapshotCalls[0], { collectorTotalCount: 14023, freshUniverseCount: 1, maxAgeSeconds: 120, minMarketCap: 0 });
 
 });
+
+// BUY-halt root-cause fix: a real production incident (2026-07-31
+// 15:11:51 -> 2026-08-01) where this exact scheduler's own tick() -
+// along with every other scheduler in the same process - silently
+// stopped running for hours. trading_bot_state.status stayed 'RUNNING'
+// throughout (a static DB flag, never revalidated against a live tick),
+// so nothing anywhere could prove BUY had stopped because this
+// scheduler itself had died, as opposed to every real candidate
+// genuinely being rejected. getTickHealth() (read by services/health.js)
+// must reflect a real, just-updated timestamp after every tick() -
+// including the cheap "no RUNNING users" no-op path, since a dead
+// process can't tell "no users" apart from "never got a chance to
+// check", and this heartbeat exists to prove liveness independent of
+// what any given tick finds.
+test("getTickHealth reflects a real, just-updated timestamp after every tick(), even the no-RUNNING-users no-op path", async () => {
+
+    const restores = [ stub(tradingBotRepository, "findRunningUserIds", () => []) ];
+
+    try{
+
+        const before = scheduler.getTickHealth();
+        assert.equal(before.stuck, false, "never having ticked yet must never itself count as stuck");
+
+        const beforeTickAt = Date.now();
+        await scheduler.tick();
+
+        const after = scheduler.getTickHealth();
+        assert.ok(after.lastTickFinishedAt, "a real ISO timestamp must be recorded after tick() completes");
+        assert.ok(Date.parse(after.lastTickFinishedAt) >= beforeTickAt, "the recorded timestamp must be from this actual tick, not a stale/fabricated one");
+        assert.equal(after.secondsSinceLastFinish, 0);
+        assert.equal(after.stuck, false, "a tick that just completed must never be reported as stuck");
+        assert.equal(after.currentTickStartedAt, null, "a completed tick must not still show as in-progress");
+        assert.equal(after.lastTickError, null);
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});
+
+// A tick that genuinely throws (e.g. freshUniverseService itself
+// failing) must still leave a real, queryable heartbeat behind - the
+// whole point of putting getTickHealth() ahead of a dead process is that
+// it must survive the FAILURE case too, not only the happy path.
+test("getTickHealth records the real error and still updates lastTickFinishedAt when a tick throws", async () => {
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => { throw new Error("simulated DB failure"); })
+    ];
+
+    try{
+
+        await assert.rejects(() => scheduler.tick(), /simulated DB failure/);
+
+        const health = scheduler.getTickHealth();
+        assert.equal(health.lastTickError, "simulated DB failure");
+        assert.ok(health.lastTickFinishedAt);
+        assert.equal(health.currentTickStartedAt, null);
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});

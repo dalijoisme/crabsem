@@ -22,13 +22,7 @@ const insertSnapshotStmt = db.prepare(`
 `);
 
 function insertSnapshot({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap }){
-    // TEMPORARY DIAGNOSTIC LOGGING - remove once snapshot insertion is
-    // confirmed running in production. No try/catch here on purpose: if
-    // run() throws, PM2 must print the real stack trace, not a swallowed
-    // error.
-    console.log("[tradingBotFreshUniverseSnapshotRepository] DIAG Inserting fresh universe snapshot", { collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
-    const info = insertSnapshotStmt.run({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
-    console.log("[tradingBotFreshUniverseSnapshotRepository] DIAG insertSnapshotStmt.run() result", { changes: info.changes, lastInsertRowid: info.lastInsertRowid });
+    insertSnapshotStmt.run({ collectorTotalCount, freshUniverseCount, maxAgeSeconds, minMarketCap });
 }
 
 // Averaged (not summed) across ticks in the window - collector_total_count

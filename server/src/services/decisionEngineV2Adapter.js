@@ -19,10 +19,40 @@
 //
 // buildRiskBands is a PURE passthrough to productionV2.buildRiskBands -
 // Decision Engine V2 never touches TP/SL.
+//
+// Decision Trace / Explain Mode sprint: logExplainTrace() below is the
+// ONLY addition in this sprint, and it is read-only by construction - it
+// runs strictly AFTER decisionEngineV2.evaluateV2() has already produced
+// the final action/confidence, and only ever calls console.log with data
+// already computed. It cannot change a decision because it never runs
+// before one is made and never feeds anything back into applyDecisionEngineV2's
+// own return value's action/confidence (those are set from `result`
+// exactly as before this sprint). Off by default
+// (config.DECISION_ENGINE_V2_EXPLAIN, env DECISION_ENGINE_V2_EXPLAIN) -
+// zero output, zero overhead beyond one boolean check, unless
+// deliberately enabled for an audit session. Logs only BUY/STRONG BUY
+// -tier base candidates (the ones this sprint's own diagnostic question -
+// "why is nothing passing?" - is actually about); HOLD/AVOID-tier
+// candidates are never touched by Layer 5's override logic anyway (see
+// decide()'s own "never upgrades" guarantee).
 
 const db = require("../database/connection");
+const envConfig = require("../config/env");
 const productionV2 = require("./productionEngineV2");
 const decisionEngineV2 = require("./decisionEngineV2");
+
+// explainEnabled defaults to the real central config - production
+// callers never pass the third argument, so behavior is always driven
+// by config/env.js's DECISION_ENGINE_V2_EXPLAIN exactly as documented.
+// The parameter exists so this exact function (not a copy) can be unit-
+// tested for both branches without needing to mutate the frozen env
+// config singleton.
+function logExplainTrace(token, result, explainEnabled = envConfig.DECISION_ENGINE_V2_EXPLAIN){
+    if(!explainEnabled) return;
+    if(result.baseAction !== "BUY" && result.baseAction !== "STRONG BUY") return;
+    const label = token?.symbol || token?.token_address || "(unknown token)";
+    console.log(`[decision-engine-v2-explain] ${label}`, JSON.stringify(result.trace, null, 2));
+}
 
 // Historical index cache: rebuilt at most once per REFRESH_MS, never on
 // every single analyzeToken(s) call - trading_bot_trades/positions don't
@@ -59,7 +89,7 @@ function _resetCacheForTests(){
     cachedAt = 0;
 }
 
-function applyDecisionEngineV2(baseSignal){
+function applyDecisionEngineV2(baseSignal, token){
     const historicalIndex = getHistoricalIndex();
     const result = decisionEngineV2.evaluateV2(
         {
@@ -71,6 +101,8 @@ function applyDecisionEngineV2(baseSignal){
         },
         historicalIndex
     );
+
+    logExplainTrace(token, result);
 
     return {
         ...baseSignal,
@@ -87,18 +119,23 @@ function applyDecisionEngineV2(baseSignal){
             historical: result.historical,
             sampleConfidenceFactor: result.sampleConfidenceFactor,
             fallbackToBaseScoring: result.fallbackToBaseScoring,
-            reasoning: result.reasoning
+            reasoning: result.reasoning,
+            // Decision Trace / Explain Mode sprint - same data
+            // logExplainTrace prints, also available to any direct
+            // caller of analyzeToken(s) (e.g. entryGateService's
+            // reentry-scrutiny check) without needing the env flag on.
+            trace: result.trace
         }
     };
 }
 
 function analyzeToken(token, ctx, philosophyOverride){
     const base = productionV2.analyzeToken(token, ctx, philosophyOverride);
-    return applyDecisionEngineV2(base);
+    return applyDecisionEngineV2(base, token);
 }
 
 function analyzeTokens(tokens, philosophyOverride){
-    return productionV2.analyzeTokens(tokens, philosophyOverride).map(applyDecisionEngineV2);
+    return productionV2.analyzeTokens(tokens, philosophyOverride).map((signal, i) => applyDecisionEngineV2(signal, tokens[i]));
 }
 
 function buildRiskBands(token, signal, exitOverrides){
@@ -109,5 +146,5 @@ module.exports = {
     analyzeToken, analyzeTokens, buildRiskBands,
     // Exported for observability/testing only - not called by any
     // trading-logic file.
-    getHistoricalIndex, _resetCacheForTests
+    getHistoricalIndex, _resetCacheForTests, logExplainTrace
 };

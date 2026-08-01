@@ -90,7 +90,14 @@ const config = Object.freeze({
     // default - means Founder Mode fails closed: no wallet may trade
     // until this is deliberately set to the founder's real Trading
     // Wallet public key. This lock stays in place until Public Alpha.
-    FOUNDER_WALLET_PUBLIC_KEY: process.env.FOUNDER_WALLET_PUBLIC_KEY || null
+    FOUNDER_WALLET_PUBLIC_KEY: process.env.FOUNDER_WALLET_PUBLIC_KEY || null,
+
+    // Decision Trace / Explain Mode sprint - off by default (zero extra
+    // console output, zero behavior change) so production logs aren't
+    // flooded unless deliberately turned on for an audit session. Never
+    // changes a decision - see services/decisionEngineV2Adapter.js's own
+    // header comment.
+    DECISION_ENGINE_V2_EXPLAIN: process.env.DECISION_ENGINE_V2_EXPLAIN === "1" || process.env.DECISION_ENGINE_V2_EXPLAIN === "true"
 
 });
 

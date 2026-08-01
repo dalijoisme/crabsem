@@ -240,6 +240,61 @@ function decide(baseSignal, historicalMatch, confidenceResult, config = defaultC
 }
 
 // ---------------------------------------------------------------------
+// Decision Trace / Explain Mode sprint. PURE, read-only: builds a
+// structured explanation of how a decision was reached from data
+// already computed by Layers 2-5 above - never recomputes anything,
+// never influences action/confidence (evaluateV2 calls this AFTER
+// decide() has already produced the final action - the trace can only
+// ever describe that outcome, not change it). Every field the sprint
+// asked for: base action/confidence, the historical combination found,
+// sample size, historical win rate/ROI, each weighted
+// bonus/penalty component actually applied, confidence before/after,
+// and the final reasoning.
+function buildTrace(baseSignal, historicalMatch, confidenceResult, decisionResult){
+    const adjustments = [];
+
+    if(confidenceResult.usedHistorical){
+        const w = confidenceResult.weightsUsed;
+        adjustments.push({
+            component: "baseScore",
+            value: baseSignal.confidence,
+            weight: w.baseWeight,
+            contribution: round(baseSignal.confidence * w.baseWeight)
+        });
+        adjustments.push({
+            component: "historicalWinRate",
+            value: historicalMatch.winRatePct,
+            weight: w.winRateWeight,
+            contribution: round(historicalMatch.winRatePct * w.winRateWeight)
+        });
+        adjustments.push({
+            component: "expectedRoi (mapped to 0-100 score)",
+            value: confidenceResult.roiScore,
+            weight: w.roiWeight,
+            contribution: round(confidenceResult.roiScore * w.roiWeight)
+        });
+    }
+
+    return {
+        baseAction: baseSignal.action,
+        baseConfidence: baseSignal.confidence,
+        historicalCombo: historicalMatch?.comboKey ?? null,
+        sampleSize: historicalMatch?.n ?? 0,
+        historicalWinRatePct: historicalMatch?.winRatePct ?? null,
+        historicalAvgRoiPct: historicalMatch?.avgRoiPct ?? null,
+        historicalMedianRoiPct: historicalMatch?.medianRoiPct ?? null,
+        sampleConfidenceFactor: confidenceResult.sampleConfidenceFactor,
+        usedHistorical: confidenceResult.usedHistorical,
+        adjustments,
+        confidenceBefore: baseSignal.confidence,
+        confidenceAfter: confidenceResult.confidenceV2,
+        finalAction: decisionResult.action,
+        changedFromBase: decisionResult.action !== baseSignal.action,
+        reasoning: decisionResult.reasoning
+    };
+}
+
+// ---------------------------------------------------------------------
 // Top-level orchestrator - wires Layers 2-5 together for one candidate.
 // baseSignal: { action, confidence, risk, reasons, riskReasons } - the
 // EXACT shape the base engine already produces (Layer 1, untouched).
@@ -249,6 +304,7 @@ function evaluateV2(baseSignal, historicalIndex, config = defaultConfig){
     const historicalMatch = lookupBestHistoricalMatch(historicalIndex, baseSignal.reasons, { maxComboSize: config.maxComboSize });
     const confidenceResult = computeConfidenceV2(baseSignal.confidence, historicalMatch, config);
     const decision = decide(baseSignal, historicalMatch, confidenceResult, config);
+    const trace = buildTrace(baseSignal, historicalMatch, confidenceResult, decision);
 
     return {
         action: decision.action,
@@ -259,7 +315,11 @@ function evaluateV2(baseSignal, historicalIndex, config = defaultConfig){
         historical: historicalMatch,
         sampleConfidenceFactor: confidenceResult.sampleConfidenceFactor,
         fallbackToBaseScoring: decision.fallbackToBaseScoring,
-        reasoning: decision.reasoning
+        reasoning: decision.reasoning,
+        // Decision Trace / Explain Mode sprint - additive only. Nothing
+        // above this line changed: action/confidence/reasoning are
+        // computed exactly as before, trace merely describes them.
+        trace
     };
 }
 
@@ -269,6 +329,7 @@ module.exports = {
     lookupBestHistoricalMatch,
     computeConfidenceV2,
     decide,
+    buildTrace,
     evaluateV2,
     defaultConfig
 };

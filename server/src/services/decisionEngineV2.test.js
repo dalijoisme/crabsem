@@ -200,3 +200,60 @@ test("evaluateV2 end-to-end: no historical record at all falls back to base scor
     assert.equal(result.confidence, 55);
     assert.equal(result.fallbackToBaseScoring, true);
 });
+
+// ---------------------------------------------------------------------
+// Decision Trace / Explain Mode sprint - buildTrace()/evaluateV2().trace.
+// Read-only by construction: these tests prove the trace DESCRIBES the
+// already-computed decision, never influences it.
+// ---------------------------------------------------------------------
+
+test("evaluateV2's trace reports every required field when historical was used, and the adjustments sum to confidenceAfter", () => {
+    const richTrades = Array.from({ length: 25 }, (_, i) =>
+        trade(i % 5 === 0 ? -5 : 20, ["Net accumulation detected ($1)", "Smart money detected ($1)"])
+    );
+    const index = buildHistoricalStatsIndex(richTrades);
+    const baseSignal = { action: "BUY", confidence: 60, risk: "MEDIUM", reasons: ["Net accumulation detected ($5)", "Smart money detected ($5)"], riskReasons: [] };
+
+    const result = evaluateV2(baseSignal, index);
+    const trace = result.trace;
+
+    assert.equal(trace.baseAction, "BUY");
+    assert.equal(trace.baseConfidence, 60);
+    assert.equal(trace.historicalCombo, "Net accumulation detected + Smart money detected");
+    assert.equal(trace.sampleSize, 25);
+    assert.equal(trace.usedHistorical, true);
+    assert.equal(trace.adjustments.length, 3);
+    assert.equal(trace.confidenceBefore, 60);
+    assert.equal(trace.confidenceAfter, result.confidence);
+    assert.equal(trace.finalAction, result.action);
+
+    const summedContributions = Math.round(trace.adjustments.reduce((sum, a) => sum + a.contribution, 0) * 100) / 100;
+    assert.equal(summedContributions, trace.confidenceAfter);
+});
+
+test("evaluateV2's trace reports an empty adjustments list and honest nulls when historical was never used (thin sample)", () => {
+    const index = buildHistoricalStatsIndex(sampleTrades);
+    const baseSignal = { action: "BUY", confidence: 55, risk: "LOW", reasons: ["Totally novel feature never seen before"], riskReasons: [] };
+
+    const trace = evaluateV2(baseSignal, index).trace;
+
+    assert.equal(trace.usedHistorical, false);
+    assert.deepEqual(trace.adjustments, []);
+    assert.equal(trace.historicalCombo, null);
+    assert.equal(trace.sampleSize, 0);
+    assert.equal(trace.confidenceBefore, 55);
+    assert.equal(trace.confidenceAfter, 55);
+    assert.equal(trace.changedFromBase, false);
+});
+
+test("evaluateV2's trace marks changedFromBase:true and carries the downgrade reasoning when a BUY is downgraded to HOLD", () => {
+    const losingTrades = Array.from({ length: 10 }, () => trade(-20, ["Bad combo feature"]));
+    const index = buildHistoricalStatsIndex(losingTrades);
+    const baseSignal = { action: "BUY", confidence: 70, risk: "MEDIUM", reasons: ["Bad combo feature"], riskReasons: [] };
+
+    const trace = evaluateV2(baseSignal, index).trace;
+
+    assert.equal(trace.finalAction, "HOLD");
+    assert.equal(trace.changedFromBase, true);
+    assert.ok(trace.reasoning.some(r => r.includes("Downgraded to HOLD")));
+});

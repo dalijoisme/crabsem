@@ -90,6 +90,47 @@ test("buildRiskBands is a pure, untouched passthrough to productionEngineV2 - De
     assert.equal(result, sentinel); // same reference - proves no recomputation, not just equal shape
 });
 
+// ---------------------------------------------------------------------
+// Decision Trace / Explain Mode sprint
+// ---------------------------------------------------------------------
+
+function captureConsoleLog(fn){
+    const calls = [];
+    const original = console.log;
+    console.log = (...args) => calls.push(args);
+    try{ fn(); }
+    finally{ console.log = original; }
+    return calls;
+}
+
+test("analyzeToken never logs an explain trace by default (env flag off) - production default is silent", () => {
+    decisionEngineV2.loadHistoricalTrades = () => [];
+    productionV2.analyzeToken = () => ({ action: "BUY", confidence: 60, risk: "MEDIUM", reasons: ["X"], riskReasons: [] });
+
+    const calls = captureConsoleLog(() => adapter.analyzeToken({ token_address: `${PREFIX}A` }));
+
+    assert.equal(calls.filter(c => String(c[0]).includes("decision-engine-v2-explain")).length, 0);
+});
+
+test("logExplainTrace logs a full trace for a BUY-tier candidate when explicitly enabled", () => {
+    const trace = { baseAction: "BUY", finalAction: "HOLD", historicalCombo: "X", sampleSize: 6 };
+    const calls = captureConsoleLog(() => adapter.logExplainTrace({ symbol: "FAKESYM" }, { baseAction: "BUY", trace }, true));
+
+    assert.equal(calls.length, 1);
+    assert.ok(String(calls[0][0]).includes("FAKESYM"));
+    assert.deepEqual(JSON.parse(calls[0][1]), trace);
+});
+
+test("logExplainTrace stays silent for a HOLD/AVOID-tier base action even when explicitly enabled", () => {
+    const calls = captureConsoleLog(() => adapter.logExplainTrace({ symbol: "X" }, { baseAction: "HOLD", trace: {} }, true));
+    assert.equal(calls.length, 0);
+});
+
+test("logExplainTrace stays silent when explicitly disabled, regardless of action tier", () => {
+    const calls = captureConsoleLog(() => adapter.logExplainTrace({ symbol: "X" }, { baseAction: "BUY", trace: {} }, false));
+    assert.equal(calls.length, 0);
+});
+
 test("real historical data changes the live decision: a BUY with a historically-losing combination is downgraded to HOLD", () => {
     // Seed 6 real closed trades (>= minSampleHardFloor=5) all sharing the
     // same feature, all losses - real DB rows, real join through

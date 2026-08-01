@@ -418,7 +418,27 @@ const PHILOSOPHIES = [
         key: "momentumHunter",
         name: "Momentum Hunter",
         hypothesis: "Direct adversarial test of production's own core philosophy: scoringConfig.js says a token that already ran is 'far more likely to be late FOMO.' This engine removes the earliness discount entirely (factor pinned to 1.0) to test whether that assumption actually costs profit in practice.",
-        weights: {}, tiers: {}, minLiquidityUsd: null, flattenEarliness: true, smBonus: false
+        // Decision Engine V2 diagnosis sprint (2026-08-01): real production
+        // runtime data (5 consecutive live cycles, ~200-225 scanned tokens
+        // each) showed only ~1 candidate per cycle ever reached scoringConfig.js's
+        // default actionTiers.buy=62 - the rest landed in HOLD (109-124/cycle)
+        // or AVOID (88-100/cycle), confirmed via entryGateService's own
+        // skipReasons breakdown (NOT_A_BUY_TIER_HOLD/NOT_A_BUY_TIER_AVOID),
+        // not inferred from code alone. scoringConfig.js's own comment on
+        // actionTiers already flags 62/80 as "a deliberate policy tightening,
+        // not a new data-validated number... should be re-checked against
+        // fresh recommendation_outcomes data once enough volume accumulates" -
+        // this is that re-check, scoped to Momentum Hunter ONLY (a local
+        // override here, never scoringConfig.js's own global default, which
+        // every other philosophy/version still uses unchanged).
+        //
+        // 58 chosen deliberately conservative, NOT the already-defined
+        // "aggressive" philosophy's tournament-tested-but-unproven-as-winner
+        // buy=52 a few entries above - a small, reversible step down from 62
+        // first, to be measured via paper trading before considering any
+        // further move toward 52. strongBuy (80) and hold (35) are
+        // deliberately left untouched - only the BUY floor moves.
+        weights: {}, tiers: { buy: 58 }, minLiquidityUsd: null, flattenEarliness: true, smBonus: false
     },
 
     {

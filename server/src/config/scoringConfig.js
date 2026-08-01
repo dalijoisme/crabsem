@@ -286,29 +286,8 @@ module.exports = {
         // nothing else collected yet, should never report the same
         // confidence as one corroborated across most modules, even
         // if the few signals it does have look strong.
-        //
-        // LOWERED 25 -> 12 (Decision Engine V2 diagnosis sprint,
-        // 2026-08-01): real production runtime evidence (skipReasons
-        // breakdown across 5 consecutive live cycles) showed
-        // CONFIDENCE_BELOW_FLOOR recurring as a real rejection reason
-        // for genuine BUY-tier candidates (participantScore already
-        // above actionTiers.buy), with observed confidence values
-        // commonly 28-40 - well below every profile's min_confidence
-        // floor (AGGRESSIVE=45). walletQuality/walletProfitability/
-        // smartMoney/kol are documented elsewhere in this file as
-        // "least-often-populated modules (cache is sparse)" - a token
-        // missing them is usually missing OPTIONAL enrichment data,
-        // not exhibiting a real risk signal (that's riskPenalty's job,
-        // separately, untouched here) - completenessPenalty was
-        // structurally the single largest drag on confidence for an
-        // otherwise-legitimate candidate. Halved rather than removed:
-        // completeness still matters, just no longer dominates the
-        // blend for a token most of whose UNAVAILABLE modules were
-        // never expected to be populated in the first place. Does not
-        // touch riskPenalty, mismatchPenaltyPerPoint, MISSING_QUALITY_DATA,
-        // or any rug/quality check - those remain exactly as strict as
-        // before.
-        maxCompletenessPenalty: 12,
+
+        maxCompletenessPenalty: 25,
 
         min: 15,
 

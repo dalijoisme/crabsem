@@ -122,6 +122,14 @@ const REGISTRY = {
 
 // THE SWITCH. Change this one value to roll back or roll forward. Must be a
 // key that exists in REGISTRY above.
-const ACTIVE_VERSION = "decision_engine_v2";
+//
+// ROLLED BACK 2026-08-02: decision_engine_v2 (+ its same-day BUY tier and
+// completeness-penalty patches) changed live entry behavior away from the
+// proven baseline that bought RAFT/CHICHI/SEAL/Ngobi (~03:00-04:00 on
+// 2026-08-01, confirmed via on-chain tx timestamps - hours before
+// decision_engine_v2 was even integrated at 17:10 that day). Reverting to
+// production_v2 restores that exact baseline. See researchEngineFactory.js
+// and scoringConfig.js for the matching threshold reverts.
+const ACTIVE_VERSION = "production_v2";
 
 module.exports = { REGISTRY, ACTIVE_VERSION };

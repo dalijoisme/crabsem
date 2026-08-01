@@ -110,7 +110,14 @@ function getEngineSnapshot(){
 
     return {
         active: activeVersion,
-        label: activeVersion === "production_v2" ? "Production_V2" : "Production_V1",
+        // Decision Engine V2 Integration Sprint fix: this was a hardcoded
+        // production_v2/production_v1 ternary - correct only for exactly
+        // those two versions, and would have silently mislabeled
+        // decision_engine_v2 (or any future version) as "Production_V1".
+        // meta.engineShortName (REGISTRY[activeVersion], already read two
+        // lines below for engineName) is the real, always-correct source
+        // for whichever version is actually active.
+        label: meta.engineShortName,
         engineName: meta.engineShortName,
         exitStrategy: meta.exitStrategyShortName,
         status: meta.status,

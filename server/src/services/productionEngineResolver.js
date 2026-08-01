@@ -8,6 +8,7 @@
 const { REGISTRY, ACTIVE_VERSION } = require("../config/productionVersionRegistry");
 const productionV1 = require("./intelligenceEngine");
 const productionV2 = require("./productionEngineV2");
+const decisionEngineV2Adapter = require("./decisionEngineV2Adapter");
 const tradePlanService = require("./tradePlanService");
 
 // Each entry pairs a scoring engine with its matched trade-plan builder, so
@@ -24,6 +25,17 @@ const ENGINES = {
         analyzeTokens: productionV2.analyzeTokens,
         analyzeToken: productionV2.analyzeToken,
         buildRiskBands: productionV2.buildRiskBands
+    },
+
+    // Decision Engine V2 Integration Sprint: wraps production_v2 (Layer 1,
+    // untouched) with services/decisionEngineV2.js's historical-adjustment
+    // Layers 2-5, via services/decisionEngineV2Adapter.js. See
+    // config/productionVersionRegistry.js's own "decision_engine_v2" entry
+    // for the activation switch and rollback procedure.
+    decision_engine_v2: {
+        analyzeTokens: decisionEngineV2Adapter.analyzeTokens,
+        analyzeToken: decisionEngineV2Adapter.analyzeToken,
+        buildRiskBands: decisionEngineV2Adapter.buildRiskBands
     }
 
 };

@@ -647,3 +647,270 @@ test("updatePositionTracking stamps crossed_5pct_at/crossed_10pct_at only on the
     }
 
 });
+
+// =====================================
+// Arjuna V3 (FINAL SPRINT), Part 10 - partial-exit wiring end to end
+// (tradeManager.js's new partialClose + tradingBotRepository.js's new
+// partialClosePosition). healthyToken keeps Step 7's Momentum Health
+// emergency check comfortably above its floor so these tests only ever
+// exercise the TP1/profit-protection logic they mean to.
+// =====================================
+
+function healthyToken(overrides = {}){
+    return {
+        token_address: "TestTokenArjunaV3Exit111", symbol: "AV3", price: 1.0,
+        price_change_5m: 5, price_change_1h: 10, volume_1h: 1500, liquidity: 10000, market_cap: 100000,
+        buys_5m: 8, sells_5m: 2,
+        ...overrides
+    };
+}
+
+test("closeIfDue: TP1 (+25%) sells 50%, keeps the position OPEN with a reduced size, stamps tp1_hit_at, and inserts a real partial trade row", async () => {
+
+    const testEmail = `tradermanager.test.tp1.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenArjunaV3Exit111", tokenSymbol: "AV3",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 2, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.initial_size_usd, 10);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+
+        const token = healthyToken({ price: 1.25 }); // exactly +25% - TP1
+        const result = await tm.closeIfDue(position, token, config);
+
+        assert.equal(result.closed, false);
+        assert.equal(result.partiallyClosed, true);
+        assert.equal(result.reason, "TP1");
+
+        const updated = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(updated.status, "OPEN", "TP1 must never close the position");
+        assert.equal(updated.size_usd, 5, "50% of the original $10 size must remain");
+        assert.equal(updated.initial_size_usd, 10, "the original size must never change");
+        assert.ok(updated.tp1_hit_at, "tp1_hit_at must be stamped");
+        assert.equal(updated.tp1_price, 1.25);
+        assert.ok(updated.realized_pnl_usd > 0, "the sold 50% at +25% must lock in a real positive realized PnL");
+
+        const partialTrade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'TP1'").get(userId);
+        assert.ok(partialTrade, "the sold portion must be recorded as its own real trade row");
+        assert.equal(partialTrade.size_usd, 5);
+        assert.equal(partialTrade.exit_classification, "PARTIAL_TP1");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("closeIfDue: TP1 does not re-fire on a position that already has tp1_hit_at set", async () => {
+
+    const testEmail = `tradermanager.test.tp1once.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenArjunaV3Exit222", tokenSymbol: "AV3B",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 2, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+
+        // Manually put the position into a post-TP1 state (as if a prior
+        // cycle already ran TP1), then re-check at the same +25% price -
+        // must NOT sell another 50%.
+        db.prepare("UPDATE trading_bot_positions SET tp1_hit_at = CURRENT_TIMESTAMP, tp1_price = 1.25, size_usd = 5 WHERE id = ?").run(positionId);
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const token = healthyToken({ price: 1.25, price_change_5m: 1 }); // still +25% remaining ROI - above 15% floor, below 50% second target
+        const result = await tm.closeIfDue(position, token, config);
+
+        assert.equal(result.closed, false);
+        assert.notEqual(result.partiallyClosed, true);
+
+        const updated = db.prepare("SELECT size_usd FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(updated.size_usd, 5, "size must be unchanged - no second partial sell");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("closeIfDue: Step 6 Profit Protection closes the remaining 50% after TP1 when profit drops below +15%", async () => {
+
+    const testEmail = `tradermanager.test.profitprotect.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenArjunaV3Exit333", tokenSymbol: "AV3C",
+            entryPrice: 1.0, sizeUsd: 5, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 2, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        db.prepare("UPDATE trading_bot_positions SET tp1_hit_at = CURRENT_TIMESTAMP, tp1_price = 1.25, initial_size_usd = 10 WHERE id = ?").run(positionId);
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+
+        const token = healthyToken({ price: 1.10 }); // dropped to +10%, below the 15% profit-protection floor
+        const result = await tm.closeIfDue(position, token, config);
+
+        assert.equal(result.closed, true);
+        assert.equal(result.reason, "PROFIT_PROTECTION");
+
+        const closedPosition = db.prepare("SELECT status FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(closedPosition.status, "CLOSED");
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'PROFIT_PROTECTION'").get(userId);
+        assert.ok(trade);
+        assert.equal(trade.exit_classification, "NORMAL"); // a real, positive-ROI close, no meaningful peak to fail
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// =====================================
+// Arjuna V3 (FINAL SPRINT), Parts 12/13 - the permanent self-learning
+// trade dataset and MUPP exit-failure classification, end to end
+// through a real finalizeClose.
+// =====================================
+
+test("finalizeClose persists the full self-learning dataset (participantScore/confidence/holders/liquidity/reasons) from the position's own breakdown_json", async () => {
+
+    const testEmail = `tradermanager.test.dataset.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const breakdownJson = JSON.stringify({
+            participantScore: 72, marketHealth: 65,
+            tokenAgeMinutesAtEntry: 18.4,
+            rawFactsAtEntry: { holders: 140, liquidity: 45000, volume1h: 22000 },
+            reasons: ["Net accumulation detected"],
+            riskReasons: ["Very low liquidity"],
+            breakdown: { participant: { smartMoney: { score: 14, max: 20, hasData: true } }, market: { liquidity: { score: 10, max: 15 } } }
+        });
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenDataset111", tokenSymbol: "DATA", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null,
+            breakdownJson
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        await tm.finalizeClose(position, 1.10, "TEST_CLOSE", config);
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.confidence, 55);
+        assert.equal(trade.participant_score, 72);
+        assert.equal(trade.market_health, 65);
+        assert.equal(trade.token_age_minutes_at_entry, 18.4);
+        assert.equal(trade.holders_at_entry, 140);
+        assert.equal(trade.liquidity_at_entry, 45000);
+        assert.equal(trade.volume_1h_at_entry, 22000);
+        assert.deepEqual(JSON.parse(trade.entry_reasons_json), ["Net accumulation detected"]);
+        assert.deepEqual(JSON.parse(trade.risk_reasons_json), ["Very low liquidity"]);
+        assert.ok(JSON.parse(trade.module_scores_json).participant.smartMoney);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("Part 13 MUPP: a trade that reached +82% then exits at -81% is classified EXIT_FAILURE, not an ordinary loss", async () => {
+
+    const testEmail = `tradermanager.test.mupp.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenMupp111", tokenSymbol: "MUPP", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.19, stopLossMarketCap: null
+        });
+        tradingBotRepository.updatePositionTracking(positionId, { currentPrice: 1.82, mfePct: 82, maePct: -81, lastVolume1h: null });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        await tm.finalizeClose(position, 0.19, "STOP_LOSS", config); // -81%
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.mfe_pct, 82);
+        assert.ok(trade.roi_pct < -75);
+        assert.equal(trade.exit_classification, "EXIT_FAILURE");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("Part 13 MUPP: an ordinary loss with no real unrealized peak is classified BAD_ENTRY, not EXIT_FAILURE", async () => {
+
+    const testEmail = `tradermanager.test.badentry.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenBadEntry111", tokenSymbol: "BADE", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        tradingBotRepository.updatePositionTracking(positionId, { currentPrice: 0.85, mfePct: 2, maePct: -18, lastVolume1h: null }); // never had real upside
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        await tm.finalizeClose(position, 0.8, "STOP_LOSS", config);
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.mfe_pct, 2);
+        assert.equal(trade.exit_classification, "BAD_ENTRY");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});

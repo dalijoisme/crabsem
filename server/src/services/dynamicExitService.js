@@ -1,80 +1,42 @@
-// services/dynamicExitService.js - Dynamic Take-Profit exit rule,
-// approved for real Trading Bot adoption (Decision Benchmark request -
-// "bukan dibuat khusus hanya untuk benchmark"). TP15 becomes a MINIMUM
-// target, not a hard stop: once a position's ROI reaches +15%, it
-// keeps running as long as real, already-collected momentum evidence
-// still supports it. Exit fires the moment that evidence weakens -
-// never a guessed "let it ride" with no real basis, and never a fixed
-// ceiling either.
-//
-// Used IDENTICALLY by both benchmark profiles (Regular and the
-// Momentum Hunter tournament replica) - per the benchmark's own
-// requirement that exit logic must not differ between the two entry
-// methodologies being compared. Every input is a real, already-
-// collected field - nothing new is fetched from GMGN for this.
-//
-// Does NOT import or modify intelligenceEngine.js, researchEngineFactory.js,
-// or productionEngineV2.js - Production V2 and Momentum Hunter are
-// completely untouched, per instruction. The "reversal/distribution"
-// checks below are an independent, honestly-labeled re-derivation
-// using the SAME real fields and the SAME scoringConfig.js thresholds
-// those engines already use internally - not a copy of their code, a
-// parallel real-data check built to avoid touching engine files at all.
+// services/dynamicExitService.js - Arjuna V3 (FINAL SPRINT), Part 10.
+// Exit is now a DETERMINISTIC state machine (Steps 1-7 of the final
+// spec), completely replacing the previous momentum-driven "ride the
+// winner while evidence supports it" philosophy:
+//   1. Hard Stop Loss -20% (fixed, computed from the position's own
+//      entry_price - independent of tradePlanService's separate dynamic
+//      stop-loss band, which still governs the "AI Trade Plan" display
+//      only and is untouched by this file).
+//   2. TP1 at +25% ROI -> sell 50% unconditionally.
+//   3. A 5-minute timer starts the instant TP1 fires.
+//   4. Second Target: remaining position reaches +50% ROI -> sell all.
+//   5. Time Exit: timer expires (5 min since TP1) and price never
+//      reached +40% ROI -> sell the remainder.
+//   6. Profit Protection: after TP1, remaining profit drops below +15%
+//      -> sell the remainder immediately, no trailing, no waiting.
+//   7. Emergency Exit: Momentum Health (unchanged machinery, computeMomentumHealth
+//      below) is now ONLY a backstop for severe structural collapse -
+//      checked every cycle, can fire at ANY point (even pre-TP1,
+//      overriding everything else) but never drives a normal exit
+//      anymore.
+// Every number above lives in config/exitSystemConfig.js - this file
+// owns the state-machine logic only. Returns { action: "HOLD" |
+// "SELL_PARTIAL" | "SELL_ALL", sellFraction, reason, currentPrice,
+// roiPct, momentumHealth } - tradeManager.js's closeIfDue interprets
+// SELL_PARTIAL as a new partialClose() call (position stays OPEN with a
+// reduced size) and SELL_ALL as the existing finalizeClose().
 
-const scoringConfig = require("../config/scoringConfig");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
-// Arjuna vNext sprint, Priority 2/3 (Exit Intelligence / Profit
-// Protection). momentumHealthConfig.js owns every tunable number below.
-// syntheticMarketFilterService's computeSyntheticBreakdown is reused
-// (not re-implemented) for the "orderflow integrity" component - the
-// SAME real bot/bundler/wash-pattern signal Priority 1 vetoes a BUY on,
-// now read as a continuous health input for an already-OPEN position.
 const momentumHealthConfig = require("../config/momentumHealthConfig");
 const syntheticMarketFilterService = require("./syntheticMarketFilterService");
+const exitConfig = require("../config/exitSystemConfig");
 
-const MIN_TP_PCT = 15;
-
-// Real evidence of reversal/distribution, reusing scoringConfig.js's
-// own structuralValidation thresholds (unmodified, shared, not copied
-// logic) - never a fabricated cutoff.
-function hasReversalOrDistributionSigns(token, trenchesEntry){
-
-    const sv = scoringConfig.structuralValidation;
-
-    const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
-    if(change5m != null && change5m <= sv.recentDump5mPct) return true; // a real dump in progress right now
-
-    const peak = tokenPriceHistoryRepository.findPeakPrice(token.token_address);
-    const price = token.price != null ? Number(token.price) : null;
-    if(peak != null && peak > 0 && price != null){
-        const drawdown = (peak - price) / peak;
-        if(drawdown >= sv.structuralBreakdownDrawdown) return true; // real structural breakdown from the highest price ever observed
-    }
-
-    const netBuy24h = trenchesEntry?.net_buy_24h != null ? Number(trenchesEntry.net_buy_24h) : null;
-    if(netBuy24h != null && netBuy24h <= sv.netDistributionUsd) return true; // real net distribution, not accumulation
-
-    return false;
-
-}
-
-// ratio (Strategy Profile refactor, optional, trailing, default 0.5 -
-// today's hardcoded value): how much of 24h buy/sell flow must be
-// buy-side for momentum to still count as "buyer-led." This is the
-// practical "how patient is the trailing hold" knob, since no separate
-// trailing-stop mechanism exists in this codebase.
-function buyerDominant(trenchesEntry, ratio = 0.5){
-
-    if(!trenchesEntry) return null; // no real data - never guessed
-
-    const buys = Number(trenchesEntry.buys_24h) || 0;
-    const sells = Number(trenchesEntry.sells_24h) || 0;
-
-    if(buys + sells === 0) return null;
-
-    return (buys / (buys + sells)) > ratio;
-
-}
+// tradingBotEngine.js's isInProfitProtectionTerritory reads this to
+// decide when a held position needs its on-demand realtime price
+// refresh (bypassing the 30s trending snapshot) - now aligned to Part
+// 10's own TP1 trigger (25%, exitSystemConfig.tp1.triggerPct) so that
+// realtime refresh kicks in exactly when the new deterministic TP1
+// check needs a fresh price, not the old 15% target.
+const MIN_TP_PCT = exitConfig.tp1.triggerPct;
 
 function clamp0100(n){
     if(!Number.isFinite(n)) return null;
@@ -209,120 +171,100 @@ function computeMomentumHealth(token, position, trenchesEntry){
 // file and productionEngineV2.js silently drifting apart per-profile.
 //
 // Returns { shouldClose, reason, currentPrice, roiPct }.
-function evaluateDynamicExit({ position, token, trenchesEntry, engineAction, stopLossPrice, minTpPct = MIN_TP_PCT, buyerDominanceRatio = 0.5 }){
+// position: real trading_bot_positions row - Part 10's state machine
+// needs tp1_hit_at (null until TP1 fires; set by tradeManager.js's
+// partialClose) and mfe_pct (the position's own real highest ROI ever
+// reached, already tracked every cycle) in addition to the fields the
+// exit system already used. stopLossPrice/minTpPct/buyerDominanceRatio
+// parameters are still accepted for call-site compatibility but no
+// longer drive this function's own logic (see the file header) - Step
+// 1's Stop Loss is now always the deterministic -20% from entry_price,
+// and there is no more minTpPct/buyerDominanceRatio concept.
+//
+// Returns { action: "HOLD"|"SELL_PARTIAL"|"SELL_ALL", sellFraction,
+// reason, currentPrice, roiPct, momentumHealth }.
+function evaluateDynamicExit({ position, token, trenchesEntry }){
 
     const currentPrice = Number(token.price) || position.current_price || position.entry_price;
     const roiPct = ((currentPrice / position.entry_price) - 1) * 100;
-
-    // Production Stabilization Final, Section B: `token.marketContextStale`
-    // (tradingBotEngine.js's refreshStaleHeldToken) means price/liquidity
-    // were just re-verified as real and fresh, but price_change_5m/
-    // volume_1h/trenches were NOT - they are whatever was last known,
-    // possibly hours old, for a token that has fallen out of the trending
-    // scan entirely. Evidence this stale must never be read as "momentum
-    // still supports holding" - the same "unknown must not score as good
-    // evidence" principle already applied to BUY-side scoring this
-    // engagement, now applied to the exit side. Moved ahead of the
-    // Momentum Health computation (Arjuna vNext sprint) so BOTH the new
-    // early-breakdown check and the existing "ride the winner" check
-    // below share the exact same real staleness read.
     const contextStale = Boolean(token.marketContextStale);
 
-    // Arjuna vNext sprint, Priority 2 (Exit Intelligence): computed on
-    // EVERY evaluation, independent of ROI/TP/SL - "keluar sebelum rug
-    // pull, bukan sesudah" requires looking at momentum health before a
-    // position ever reaches its TP floor, not only once it's there.
-    // Logged unconditionally (never gated behind an env flag - this
-    // sprint's own explicit logging requirement) so every real exit
-    // decision is auditable from the server console.
+    // Step 7 (Emergency Exit) - computed and logged on EVERY evaluation,
+    // regardless of TP/SL/timer state, but only ever ACTS as a backstop
+    // for severe structural collapse (buyers disappear, liquidity
+    // collapse, massive sell pressure, structural breakdown) - never the
+    // primary exit driver anymore. Never trusted on stale/uncertain data.
     const momentumHealth = computeMomentumHealth(token, position, trenchesEntry);
     console.log(
         `[momentum-health] token=${position.token_symbol || token.symbol || token.token_address} ` +
-        `score=${momentumHealth.score.toFixed(1)} roiPct=${roiPct.toFixed(2)} contextStale=${contextStale} ` +
+        `score=${momentumHealth.score.toFixed(1)} roiPct=${roiPct.toFixed(2)} contextStale=${contextStale} tp1HitAt=${position.tp1_hit_at || "none"} ` +
         `buyerPressure=${momentumHealth.components.buyerPressure ?? "n/a"} ` +
         `sellerPressure=${momentumHealth.components.buyerPressure != null ? (100 - momentumHealth.components.buyerPressure).toFixed(1) : "n/a"} ` +
         `liquidityTrend=${momentumHealth.components.liquidityHealth ?? "n/a"} ` +
         `acceleration=${momentumHealth.components.priceAcceleration ?? "n/a"}`
     );
 
-    // 1. Reversal - the engine's own fresh signal explicitly says AVOID
-    //    right now. Checked first, overrides everything, any ROI level.
-    if(engineAction === "AVOID"){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=CLOSE reason=REVERSAL`);
-        return { shouldClose: true, reason: "REVERSAL", currentPrice, roiPct, momentumHealth };
+    if(!contextStale && momentumHealth.score <= exitConfig.emergencyMomentumHealthFloor){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=MOMENTUM_HEALTH_EMERGENCY score=${momentumHealth.score.toFixed(1)}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "MOMENTUM_HEALTH_EMERGENCY", currentPrice, roiPct, momentumHealth };
     }
 
-    // 2. Stop loss - native dynamic SL, unchanged mechanism, unchanged
-    //    threshold (computed once at entry from tradePlanService).
-    if(stopLossPrice != null && currentPrice <= stopLossPrice){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=CLOSE reason=STOP_LOSS`);
-        return { shouldClose: true, reason: "STOP_LOSS", currentPrice, roiPct, momentumHealth };
+    // Step 1 - Hard Stop Loss, -20% fixed from entry_price. Always
+    // fresh, never gated on staleness (a real price crash is real
+    // regardless of how stale price_change_5m/trenches are).
+    const stopLossFloor = position.entry_price * (1 - exitConfig.hardStopLossPct / 100);
+    if(currentPrice <= stopLossFloor){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=STOP_LOSS`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "STOP_LOSS", currentPrice, roiPct, momentumHealth };
     }
 
-    // 2b. Momentum Health breakdown - NEW (Arjuna vNext sprint, Priority
-    //     2). Fires regardless of ROI, even below minTpPct and above the
-    //     hard Stop Loss floor: "walaupun trailing belum kena, walaupun
-    //     TP belum kena." Only on FRESH data (never contextStale - a
-    //     stale/uncertain read must never be trusted to force a close,
-    //     the mirror image of the existing "stale must never look like
-    //     support" rule a few lines below) and only below
-    //     hardBreakdownFloor (momentumHealthConfig.js - deliberately
-    //     conservative, multiple real signals simultaneously bad, never
-    //     a single noisy field). Never touches REVERSAL/STOP_LOSS above,
-    //     never touches the sub-minTpPct "keep running" default below for
-    //     a position that ISN'T breaking down.
-    if(!contextStale && momentumHealth.score <= momentumHealthConfig.hardBreakdownFloor){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=CLOSE reason=MOMENTUM_HEALTH_BREAKDOWN score=${momentumHealth.score.toFixed(1)}`);
-        return { shouldClose: true, reason: "MOMENTUM_HEALTH_BREAKDOWN", currentPrice, roiPct, momentumHealth };
+    const tp1Hit = Boolean(position.tp1_hit_at);
+
+    if(!tp1Hit){
+
+        // Step 2/3 - TP1: at +25% ROI, sell 50% unconditionally and
+        // start the 5-minute timer (tradeManager.js's partialClose
+        // stamps tp1_hit_at/tp1_price - this function only decides WHEN
+        // to trigger it).
+        if(roiPct >= exitConfig.tp1.triggerPct){
+            console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_PARTIAL reason=TP1 roiPct=${roiPct.toFixed(2)}`);
+            return { action: "SELL_PARTIAL", sellFraction: exitConfig.tp1.sellFraction, reason: "TP1", currentPrice, roiPct, momentumHealth };
+        }
+
+        return { action: "HOLD", currentPrice, roiPct, momentumHealth };
+
     }
 
-    // 3. Below the minimum target - nothing else to evaluate yet,
-    //    keep running.
-    if(roiPct < minTpPct){
-        return { shouldClose: false, currentPrice, roiPct, momentumHealth };
+    // Post-TP1 state machine - Steps 4/5/6.
+
+    // Step 4 - Second Target: remaining position reaches +50% ROI ->
+    // sell everything left. Checked before Step 6's profit-protection
+    // floor since it's the more decisive exit.
+    if(roiPct >= exitConfig.secondTargetPct){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=SECOND_TARGET roiPct=${roiPct.toFixed(2)}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "SECOND_TARGET", currentPrice, roiPct, momentumHealth };
     }
 
-    // 3b. Profit Protection via momentum decay - NEW (Arjuna vNext
-    //     sprint, Priority 3). Only once already at/above minTpPct
-    //     (real, locked-in profit on the table) and only on fresh data.
-    //     A higher/easier-to-trigger bar than hardBreakdownFloor above -
-    //     "profit tinggi + momentum mulai rusak -> SELL", not "wait for
-    //     the full 4-condition check below or a trailing stop to give
-    //     the profit back first." Checked BEFORE the existing
-    //     momentumSustained check, which is left completely unchanged as
-    //     the fallback for everything this doesn't catch.
-    if(!contextStale && momentumHealth.score <= momentumHealthConfig.profitProtectionDecayFloor){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=CLOSE reason=PROFIT_PROTECTION_MOMENTUM_DECAY score=${momentumHealth.score.toFixed(1)} roiPct=${roiPct.toFixed(2)}`);
-        return { shouldClose: true, reason: "PROFIT_PROTECTION_MOMENTUM_DECAY", currentPrice, roiPct, momentumHealth };
+    // Step 6 - Profit Protection: remaining profit drops below +15% ->
+    // sell immediately. No trailing, no waiting.
+    if(roiPct < exitConfig.profitProtectionFloorPct){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=PROFIT_PROTECTION roiPct=${roiPct.toFixed(2)}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "PROFIT_PROTECTION", currentPrice, roiPct, momentumHealth };
     }
 
-    // 4. At/above the minimum target - hold ONLY while real momentum
-    //    still supports it. ALL four must hold; any single failure
-    //    exits immediately (momentum has to be simultaneously strong,
-    //    buyer-led, still building, and free of reversal signs - not
-    //    "mostly fine").
-    const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
-    const momentumStillPositive = !contextStale && change5m != null ? change5m > 0 : false;
+    // Step 5 - Time Exit: 5-minute timer (since TP1) expired and price
+    // never reached +40% ROI - checked against the position's own real
+    // mfe_pct (highest ROI ever actually reached), never re-derived.
+    const minutesSinceTp1 = (Date.now() - new Date(`${String(position.tp1_hit_at).replace(" ", "T")}Z`).getTime()) / 60000;
+    const timerExpired = minutesSinceTp1 >= exitConfig.timerMinutes;
+    const everReached40 = (position.mfe_pct ?? roiPct) >= exitConfig.timeExitRequiredPct;
 
-    const dominant = buyerDominant(trenchesEntry, buyerDominanceRatio);
-    const buyersInControl = !contextStale && dominant === true;
-
-    const currentVolume1h = token.volume_1h != null ? Number(token.volume_1h) : null;
-    const volumeStillBuilding = contextStale
-        ? false // stale market context - never assume volume is still building
-        : (position.last_volume_1h == null || currentVolume1h == null
-            ? true // no prior reading to compare against yet - don't penalize on absence of data
-            : currentVolume1h >= position.last_volume_1h);
-
-    const noReversalSigns = !hasReversalOrDistributionSigns(token, trenchesEntry);
-
-    const momentumSustained = momentumStillPositive && buyersInControl && volumeStillBuilding && noReversalSigns;
-
-    if(!momentumSustained){
-        return { shouldClose: true, reason: contextStale ? "MOMENTUM_WEAKENING_STALE_CONTEXT" : "MOMENTUM_WEAKENING", currentPrice, roiPct, momentumHealth };
+    if(timerExpired && !everReached40){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=TIME_EXIT mfePct=${position.mfe_pct}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "TIME_EXIT", currentPrice, roiPct, momentumHealth };
     }
 
-    return { shouldClose: false, currentPrice, roiPct, momentumHealth };
+    return { action: "HOLD", currentPrice, roiPct, momentumHealth };
 
 }
 

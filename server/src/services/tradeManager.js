@@ -428,6 +428,95 @@ function createTradeManager(repository, liveOptions = null){
 
     }
 
+    // Arjuna V3 (FINAL SPRINT), Part 10, Step 2: sells sellFraction of
+    // the position's CURRENT size (not the original) and keeps the
+    // position OPEN with the reduced size - the first partial exit ever
+    // supported by this file. Mirrors finalizeClose's own real-execution/
+    // idempotency shape as closely as possible so the two stay easy to
+    // reason about together, but never marks the position CLOSED.
+    //
+    // repository.partialClosePosition is new (tradingBotRepository.js) -
+    // callers without it (the Benchmark Harness's benchmarkPositionRepository.js,
+    // a research/validation tool, never live money) fall back to a full
+    // close instead of silently throwing - a real simplification, not a
+    // hidden bug: benchmark replays of Arjuna V3 will show a full exit
+    // where live trading would show a partial one, documented here rather
+    // than building a second full partial-exit schema for a non-production
+    // path.
+    async function partialClose(position, exitPrice, sellFraction, reason, config){
+
+        if(typeof repository.partialClosePosition !== "function"){
+            return finalizeClose(position, exitPrice, reason, config);
+        }
+
+        const roiPct = ((exitPrice / position.entry_price) - 1) * 100;
+        const sellSizeUsd = position.size_usd * sellFraction;
+        const feeUsd = sellSizeUsd * ((config.fee_pct || FEE_PCT_DEFAULT) / 100) * 2;
+
+        let closeExecutionId = null;
+        let txHash = null;
+
+        if(liveOptions){
+
+            const balance = await liveOptions.balanceService.getSplTokenBalance(liveOptions.walletPublicKey, position.token_address);
+            const totalBaseUnits = Number(balance.amountRaw);
+
+            if(!totalBaseUnits || totalBaseUnits <= 0){
+                // Nothing real to sell - same "close it so it stops being
+                // retried, never claim a real trade that didn't happen"
+                // rule finalizeClose's own no-balance branch already uses.
+                return finalizeClose(position, exitPrice, reason, config, { skipBalanceCheck: true });
+            }
+
+            const sellAmountBaseUnits = Math.floor(totalBaseUnits * sellFraction);
+
+            const result = await liveOptions.executionService.execute({
+                userId: liveOptions.userId,
+                walletPublicKey: liveOptions.walletPublicKey,
+                action: "SELL",
+                amountLamports: sellAmountBaseUnits,
+                tokenAddress: position.token_address
+            });
+
+            if(result.outcome !== "SUCCESS"){
+                repository.insertLog({
+                    logType: "ERROR", tokenSymbol: position.token_symbol,
+                    message: `Real partial SELL attempt for ${position.token_symbol} did not succeed (${result.outcome}) - position remains open at full size, will retry`,
+                    meta: { tokenAddress: position.token_address, executionId: result.executionId, outcome: result.outcome }
+                });
+                return { closed: false, retrying: true };
+            }
+
+            closeExecutionId = result.executionId;
+            txHash = result.txHash ?? null;
+
+        }
+
+        const outcome = repository.partialClosePosition(position, {
+            exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId
+        });
+
+        if(!outcome.applied){
+            // Idempotency guard (tp1_hit_at IS NULL in the UPDATE's own
+            // WHERE clause) - a concurrent caller (main cycle + the
+            // independent exit-only scheduler) already processed this
+            // exact TP1 event first. Never a second real sell, never a
+            // duplicate trade row.
+            return { closed: false, reason: "ALREADY_PROCESSED" };
+        }
+
+        const kind = closeExecutionId ? "Real" : "Virtual";
+        repository.insertLog({
+            logType: "SELL",
+            tokenSymbol: position.token_symbol,
+            message: `${kind} PARTIAL SELL (${Math.round(sellFraction * 100)}%) ${position.token_symbol} @ $${exitPrice} - ${reason} (${roiPct >= 0 ? "+" : ""}${roiPct.toFixed(2)}%)${closeExecutionId ? ` [execution #${closeExecutionId}]` : ""}`,
+            meta: { tokenAddress: position.token_address, reason, roiPct, feeUsd, sellSizeUsd, closeExecutionId }
+        });
+
+        return { closed: false, partiallyClosed: true, reason, roiPct, sellSizeUsd };
+
+    }
+
     async function closeIfDue(position, token, config){
 
         const currentPriceNow = Number(token.price) || position.current_price || position.entry_price;
@@ -479,38 +568,38 @@ function createTradeManager(repository, liveOptions = null){
         // Re-verify the Quality Gate on every held position, every cycle -
         // a rug that manifests as a rug-ratio/holder-concentration spike
         // WHILE HELD is closed immediately, regardless of what Dynamic
-        // Exit's own momentum/reversal reasoning would otherwise say.
+        // Exit's own state machine would otherwise say.
         const quality = qualityGateService.passesQualityGate(token, config.qualityGateOverrides);
         if(!quality.pass){
             return finalizeClose(position, currentPriceNow, `RUG_DETECTED_${quality.reason}`, config);
         }
 
-        // Dynamic Exit (Constitution background: validated, retained). Same
-        // real engine call, same real trenches lookup, same rule already
-        // proven in services/abTestEngine.js - not a copy of that file's
-        // code, the SAME shared module. philosophy override (if any) keeps
-        // this re-check consistent with whichever profile originally opened
-        // the position - the REVERSAL check is re-evaluated the same way it
-        // was scored, not on a different profile's terms.
+        // Arjuna V3 (FINAL SPRINT), Part 10: dynamicExitService.js is now
+        // a deterministic state machine (Steps 1-7) - no longer reads a
+        // fresh engine signal at all (the old REVERSAL check is gone per
+        // the final spec), so the productionEngineResolver.analyzeToken
+        // re-score this used to require is gone too, a real efficiency
+        // win. position carries this cycle's own freshly-computed
+        // mfePctNow/maePctNow (previously stale by one cycle - Step 5's
+        // Time Exit check needs the REAL current peak, not last cycle's).
         const trenchesEntry = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
-        const freshSignal = productionEngineResolver.getActiveEngine().analyzeToken(token, null, config.philosophy);
 
         const result = dynamicExitService.evaluateDynamicExit({
-            position: { ...position, last_volume_1h: volume1hNow },
-            token, trenchesEntry,
-            engineAction: freshSignal.action,
-            stopLossPrice: position.stop_loss_price,
-            minTpPct: config.exitOverrides?.fixedTpPct,
-            buyerDominanceRatio: config.exitOverrides?.momentumWeakeningBuyerDominanceRatio
+            position: { ...position, last_volume_1h: volume1hNow, mfe_pct: mfePctNow, mae_pct: maePctNow },
+            token, trenchesEntry
         });
 
-        if(!result.shouldClose) return { closed: false };
+        if(result.action === "HOLD") return { closed: false };
+
+        if(result.action === "SELL_PARTIAL"){
+            return partialClose(position, result.currentPrice, result.sellFraction, result.reason, config);
+        }
 
         return finalizeClose(position, result.currentPrice, result.reason, config);
 
     }
 
-    return { openPosition, closeIfDue, finalizeClose };
+    return { openPosition, closeIfDue, finalizeClose, partialClose };
 
 }
 

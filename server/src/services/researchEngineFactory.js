@@ -36,6 +36,11 @@ const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRe
 // observability on every real BUY - never a second, drifting copy of
 // this formula.
 const { resolveTokenAgeMinutes } = require("./emiService");
+// Arjuna V3 (FINAL), Part 7 - reuses the SAME real wash-trading
+// composite Priority 1's BUY-time veto (syntheticMarketFilterService.js)
+// and dynamicExitService.js's Momentum Health orderflow-integrity
+// component already compute - never a third implementation.
+const syntheticMarketFilterService = require("./syntheticMarketFilterService");
 
 const accumulation = require("./intelligence/participant/accumulation");
 const smartMoney = require("./intelligence/participant/smartMoney");
@@ -132,13 +137,22 @@ function preloadContext(tokens){
     return { trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, walletsByAddress, launchpadStatsByName };
 }
 
+// canBlacklist: Arjuna V3 (FINAL), Part 6. gmgn_trenches' own raw
+// payload never carries this field (checked directly, zero matches) -
+// only GMGN's separate on-demand /v1/token/security response does
+// (real field, confirmed against this account's own cached response:
+// `"is_blacklist":null,"blacklist":0`). Only ever set true from a real
+// truthy value on that field - absence/null is never treated as "has
+// blacklist," matching this file's own "never fabricate a rejection"
+// convention.
 function buildSecurityFacts(trenchesEntry, cachedSecurity){
     if(trenchesEntry){
-        return { isHoneypot: trenchesEntry.is_honeypot, renouncedMint: trenchesEntry.renounced_mint, renouncedFreezeAccount: trenchesEntry.renounced_freeze_account, rugRatio: trenchesEntry.rug_ratio, source: "trenches" };
+        return { isHoneypot: trenchesEntry.is_honeypot, renouncedMint: trenchesEntry.renounced_mint, renouncedFreezeAccount: trenchesEntry.renounced_freeze_account, rugRatio: trenchesEntry.rug_ratio, source: "trenches", canBlacklist: null };
     }
     if(cachedSecurity?.data){
         const d = cachedSecurity.data;
-        return { isHoneypot: d.is_honeypot === true ? 1 : (d.is_honeypot === false ? 0 : (d.honeypot ? 1 : null)), renouncedMint: d.renounced_mint === true ? 1 : (d.renounced_mint === false ? 0 : null), renouncedFreezeAccount: d.renounced_freeze_account === true ? 1 : (d.renounced_freeze_account === false ? 0 : null), rugRatio: null, source: "on-demand cache" };
+        const canBlacklist = (d.is_blacklist === true || d.blacklist === true || d.blacklist === 1) ? true : null;
+        return { isHoneypot: d.is_honeypot === true ? 1 : (d.is_honeypot === false ? 0 : (d.honeypot ? 1 : null)), renouncedMint: d.renounced_mint === true ? 1 : (d.renounced_mint === false ? 0 : null), renouncedFreezeAccount: d.renounced_freeze_account === true ? 1 : (d.renounced_freeze_account === false ? 0 : null), rugRatio: null, source: "on-demand cache", canBlacklist };
     }
     return null;
 }
@@ -377,45 +391,16 @@ function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kol
 
 }
 
-// Arjuna vNext sprint, "validated momentum" fix (2026-08-02): root
-// cause of entries clustering on tokens minutes old was investigated
-// and found to be STRUCTURAL, not an explicit age rule - nothing in
-// this file or scoringConfig.js ever reads launch age. accumulation.js/
-// smartMoney.js/kol.js score "significance" against FIXED ABSOLUTE-
-// DOLLAR floors (minSignificantVolumeUsd: $500/$300/$150), never
-// normalized by a token's own liquidity/market cap. A brand-new,
-// thin-liquidity token needs only a couple of buyers to cross those
-// floors AND to read as ~100% buy-dominant (few transactions exist at
-// all yet) - the exact same dollar amount is noise on a token with
-// deeper, more mature liquidity. Momentum Hunter's own
-// flattenEarliness: true (deliberate, validated by the Real Capital
-// Tournament, NOT touched here) then never discounts that inflated
-// score for being early-stage, since removing that discount is this
-// philosophy's entire adversarial hypothesis. The combination
-// structurally favors the youngest, thinnest-liquidity candidates
-// without any code ever asking "how old is this."
-// computeAccelerationSignal (the "acceleration score") was RULED OUT -
-// momentumHunter never sets philosophy.acceleration below, so
-// accelerationBonus is always 0 for it; this was not the mechanism.
-//
-// Fix, scoped to momentumHunter only via the SAME entryGate extension
-// point breakoutHunter/reversalHunter already use below (an ADDITIVE
-// requirement on top of the normal score/tier/veto pipeline - downgrades
-// an otherwise-BUY-tier candidate to HOLD, never a new AVOID, never a
-// weight/curve/module change): require the token to have been alive at
-// least MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES before Arjuna will act on
-// it, using the SAME real launch_time/created_timestamp data
-// emiService.js already relies on. This does not touch scoringConfig.js,
-// does not touch accumulation.js/smartMoney.js/kol.js (shared by every
-// other philosophy/version - deliberately untouched, no wider blast
-// radius), does not change any weight or the flattened earliness curve -
-// Arjuna still enters early, just no longer in the first few minutes
-// where a handful of wallets can trivially fake "validated" accumulation.
-// 10 minutes is a first-cut, unvalidated starting point - like every
-// other new threshold in this codebase's history (scoringConfig.js's own
-// actionTiers comment) - meant to be re-checked against real outcome
-// data once enough volume accumulates at this floor, not a final number.
-const MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES = 10;
+// Arjuna V3 (FINAL SPRINT) superseded the previous sprint's hard
+// momentumHunter age entryGate (reject below 10 real minutes old) -
+// see computeUnifiedEntryScore and config.entryScore.ageBonus. Age is
+// now a bonus-only input inside the unified entry score, never a
+// reject on its own. The root cause this earlier fix targeted (fixed-
+// dollar significance floors in accumulation.js/smartMoney.js/kol.js
+// structurally favoring thin/young tokens) is what Part 1's full
+// re-weighting + Part 5's liquidity hybrid + Part 7's wash-trading
+// penalty now address directly, at the scoring level instead of via an
+// age proxy.
 
 // =====================================
 // PHILOSOPHY DEFINITIONS - every override is named and justified.
@@ -465,15 +450,13 @@ const PHILOSOPHIES = [
         key: "momentumHunter",
         name: "Momentum Hunter",
         hypothesis: "Direct adversarial test of production's own core philosophy: scoringConfig.js says a token that already ran is 'far more likely to be late FOMO.' This engine removes the earliness discount entirely (factor pinned to 1.0) to test whether that assumption actually costs profit in practice.",
-        weights: {}, tiers: {}, minLiquidityUsd: null, flattenEarliness: true, smBonus: false,
-        // "Validated momentum" fix - see this file's own comment above
-        // PHILOSOPHIES for the full root-cause writeup. Missing age data
-        // (tokenAgeMinutes == null, ~0.6% of tokens) fails the gate -
-        // "if essential data isn't ready, SKIP rather than BUY" is
-        // already this codebase's own established rule for new entries
-        // (entryGateService.js's MISSING_QUALITY_DATA gate), applied
-        // consistently here rather than defaulting an unknown to a pass.
-        entryGate: (f) => f.tokenAgeMinutes != null && f.tokenAgeMinutes >= MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES
+        // Arjuna V3 (FINAL SPRINT), Part 8: "Remove hard rejection. Age
+        // becomes BONUS only." The previous sprint's hard entryGate
+        // (reject below 10 real minutes old) is REMOVED - age can no
+        // longer reject or promote a token on its own; it now only adds
+        // a small additive bonus inside computeUnifiedEntryScore
+        // (config.entryScore.ageBonus), alongside every other signal.
+        weights: {}, tiers: {}, minLiquidityUsd: null, flattenEarliness: true, smBonus: false
     },
 
     {
@@ -613,6 +596,88 @@ const SM_BONUS_FRACTION = 0.20;
 const SM_BONUS_MIN_LIQUIDITY = 5000;
 const SM_BONUS_MAX_RUG_RATIO = 0.30;
 
+// Arjuna V3 (FINAL SPRINT) - Part 1-2, 7-8. Replaces the two-pool
+// participant(100)+market(100) split, FOR ACTION-TIER PURPOSES ONLY,
+// with one unified 0-100 score across exactly the 10 modules named in
+// the final spec (config.entryScore.weights) plus the wash-trading
+// penalty (Part 7) and age bonus (Part 8). Every module's own already-
+// computed {score,max} is reused verbatim (allModules, built from the
+// SAME participantModules/marketModules objects combineScore already
+// consumes) - this recombines real, existing results, never a second
+// scoring implementation. marketScore/participantScore (the OLD
+// 2-pool numbers) are left completely intact elsewhere in this
+// function for confidence blending/display - this is purely an
+// additional, additive computation.
+function computeUnifiedEntryScore({ participantModules, marketModules, trenchesEntry, securityResult, token, ageMinutes }){
+
+    const e = config.entryScore;
+    const allByKey = { ...participantModules, ...marketModules };
+
+    // Part 2 - volume is a VALIDATOR, never a primary driver. Its
+    // weight only counts when accumulation AND smartMoney are both
+    // independently "healthy" - high volume alone (wash-trading's own
+    // signature) contributes nothing on its own.
+    const healthyFraction = e.volumeValidator.requiredHealthFraction;
+    const accumulationHealthy = allByKey.accumulation && allByKey.accumulation.max > 0 && (allByKey.accumulation.score / allByKey.accumulation.max) >= healthyFraction;
+    const smartMoneyHealthy = allByKey.smartMoney && allByKey.smartMoney.max > 0 && (allByKey.smartMoney.score / allByKey.smartMoney.max) >= healthyFraction;
+    const volumeValidated = accumulationHealthy && smartMoneyHealthy;
+
+    let weightedSum = 0;
+    let weightUsed = 0;
+    const componentBreakdown = {};
+
+    for(const key of Object.keys(e.weights)){
+        const module = allByKey[key];
+        const weight = e.weights[key];
+        if(!module || module.max <= 0){
+            componentBreakdown[key] = { weight, contribution: null, gated: false };
+            continue; // no real data for this module - never guessed, excluded and re-normalized below
+        }
+        if(key === "volume" && !volumeValidated){
+            componentBreakdown[key] = { weight, contribution: 0, gated: true };
+            weightUsed += weight; // counted in the denominator at 0 - "almost meaningless" per spec, not excluded/renormalized away
+            continue;
+        }
+        const pct = module.score / module.max;
+        const contribution = pct * weight;
+        componentBreakdown[key] = { weight, contribution, gated: false };
+        weightedSum += contribution;
+        weightUsed += weight;
+    }
+
+    const baseScore = weightUsed > 0 ? (weightedSum / weightUsed) * 100 : 50;
+
+    // Part 6 - explicit point penalties, subtracted directly (not from
+    // security's own small pool).
+    const securityPenalty = securityResult?.entryScorePenalty || 0;
+
+    // Part 7 - wash trading is the LARGEST single penalty. Reuses
+    // syntheticMarketFilterService's real composite (0-100, higher =
+    // more synthetic/bot/wash-shaped).
+    const { syntheticScore } = syntheticMarketFilterService.computeSyntheticBreakdown(trenchesEntry);
+    const washPenalty = syntheticScore >= e.washTradingPenalty.confidenceThreshold ? e.washTradingPenalty.penalty : 0;
+
+    // Part 8 - age is a BONUS only, never a reject/gate. Missing age
+    // data = +0 (neutral, never guessed).
+    const ageBucket = ageMinutes != null ? e.ageBonus.find(b => ageMinutes <= b.maxMinutes) : null;
+    const ageBonusPoints = ageBucket ? ageBucket.bonus : 0;
+
+    const finalScore = Math.max(0, Math.min(100, Math.round(baseScore - securityPenalty - washPenalty + ageBonusPoints)));
+
+    return {
+        score: finalScore,
+        baseScore: Math.round(baseScore * 10) / 10,
+        securityPenalty,
+        washPenalty,
+        syntheticScore,
+        ageBonusPoints,
+        ageMinutes,
+        volumeValidated,
+        componentBreakdown
+    };
+
+}
+
 function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const address = token.token_address;
     const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
@@ -636,7 +701,7 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
 
     let smScore;
     if(philosophy.smBonus){
-        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h);
+        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList);
         if(smScore.hasData){
             const buys = smartMoneyActivity.filter(a => a.side === "buy").reduce((s,a) => s + Number(a.amount_usd||0), 0);
             const sells = smartMoneyActivity.filter(a => a.side === "sell").reduce((s,a) => s + Number(a.amount_usd||0), 0);
@@ -650,7 +715,7 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
             }
         }
     } else {
-        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h);
+        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList);
     }
 
     const participantModules = {
@@ -676,8 +741,6 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const accelSignal = computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, philosophy.acceleration);
     const accelerationBonus = accelSignal ? Math.round(PARTICIPANT_MAX * (philosophy.acceleration.maxBonusFraction ?? 0) * accelSignal.compositeScore) : 0;
 
-    const participantScore = Math.max(0, Math.min(PARTICIPANT_MAX, Math.round(participantScoreRaw - penalty) + accelerationBonus));
-
     const reasons = Object.values(participantModules).flatMap(m => m.reasons || []);
     const participantRiskReasons = Object.values(participantModules).flatMap(m => m.riskReasons || []);
 
@@ -693,6 +756,21 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const marketRiskReasons = Object.values(marketModules).flatMap(m => m.riskReasons || []);
     const riskReasons = [...participantRiskReasons, ...marketRiskReasons];
 
+    // Arjuna V3 (FINAL SPRINT), Parts 1/2/7/8: the unified 10-module
+    // entry score REPLACES participantScore as the sole driver of
+    // action tier (see computeUnifiedEntryScore's own header comment) -
+    // reuses every module result already computed above, never a
+    // second scoring pass. The existing structural-red-flag penalty and
+    // philosophy acceleration bonus (both orthogonal to this sprint,
+    // untouched in what they do) still apply on top, same as before.
+    const ageMinutes = resolveTokenAgeMinutes(token, trenchesEntry);
+    const entryScoreResult = computeUnifiedEntryScore({
+        participantModules, marketModules, trenchesEntry,
+        securityResult: marketModules.security, token, ageMinutes
+    });
+
+    const participantScore = Math.max(0, Math.min(PARTICIPANT_MAX, Math.round(entryScoreResult.score - penalty) + accelerationBonus));
+
     const tiers = { ...config.actionTiers, ...(philosophy.tiers || {}) };
     let action;
     if(participantScore >= tiers.strongBuy) action = "STRONG BUY";
@@ -704,6 +782,10 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const minLiq = philosophy.minLiquidityUsd ?? config.safetyVeto.minLiquidityUsd;
     let vetoed = false;
     if(securityFacts?.isHoneypot === 1){ action = "AVOID"; vetoed = true; }
+    // Arjuna V3 (FINAL SPRINT), Part 6 - "Blacklist capability -> reject
+    // immediately." Real when GMGN's on-demand security data has it,
+    // structural no-op otherwise (see security.js's own header comment).
+    else if(marketModules.security.hardReject === true){ action = "AVOID"; vetoed = true; }
     else if(Number(marketModules.liquidity.facts?.liquidity ?? token.liquidity ?? 0) < minLiq){ action = "AVOID"; vetoed = true; }
     else if(marketModules.liquidity.facts?.backingRatio != null && marketModules.liquidity.facts.backingRatio < config.safetyVeto.minBackingRatio){ action = "AVOID"; vetoed = true; }
     else if(token.holders != null && Number(token.holders) < config.safetyVeto.minHolders){ action = "AVOID"; vetoed = true; }
@@ -772,6 +854,12 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         // raw blended value, named individually - see computeConfidence's
         // own header comment.
         confidenceBreakdown: confidenceResult,
+        // Arjuna V3 (FINAL SPRINT): the full unified-entry-score
+        // breakdown (per-module contribution, volume-validator gate
+        // state, security penalty, wash-trading penalty/score, age
+        // bonus) - observability, read by no decision logic beyond
+        // what already fed into `participantScore` above.
+        entryScoreBreakdown: entryScoreResult,
         breakdown: {
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
             market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))

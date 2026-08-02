@@ -172,9 +172,75 @@ module.exports = {
     actionTiers: {
 
         strongBuy: 80,
-        buy: 62,
+        buy: 68,
         hold: 35
         // below hold => AVOID
+
+    },
+
+    // =====================================
+    // ARJUNA V3 (FINAL) - Part 1. Replaces the two-pool participant(100)+
+    // market(100) split, for ACTION-TIER purposes only, with a single
+    // unified 0-100 entry score across these exact 10 modules. Reuses
+    // each module's own already-computed score/max (never a second
+    // scoring implementation) - this just recombines the SAME real
+    // per-module results with new weights. kol/whale/bundleQuality/
+    // walletQuality/walletProfitability are intentionally absent (weight
+    // 0) - dropped from the action-driving score per the final spec,
+    // still computed and still shown in breakdown/UI for observability,
+    // just no longer counted toward BUY/HOLD/AVOID. Must sum to 100.
+    // =====================================
+    entryScore: {
+
+        weights: {
+            smartMoney: 20,
+            accumulation: 18,
+            holderDistribution: 15,
+            liquidity: 15,
+            security: 10,
+            developer: 8,
+            sniperQuality: 5,
+            insiderQuality: 4,
+            volume: 3,
+            priceStability: 2
+        },
+
+        // Part 2 - Volume is a VALIDATOR, never a primary driver. Its 3
+        // points only count when accumulation AND smartMoney are both
+        // already "healthy" (their own score at/above this fraction of
+        // their own max) - high volume alone (the classic wash-trading
+        // signature) contributes nothing.
+        volumeValidator: {
+            requiredHealthFraction: 0.5
+        },
+
+        // Part 6 - explicit point penalties (subtracted from the final
+        // 0-100 entry score directly, not from security's own 10-point
+        // pool - "increase penalties" per the final spec).
+        securityPenalty: {
+            mintNotRenounced: 5,
+            freezeNotRenounced: 5
+        },
+
+        // Part 7 - wash trading is the largest single penalty. Reuses
+        // services/syntheticMarketFilterService.js's own real composite
+        // (the SAME signal Priority 1's BUY-time veto and dynamicExitService's
+        // Momentum Health orderflow-integrity component already use) -
+        // never a second wash-trading detector.
+        washTradingPenalty: {
+            confidenceThreshold: 70,
+            penalty: 15
+        },
+
+        // Part 8 - age is a BONUS only, never a reject. Buckets are
+        // upper-bound-exclusive except the last (20+min gets the top
+        // bonus). Missing age data = +0 (neutral, never guessed).
+        ageBonus: [
+            { maxMinutes: 5, bonus: 0 },
+            { maxMinutes: 10, bonus: 2 },
+            { maxMinutes: 20, bonus: 5 },
+            { maxMinutes: Infinity, bonus: 8 }
+        ]
 
     },
 

@@ -1366,7 +1366,7 @@ test("getOpenPositions surfaces real SL/TP, a real dynamicState, and a real pric
             exitStrategy: "dynamicExit", engineVersion: "production_v2",
             targetPrice: 1.15, targetMarketCap: null, stopLossPrice: 0.85, stopLossMarketCap: null
         });
-        // +5% - real ROI, still below the real MIN_TP_PCT (15) floor.
+        // +5% - real ROI, still below the real MIN_TP_PCT (Arjuna V3: 25) floor.
         tradingBotRepository.updatePositionTracking(belowTargetId, { currentPrice: 1.05, mfePct: 5, maePct: 0, lastVolume1h: null });
 
         const trailingId = tradingBotRepository.insertPosition(opUserId, {
@@ -1375,8 +1375,8 @@ test("getOpenPositions surfaces real SL/TP, a real dynamicState, and a real pric
             exitStrategy: "dynamicExit", engineVersion: "production_v2",
             targetPrice: 1.15, targetMarketCap: null, stopLossPrice: 0.85, stopLossMarketCap: null
         });
-        // +20% - real ROI, above the real MIN_TP_PCT floor.
-        tradingBotRepository.updatePositionTracking(trailingId, { currentPrice: 1.20, mfePct: 20, maePct: 0, lastVolume1h: null });
+        // +30% - real ROI, above the real MIN_TP_PCT floor.
+        tradingBotRepository.updatePositionTracking(trailingId, { currentPrice: 1.30, mfePct: 30, maePct: 0, lastVolume1h: null });
 
         const positions = tradingBotService.getOpenPositions(opUserId);
         const below = positions.find(p => p.id === belowTargetId);

@@ -67,10 +67,17 @@ test("omitted override reproduces the named base philosophy exactly (momentumHun
     // byte-identical equality on this one field isn't the thing this test
     // is proving. Checked separately with a generous tolerance; everything
     // else (score, breakdown, reasons, risk, tiers) must still match exactly.
-    const { freshnessPenalty: fp1, ...rest1 } = withNoOverride;
-    const { freshnessPenalty: fp2, ...rest2 } = viaBuildEngines;
+    const { freshnessPenalty: fp1, entryScoreBreakdown: esb1, ...rest1 } = withNoOverride;
+    const { freshnessPenalty: fp2, entryScoreBreakdown: esb2, ...rest2 } = viaBuildEngines;
     assert.deepEqual(rest1, rest2);
     assert.ok(Math.abs(fp1 - fp2) < 0.01, `freshnessPenalty should match within tolerance: ${fp1} vs ${fp2}`);
+    // Arjuna V3: entryScoreBreakdown.ageMinutes is the same real-time-based
+    // wall-clock computation as freshnessPenalty above - same tolerance
+    // treatment, everything else in the breakdown must match exactly.
+    const { ageMinutes: am1, ...esbRest1 } = esb1;
+    const { ageMinutes: am2, ...esbRest2 } = esb2;
+    assert.deepEqual(esbRest1, esbRest2);
+    assert.ok(Math.abs(am1 - am2) < 0.01, `ageMinutes should match within tolerance: ${am1} vs ${am2}`);
 });
 
 test("unknown base philosophy key throws rather than silently falling back", () => {
@@ -111,13 +118,25 @@ test("minVolumeUsd (new veto) is a strict no-op when absent, and vetoes a low-vo
     assert.equal(withVeto.action, "AVOID");
 });
 
-test("weights override reweights the composed participantScore (compositional shift, not just a threshold)", () => {
+// Arjuna V3 (FINAL SPRINT): participantScore is now the unified
+// 10-module entry score (config.entryScore.weights), computed from each
+// module's own score/max RATIO - a philosophy `weights` multiplier
+// override (scaleModule scales score AND max by the same factor) no
+// longer shifts that ratio, so it no longer moves participantScore/
+// action either. It still visibly reweights the OLD participant pool
+// (breakdown.participant.*.max, and that pool's own confidence-blending
+// contribution) exactly as before - this test now asserts THAT, not a
+// participantScore shift, since momentumHunter (Arjuna, the only
+// philosophy actually live-traded) never sets a weights override at
+// all, so this behavior change has no effect on real production
+// scoring.
+test("weights override still reweights the OLD participant pool (breakdown/confidence), even though the new unified entry score is ratio-based and doesn't shift from it", () => {
     const ctx = ctxWithAccumulation();
     const [defaultResult] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
     const [upweighted] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", { weights: { accumulation: 3 } });
-    assert.notEqual(defaultResult.participantScore, upweighted.participantScore);
     assert.equal(defaultResult.breakdown.participant.accumulation.max, 20); // scoringConfig default weight
     assert.equal(upweighted.breakdown.participant.accumulation.max, 60); // 20 * 3 multiplier applied via scaleModule
+    assert.equal(defaultResult.participantScore, upweighted.participantScore); // unified entry score is ratio-based - unaffected
 });
 
 // False Positive Reduction V2, Priority 1: combineScore must fold a
@@ -155,21 +174,20 @@ test("a module with no real data drags the aggregate toward neutral, never gets 
 
 // Real replay: this account's own two real BUYs (Fukuruto, MOON -
 // 2026-07-30), re-run through the exact real AGGRESSIVE override and
-// their exact real gmgn_trenches data (the two fields this fixture
-// cannot reproduce byte-for-byte, fdv/buys_5m/etc., account for the
-// exact score landing 1 point off the live DB replay - 65/64 here vs.
-// 64/62 against the real stored gmgn_tokens rows; both replays agree on
-// the thing that matters: STRONG BUY -> BUY). Both had smartMoney/kol/
-// walletQuality/walletProfitability all hasData:false - the precise
-// scenario this fix targets. This fixture uses a FRESH updated_at
-// (goodToken()'s default), isolating the combineScore effect from the
-// freshness penalty - confidence still drops, but stays above
-// AGGRESSIVE's 45 floor here. Against the REAL, STALE historical rows
-// (both from 2026-07-29, replayed via a live DB script, not asserted in
-// this DB-free unit test) the freshness penalty compounds with this
-// fix and pushes confidence to 39 and 38 - below the 45 floor. See this
-// sprint's report for that full real-data replay.
-test("real replay (fresh-data isolation): MOON and Fukuruto's own real trenches data scores materially lower after the fix, both downgraded from STRONG BUY to BUY", () => {
+// their exact real gmgn_trenches data. Historically this test pinned
+// specific pre-Arjuna-V3 numbers (65/64, both BUY not STRONG BUY) from
+// an earlier earliness-curve bugfix. Arjuna V3 (FINAL SPRINT) replaced
+// participantScore with the unified 10-module entry score, which - per
+// Part 4's explicit "increase holder distribution importance
+// significantly" - now folds real holder count directly into the
+// action-driving score for the first time (previously market-side only,
+// confidence-blending, never action). FUK's real 255 holders vs MOON's
+// real 18 is exactly the kind of gap this sprint intended to matter
+// more - FUK now legitimately reaches STRONG BUY on that real breadth
+// of holders, MOON stays at BUY. Numbers below are the new real
+// baseline; re-verify against config.entryScore before trusting old
+// assumptions if this test needs to change again.
+test("real replay: MOON and Fukuruto's own real trenches data, under Arjuna V3's unified entry score", () => {
     const ctx = emptyCtx();
     ctx.trenchesByAddress.set("FUKURUTO", {
         net_buy_24h: 1331.56320724565, buys_24h: 75, sells_24h: 15, rug_ratio: 0, top_10_holder_rate: 0.2788,
@@ -194,66 +212,60 @@ test("real replay (fresh-data isolation): MOON and Fukuruto's own real trenches 
     const [fukResult] = analyzeTokensWithOverride([fukuruto], ctx, "momentumHunter", aggressiveOverride);
     const [moonResult] = analyzeTokensWithOverride([moon], ctx, "momentumHunter", aggressiveOverride);
 
-    assert.equal(fukResult.participantScore, 65);
-    assert.ok(fukResult.participantScore < 75, "must fall below AGGRESSIVE's strongBuy floor (75) - was 79 (STRONG BUY) before this fix");
-    assert.equal(fukResult.action, "BUY"); // was STRONG BUY (79, real DB replay) before this fix
+    // FUK: real 255 holders now legitimately earns full holderDistribution
+    // credit (Part 4's >=120 bucket) under the unified score - reaches
+    // STRONG BUY on real breadth of participation, not a bug.
+    assert.equal(fukResult.participantScore, 75);
+    assert.equal(fukResult.action, "STRONG BUY");
 
-    assert.equal(moonResult.participantScore, 64);
-    assert.ok(moonResult.participantScore < 75, "must fall below AGGRESSIVE's strongBuy floor (75) - was 77 (STRONG BUY) before this fix");
-    assert.equal(moonResult.action, "BUY"); // was STRONG BUY (77, real DB replay) before this fix
+    // MOON: real 18 holders falls in Part 4's <40 bucket (0 credit) -
+    // stays well short of FUK's score despite similar accumulation/price
+    // action, exactly the real differentiator this sprint intended.
+    assert.equal(moonResult.participantScore, 62);
+    assert.ok(moonResult.participantScore < 75, "MOON's real 18 holders must keep it below AGGRESSIVE's strongBuy floor (75), unlike FUK's real 255");
+    assert.equal(moonResult.action, "BUY");
 });
 
-// Arjuna vNext sprint, "validated momentum" fix (2026-08-02): a token
-// with an otherwise-genuine BUY-tier score is downgraded to HOLD until
-// it has survived MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES since launch -
-// scoped to momentumHunter only, via the SAME entryGate mechanism
-// breakoutHunter/reversalHunter already use (never a weight/curve/module
-// change - confirmed below by proving participantScore is unchanged,
-// only `action` moves).
-// tiers: { buy: 1 } isolates the age-gate mechanism from the underlying
-// participantScore/tier interaction - same technique the pre-existing
-// "tiers override" test above already uses to guarantee a BUY-tier
-// crossing regardless of the exact score these fixtures produce.
-const nearZeroBuyTier = { tiers: { buy: 1 } };
-
-test("momentumHunter entryGate: a genuinely young token (just-launched) is downgraded to HOLD, not AVOID", () => {
+// Arjuna V3 (FINAL SPRINT), Part 8: age is now a BONUS only - the
+// earlier sprint's hard entryGate (reject below 10 minutes) is REMOVED.
+// A young token can still reach BUY on its own merits; it just never
+// gets the older token's small additive bonus (config.entryScore.ageBonus).
+test("Part 8: age is bonus-only - a genuinely young token is NOT rejected/downgraded on age alone, just scores a few points lower than an identical older one", () => {
     const ctx = ctxWithAccumulation();
-    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 2 minutes old
-    const matureToken = goodToken(); // 2h old, from goodToken's own default
+    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 2 min old, +0 bonus
+    const oldToken = goodToken({ launch_time: new Date(Date.now() - 25 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 25 min old, +8 bonus
 
-    const [youngResult] = analyzeTokensWithOverride([youngToken], ctx, "momentumHunter", nearZeroBuyTier);
-    const [matureResult] = analyzeTokensWithOverride([matureToken], ctx, "momentumHunter", nearZeroBuyTier);
+    const [youngResult] = analyzeTokensWithOverride([youngToken], ctx, "momentumHunter", null);
+    const [oldResult] = analyzeTokensWithOverride([oldToken], ctx, "momentumHunter", null);
 
-    assert.equal(youngResult.participantScore, matureResult.participantScore, "the underlying score must be untouched - only the action changes");
-    assert.equal(youngResult.action, "HOLD");
-    assert.notEqual(youngResult.action, "AVOID"); // downgraded, never a new hard reject
-    assert.ok(["BUY", "STRONG BUY"].includes(matureResult.action), "the mature token must still reach its normal tier - this test only proves age is what changed");
+    assert.equal(youngResult.entryScoreBreakdown.ageBonusPoints, 0);
+    assert.equal(oldResult.entryScoreBreakdown.ageBonusPoints, 8);
+    // Same +8-point gap reflected in the final score - age never rejects,
+    // it only ever adds a small amount on top of everything else.
+    assert.equal(oldResult.participantScore - youngResult.participantScore, 8);
 });
 
-test("momentumHunter entryGate: exactly at the age floor passes, one minute short does not", () => {
-    const ctx = ctxWithAccumulation();
-    const exactlyAtFloor = goodToken({ launch_time: new Date(Date.now() - 10 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
-    const oneMinuteShort = goodToken({ launch_time: new Date(Date.now() - 9 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
-
-    const [atFloor] = analyzeTokensWithOverride([exactlyAtFloor], ctx, "momentumHunter", nearZeroBuyTier);
-    const [short] = analyzeTokensWithOverride([oneMinuteShort], ctx, "momentumHunter", nearZeroBuyTier);
-
-    assert.ok(["BUY", "STRONG BUY"].includes(atFloor.action));
-    assert.equal(short.action, "HOLD");
-});
-
-test("momentumHunter entryGate: missing age data (no launch_time, no trenches created_timestamp) fails safe to HOLD, never fabricates a pass", () => {
+test("Part 8: missing age data is neutral (+0 bonus), never a rejection or a guessed bonus", () => {
     const ctx = ctxWithAccumulation(); // TOKEN1's trenches entry has no created_timestamp either
     const noAgeData = goodToken({ launch_time: null });
-    const [result] = analyzeTokensWithOverride([noAgeData], ctx, "momentumHunter", nearZeroBuyTier);
-    assert.equal(result.action, "HOLD");
+    const [result] = analyzeTokensWithOverride([noAgeData], ctx, "momentumHunter", null);
+    assert.equal(result.entryScoreBreakdown.ageBonusPoints, 0);
+    assert.equal(result.entryScoreBreakdown.ageMinutes, null);
 });
 
-test("momentumHunter entryGate never affects other philosophies (production/aggressive/etc never set entryGate)", () => {
+test("Part 8: age bonus buckets match the final spec exactly (0/2/5/8)", () => {
     const ctx = ctxWithAccumulation();
-    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
-    const [productionResult] = analyzeTokensWithOverride([youngToken], ctx, "production", nearZeroBuyTier);
-    assert.notEqual(productionResult.action, "HOLD"); // same score, same tier logic as before this sprint - age never gates it
+    const cases = [
+        { minutesAgo: 3, expectedBonus: 0 },
+        { minutesAgo: 7, expectedBonus: 2 },
+        { minutesAgo: 15, expectedBonus: 5 },
+        { minutesAgo: 30, expectedBonus: 8 }
+    ];
+    for(const { minutesAgo, expectedBonus } of cases){
+        const token = goodToken({ launch_time: new Date(Date.now() - minutesAgo * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
+        const [result] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
+        assert.equal(result.entryScoreBreakdown.ageBonusPoints, expectedBonus, `${minutesAgo}min old should get +${expectedBonus}`);
+    }
 });
 
 // False Positive Reduction V2, Priority 3: confidence must fall as risk
@@ -285,12 +297,16 @@ test("M5 regression guarantee: STABLE's translated philosophy produces byte-iden
     const token = goodToken();
     const [withStable] = analyzeTokensWithOverride([token], ctx, "momentumHunter", stablePhilosophy);
     const [withNoOverrideAtAll] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
-    // Same freshnessPenalty caveat as the test above - two separate calls,
-    // genuinely different wall-clock instants.
-    const { freshnessPenalty: fp1, ...rest1 } = withStable;
-    const { freshnessPenalty: fp2, ...rest2 } = withNoOverrideAtAll;
+    // Same freshnessPenalty/ageMinutes caveat as the test above - two
+    // separate calls, genuinely different wall-clock instants.
+    const { freshnessPenalty: fp1, entryScoreBreakdown: esb1, ...rest1 } = withStable;
+    const { freshnessPenalty: fp2, entryScoreBreakdown: esb2, ...rest2 } = withNoOverrideAtAll;
     assert.deepEqual(rest1, rest2);
     assert.ok(Math.abs(fp1 - fp2) < 0.01, `freshnessPenalty should match within tolerance: ${fp1} vs ${fp2}`);
+    const { ageMinutes: am1, ...esbRest1 } = esb1;
+    const { ageMinutes: am2, ...esbRest2 } = esb2;
+    assert.deepEqual(esbRest1, esbRest2);
+    assert.ok(Math.abs(am1 - am2) < 0.01, `ageMinutes should match within tolerance: ${am1} vs ${am2}`);
 });
 
 test("flattenEarliness:false (unlike momentumHunter's own true) lets a big already-moved change1h discount accumulation score", () => {
@@ -326,4 +342,110 @@ test("isDuplicateWindow is a real observability flag that never changes priceAcc
     // Both still compute a real priceAccel from the same formula - the
     // flag is descriptive only, not a gate, not a penalty, this sprint.
     assert.ok(dup.acceleration.priceAccel > 0);
+});
+
+// =====================================
+// Arjuna V3 (FINAL SPRINT) - Parts 1/2/4/5/6/7 targeted coverage.
+// =====================================
+
+test("Part 9: entry threshold is 68, not the old 62", () => {
+    const scoringConfig = require("../config/scoringConfig");
+    assert.equal(scoringConfig.actionTiers.buy, 68);
+});
+
+test("Part 4: holder distribution buckets match the final spec exactly (0/6/10/15)", () => {
+    const ctx = ctxWithAccumulation();
+    const cases = [
+        { holders: 10, expectedScore: 0 },
+        { holders: 50, expectedScore: 6 },
+        { holders: 90, expectedScore: 10 },
+        { holders: 150, expectedScore: 15 }
+    ];
+    for(const { holders, expectedScore } of cases){
+        const token = goodToken({ holders });
+        const [result] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
+        assert.equal(result.breakdown.market.holderDistribution.score, expectedScore, `${holders} holders should score ${expectedScore}/15`);
+    }
+});
+
+test("Part 5: liquidity hybrid - a good ratio on tiny absolute liquidity does NOT get full score", () => {
+    const ctx = ctxWithAccumulation();
+    // Same real shape the audit's own ANGELBULL/SUKI example used: a
+    // healthy ratio ($3,500 liquidity / $10,000 mcap = 35%) but a tiny
+    // absolute dollar figure.
+    const tinyButHealthyRatio = goodToken({ liquidity: 3500, market_cap: 10000, fdv: 10000 });
+    const [result] = analyzeTokensWithOverride([tinyButHealthyRatio], ctx, "momentumHunter", null);
+    const liquidityMax = result.breakdown.market.liquidity.max;
+    assert.ok(result.breakdown.market.liquidity.score < liquidityMax * 0.3, `expected a heavily discounted liquidity score, got ${result.breakdown.market.liquidity.score}/${liquidityMax}`);
+});
+
+test("Part 5: large absolute liquidity is always rewarded over tiny liquidity, at the same ratio", () => {
+    const ctx = ctxWithAccumulation();
+    const small = goodToken({ liquidity: 3500, market_cap: 10000, fdv: 10000 }); // 35% ratio, tiny absolute
+    const large = goodToken({ liquidity: 175000, market_cap: 500000, fdv: 500000 }); // same 35% ratio, large absolute
+    const [smallResult] = analyzeTokensWithOverride([small], ctx, "momentumHunter", null);
+    const [largeResult] = analyzeTokensWithOverride([large], ctx, "momentumHunter", null);
+    assert.ok(largeResult.breakdown.market.liquidity.score > smallResult.breakdown.market.liquidity.score);
+});
+
+test("Part 6: not-renounced mint/freeze authority apply real -5/-5 penalties to the unified entry score", () => {
+    const ctx = ctxWithAccumulation();
+    ctx.trenchesByAddress.set("TOKEN1", { ...ctx.trenchesByAddress.get("TOKEN1"), is_honeypot: 0, renounced_mint: 1, renounced_freeze_account: 1 });
+    const cleanToken = goodToken();
+    const [cleanResult] = analyzeTokensWithOverride([cleanToken], ctx, "momentumHunter", null);
+
+    ctx.trenchesByAddress.set("TOKEN1", { ...ctx.trenchesByAddress.get("TOKEN1"), renounced_mint: 0, renounced_freeze_account: 0 });
+    const [penalizedResult] = analyzeTokensWithOverride([cleanToken], ctx, "momentumHunter", null);
+
+    assert.equal(cleanResult.entryScoreBreakdown.securityPenalty, 0);
+    assert.equal(penalizedResult.entryScoreBreakdown.securityPenalty, 10); // -5 mint + -5 freeze
+    // Real total delta is larger than the explicit -10 alone: not-renounced
+    // also removes security.js's own positive renounced-confirmation
+    // points (0.2+0.2 of security's own 10-point pool = 4), which the
+    // unified score's own "security" weighted component also loses -
+    // both effects are real and correctly compound, "increase penalties"
+    // per Part 6.
+    assert.equal(cleanResult.participantScore - penalizedResult.participantScore, 14);
+});
+
+test("Part 7: wash-trading confidence >=70 applies a real -15 penalty; below 70 applies none", () => {
+    const ctx = ctxWithAccumulation();
+    const belowThreshold = ctx.trenchesByAddress.get("TOKEN1");
+    const [belowResult] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
+    assert.equal(belowResult.entryScoreBreakdown.washPenalty, 0);
+
+    // A real multi-signal bot/bundle pattern - the same SUKI-shaped
+    // fixture syntheticMarketFilterService.test.js already proves
+    // crosses the composite reject threshold (>=55, well above the
+    // Part 7 penalty threshold of 70 here).
+    ctx.trenchesByAddress.set("TOKEN1", {
+        ...belowThreshold, holders: 5, swaps_24h: 500, buys_24h: 250, sells_24h: 250,
+        raw_json: JSON.stringify({
+            bot_degen_rate: 0.6, bundler_trader_amount_rate: 0.5, rat_trader_amount_rate: 0.08,
+            entrapment_ratio: 0.32, fresh_wallet_rate: 0.6, suspected_insider_hold_rate: 0.08
+        })
+    });
+    const [washResult] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
+    assert.ok(washResult.entryScoreBreakdown.syntheticScore >= 70, `expected syntheticScore >= 70, got ${washResult.entryScoreBreakdown.syntheticScore}`);
+    assert.equal(washResult.entryScoreBreakdown.washPenalty, 15);
+});
+
+test("Part 2: high volume alone (accumulation/smartMoney NOT healthy) contributes nothing to the entry score", () => {
+    const ctx = emptyCtx(); // no trenches at all - accumulation defaults to neutral 0.4 fraction, well below the 0.5 health bar
+    const highVolumeToken = goodToken({ volume_1h: 500000, liquidity: 50000 }); // huge volume/liquidity ratio
+    const [result] = analyzeTokensWithOverride([highVolumeToken], ctx, "momentumHunter", null);
+    assert.equal(result.entryScoreBreakdown.volumeValidated, false);
+    assert.equal(result.entryScoreBreakdown.componentBreakdown.volume.contribution, 0);
+});
+
+test("Part 2: high volume DOES contribute once accumulation and smartMoney are both healthy", () => {
+    const ctx = ctxWithAccumulation(); // real net_buy_24h=5000, buys_24h=80/sells_24h=20 -> healthy accumulation
+    ctx.smartMoneyByAddress.set("TOKEN1", [
+        { side: "buy", amount_usd: 1000, tx_timestamp: Date.now() / 1000, maker_address: "W1" },
+        { side: "buy", amount_usd: 1000, tx_timestamp: Date.now() / 1000, maker_address: "W2" }
+    ]);
+    const highVolumeToken = goodToken({ volume_1h: 500000, liquidity: 50000 });
+    const [result] = analyzeTokensWithOverride([highVolumeToken], ctx, "momentumHunter", null);
+    assert.equal(result.entryScoreBreakdown.volumeValidated, true);
+    assert.ok(result.entryScoreBreakdown.componentBreakdown.volume.contribution > 0);
 });

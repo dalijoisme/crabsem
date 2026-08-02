@@ -9,6 +9,20 @@ const config = require("../../../config/scoringConfig");
 
 const MAX_SCORE = config.market.weights.holderDistribution;
 
+// Arjuna V3 (FINAL), Part 4 - holder count is now the SOLE basis for
+// this module's score (real losses - SUKI/Rocketman/FruitCats/etc. -
+// consistently occurred on extremely low-holder tokens). Concentration
+// (top_10_holder_rate) is kept as observability (confirmations/
+// riskReasons text) but no longer contributes points - the exact
+// buckets below already reach MAX_SCORE at the top tier, leaving no
+// room for a separate concentration bonus without exceeding it.
+const HOLDER_COUNT_BUCKETS = [
+    { min: 120, fraction: 1.00 },
+    { min: 70, fraction: 10/15 },
+    { min: 40, fraction: 6/15 },
+    { min: 0, fraction: 0 }
+];
+
 function score(token, trenchesEntry){
 
     const holders = token.holders != null ? Number(token.holders) : null;
@@ -17,18 +31,17 @@ function score(token, trenchesEntry){
 
     const riskReasons = [];
 
-    let countPoints = MAX_SCORE*0.3;
+    let countPoints = 0;
 
     if(holders != null){
 
-        if(holders >= 2000){ countPoints = MAX_SCORE*0.6; confirmations.push(`Broad holder base confirms distribution (${holders.toLocaleString()} holders)`); }
-        else if(holders >= 500) countPoints = MAX_SCORE*0.45;
-        else if(holders >= 100) countPoints = MAX_SCORE*0.3;
-        else if(holders < 20) riskReasons.push(`Very few holders (${holders}) - concentration risk`);
+        const bucket = HOLDER_COUNT_BUCKETS.find(b => holders >= b.min);
+        countPoints = MAX_SCORE * bucket.fraction;
+
+        if(holders >= 120) confirmations.push(`Broad holder base confirms distribution (${holders.toLocaleString()} holders)`);
+        else if(holders < 40) riskReasons.push(`Very few holders (${holders}) - below the validated 40-holder floor, concentration/wash-trading risk`);
 
     }
-
-    let concentrationPoints = MAX_SCORE*0.15;
 
     const hasConcentrationData = trenchesEntry && trenchesEntry.top_10_holder_rate != null;
 
@@ -36,15 +49,14 @@ function score(token, trenchesEntry){
 
         const rate = Number(trenchesEntry.top_10_holder_rate);
 
-        if(rate <= 0.15){ concentrationPoints = MAX_SCORE*0.4; confirmations.push(`Healthy holder distribution (top 10 hold ${(rate*100).toFixed(1)}%)`); }
-        else if(rate <= 0.30) concentrationPoints = MAX_SCORE*0.25;
+        if(rate <= 0.15) confirmations.push(`Healthy holder distribution (top 10 hold ${(rate*100).toFixed(1)}%)`);
         else if(rate > 0.50) riskReasons.push(`High holder concentration (top 10 hold ${(rate*100).toFixed(1)}%)`);
 
     }
 
     return {
 
-        score: Math.min(MAX_SCORE, Math.round(countPoints + concentrationPoints)),
+        score: Math.min(MAX_SCORE, Math.round(countPoints)),
 
         max: MAX_SCORE,
 

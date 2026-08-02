@@ -356,13 +356,13 @@ function findTradeByPositionId(userId, positionId){
 
 const insertPositionStmt = db.prepare(`
     INSERT INTO trading_bot_positions (
-        user_id, token_address, token_symbol, entry_price, current_price, size_usd,
+        user_id, token_address, token_symbol, entry_price, current_price, size_usd, initial_size_usd,
         confidence, exit_strategy, engine_version,
         target_price, target_market_cap, stop_loss_price, stop_loss_market_cap,
         last_volume_1h, status, execution_id, breakdown_json,
         rank_at_entry, priority_score_at_entry, risk, siblings_json, config_snapshot_json
     ) VALUES (
-        @userId, @tokenAddress, @tokenSymbol, @entryPrice, @entryPrice, @sizeUsd,
+        @userId, @tokenAddress, @tokenSymbol, @entryPrice, @entryPrice, @sizeUsd, @sizeUsd,
         @confidence, @exitStrategy, @engineVersion,
         @targetPrice, @targetMarketCap, @stopLossPrice, @stopLossMarketCap,
         @lastVolume1h, 'OPEN', @executionId, @breakdownJson,
@@ -436,13 +436,61 @@ const insertTradeStmt = db.prepare(`
     INSERT INTO trading_bot_trades (
         user_id, token_address, token_symbol, entry_price, exit_price, size_usd,
         roi_pct, fee_usd, slippage_pct, duration_seconds, reason,
-        engine_version, opened_at, closed_at, tx_hash, open_execution_id, close_execution_id, position_id
+        engine_version, opened_at, closed_at, tx_hash, open_execution_id, close_execution_id, position_id,
+        confidence, participant_score, market_health, token_age_minutes_at_entry,
+        holders_at_entry, liquidity_at_entry, volume_1h_at_entry, smart_money_metrics_json,
+        entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
         @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason,
-        @engineVersion, @openedAt, CURRENT_TIMESTAMP, @txHash, @openExecutionId, @closeExecutionId, @positionId
+        @engineVersion, @openedAt, CURRENT_TIMESTAMP, @txHash, @openExecutionId, @closeExecutionId, @positionId,
+        @confidence, @participantScore, @marketHealth, @tokenAgeMinutesAtEntry,
+        @holdersAtEntry, @liquidityAtEntry, @volume1hAtEntry, @smartMoneyMetricsJson,
+        @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification
     )
 `);
+
+// Arjuna V3 (FINAL SPRINT), Part 13 - Maximum Unrealized Profit
+// Protection (MUPP): a trade that reached a real, meaningful unrealized
+// peak (mfePct) but gave most of it back before/at exit is an
+// "EXIT_FAILURE" - a bad EXIT, not a bad ENTRY (the entry genuinely
+// found a real winner; the exit failed to lock it in). Distinguished
+// from an ordinary loss (never had real upside to begin with) so future
+// analytics never conflate the two. 30%/40 points are a first-cut,
+// unvalidated starting point - like every other new threshold in this
+// codebase's history - meant to be re-checked once enough real trade
+// volume accumulates, not a final number.
+function classifyExit(mfePct, roiPct){
+    if(mfePct != null && mfePct >= 30 && roiPct <= mfePct - 40) return "EXIT_FAILURE";
+    if(roiPct < 0) return "BAD_ENTRY";
+    return "NORMAL";
+}
+
+// Arjuna V3 (FINAL SPRINT), Part 12 - the permanent self-learning trade
+// dataset. Every field here is real and already-persisted on the
+// position (breakdown_json, written once at BUY time by
+// tradeManager.js's openPosition - never re-derived or guessed here) -
+// this just projects it onto the completed trade row so a future
+// analytics/ML pass never has to join back to trading_bot_positions or
+// re-parse JSON to answer "what did the engine know at entry."
+function buildTradeDatasetFields(position){
+    let breakdown = {};
+    try{ breakdown = position.breakdown_json ? JSON.parse(position.breakdown_json) : {}; }
+    catch(e){ /* malformed - honest empty, never guessed */ }
+    return {
+        confidence: position.confidence ?? null,
+        participantScore: breakdown.participantScore ?? null,
+        marketHealth: breakdown.marketHealth ?? null,
+        tokenAgeMinutesAtEntry: breakdown.tokenAgeMinutesAtEntry ?? null,
+        holdersAtEntry: breakdown.rawFactsAtEntry?.holders ?? null,
+        liquidityAtEntry: breakdown.rawFactsAtEntry?.liquidity ?? null,
+        volume1hAtEntry: breakdown.rawFactsAtEntry?.volume1h ?? null,
+        smartMoneyMetricsJson: breakdown.breakdown?.participant?.smartMoney ? JSON.stringify(breakdown.breakdown.participant.smartMoney) : null,
+        entryReasonsJson: breakdown.reasons ? JSON.stringify(breakdown.reasons) : null,
+        riskReasonsJson: breakdown.riskReasons ? JSON.stringify(breakdown.riskReasons) : null,
+        moduleScoresJson: breakdown.breakdown ? JSON.stringify(breakdown.breakdown) : null
+    };
+}
 
 // txHash/openExecutionId/closeExecutionId (migration 045/046) default to
 // null - only a real (Sprint 2, Founder Decision Path A) close passes
@@ -461,6 +509,7 @@ function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePc
         const info = closePositionStmt.run(position.id);
         closed = info.changes > 0;
         if(!closed) return; // already closed by a concurrent caller - never a duplicate trade row
+        const dataset = buildTradeDatasetFields(position);
         insertTradeStmt.run({
             userId,
             tokenAddress: position.token_address,
@@ -482,11 +531,69 @@ function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePc
             // the position this trade closed - Position Detail's timeline
             // joins on this instead of the (user_id, token_address,
             // opened_at) coincidence.
-            positionId: position.id
+            positionId: position.id,
+            ...dataset,
+            mfePct: position.mfe_pct ?? null,
+            maePct: position.mae_pct ?? null,
+            exitClassification: classifyExit(position.mfe_pct, roiPct)
         });
     });
     tx();
     return { closed };
+}
+
+// Arjuna V3 (FINAL SPRINT), Part 10, Step 2 - TP1 partial exit. Sells
+// sellSizeUsd worth of the position, keeps it OPEN with the reduced
+// size_usd, records the sold portion as its own completed
+// trading_bot_trades row (same self-learning dataset fields as a full
+// close), and stamps tp1_hit_at/tp1_price ONCE (the UPDATE's own
+// `tp1_hit_at IS NULL` guard is the real idempotency check - a second,
+// concurrent caller's UPDATE simply changes 0 rows).
+const partialCloseStmt = db.prepare(`
+    UPDATE trading_bot_positions
+    SET size_usd = size_usd - @sellSizeUsd,
+        realized_pnl_usd = realized_pnl_usd + (@sellSizeUsd * @roiPct / 100.0) - @feeUsd,
+        tp1_hit_at = CURRENT_TIMESTAMP,
+        tp1_price = @exitPrice
+    WHERE id = @id AND status = 'OPEN' AND tp1_hit_at IS NULL
+`);
+
+function partialClosePosition(userId, position, { exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId }){
+    let applied = false;
+    const tx = db.transaction(() => {
+        const info = partialCloseStmt.run({ id: position.id, sellSizeUsd, roiPct, feeUsd, exitPrice });
+        applied = info.changes > 0;
+        if(!applied) return; // already processed by a concurrent caller - never a duplicate partial sell/trade row
+        const dataset = buildTradeDatasetFields(position);
+        insertTradeStmt.run({
+            userId,
+            tokenAddress: position.token_address,
+            tokenSymbol: position.token_symbol,
+            entryPrice: position.entry_price,
+            exitPrice,
+            sizeUsd: sellSizeUsd, // only the SOLD portion - the position's own remaining size_usd is tracked separately
+            roiPct,
+            feeUsd,
+            slippagePct: 0,
+            durationSeconds: Math.round((Date.now() - new Date(`${String(position.opened_at).replace(" ", "T")}Z`).getTime()) / 1000),
+            reason,
+            engineVersion: position.engine_version,
+            openedAt: position.opened_at,
+            txHash: txHash ?? null,
+            openExecutionId: position.execution_id ?? null,
+            closeExecutionId: closeExecutionId ?? null,
+            positionId: position.id,
+            ...dataset,
+            mfePct: position.mfe_pct ?? null,
+            maePct: position.mae_pct ?? null,
+            // A partial TP1 sell locking in real profit is never itself
+            // an "exit failure" or a "bad entry" classification - that
+            // verdict belongs to the position's FINAL close only.
+            exitClassification: "PARTIAL_TP1"
+        });
+    });
+    tx();
+    return { applied };
 }
 
 function findRecentTrades(userId, limit){
@@ -813,6 +920,7 @@ function forUser(userId){
         insertPosition: (row) => insertPosition(userId, row),
         updatePositionTracking,
         closePosition: (position, outcome) => closePosition(userId, position, outcome),
+        partialClosePosition: (position, outcome) => partialClosePosition(userId, position, outcome),
         insertLog: (entry) => insertLog(userId, entry),
         findOpenPositionForToken: (tokenAddress) => findOpenPositionForToken(userId, tokenAddress),
         findLastTradeForToken: (tokenAddress) => findLastTradeForToken(userId, tokenAddress)
@@ -825,7 +933,7 @@ module.exports = {
     ensureBotForUser, findRunningUserIds,
     findOpenPositions, findOpenPositionForToken, findOpenPositionById, findPositionById, countOpenPositions,
     findLastTradeForToken, findTradeByPositionId,
-    insertPosition, updatePositionTracking, closePosition,
+    insertPosition, updatePositionTracking, closePosition, partialClosePosition,
     findRecentTrades, countTrades, findAllTradesChronological, findRankAtEntryValues,
     findTradesClosedSince, countPositionsOpenedSince, findLogSince, findRankAtEntryValuesSince, findEntryDelayValues, findEntryDelayValuesSince, findTimeToPeakValues,
     findRecentLog, insertLog,

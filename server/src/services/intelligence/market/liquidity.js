@@ -7,6 +7,29 @@ const config = require("../../../config/scoringConfig");
 
 const MAX_SCORE = config.market.weights.liquidity;
 
+// Arjuna V3 (FINAL), Part 5 - HYBRID scoring: ratioFactor * absoluteFactor,
+// both normalized to [0,1], multiplied together (not added). A "good
+// ratio" on a tiny absolute liquidity figure (the ANGELBULL/SUKI-shaped
+// case - $3,500 liquidity can still show a healthy ratio on a
+// proportionally tiny market cap) can no longer reach a high score by
+// ratio alone - the previous additive model let it. Large absolute
+// liquidity is always rewarded over tiny liquidity, at any ratio.
+function absoluteLiquidityFactor(liquidity){
+    if(liquidity >= 100000) return 1.0;
+    if(liquidity >= 50000) return 0.8;
+    if(liquidity >= 25000) return 0.6;
+    if(liquidity >= 10000) return 0.4;
+    if(liquidity >= 5000) return 0.2;
+    return 0.05;
+}
+
+function ratioFactor(ratio){
+    if(ratio >= 0.15) return 1.0;
+    if(ratio >= 0.08) return 0.7;
+    if(ratio >= 0.03) return 0.4;
+    return 0.1;
+}
+
 function score(token){
 
     const liquidity = Number(token.liquidity || 0);
@@ -21,57 +44,44 @@ function score(token){
 
     const riskReasons = [];
 
-    let liquidityPoints = 0;
+    const absFactor = absoluteLiquidityFactor(liquidity);
 
-    if(liquidity >= 100000){ liquidityPoints = MAX_SCORE*0.5; confirmations.push("Liquidity confirms accumulation is well-supported"); }
-    else if(liquidity >= 50000) liquidityPoints = MAX_SCORE*0.4;
-    else if(liquidity >= 25000) liquidityPoints = MAX_SCORE*0.3;
-    else if(liquidity >= 10000) liquidityPoints = MAX_SCORE*0.2;
-    else if(liquidity >= 5000) liquidityPoints = MAX_SCORE*0.1;
-    else riskReasons.push(`Very low liquidity ($${Math.round(liquidity).toLocaleString()}) - high slippage/rug risk`);
+    if(liquidity < 5000) riskReasons.push(`Very low liquidity ($${Math.round(liquidity).toLocaleString()}) - high slippage/rug risk`);
+    else if(liquidity >= 100000) confirmations.push("Liquidity confirms accumulation is well-supported");
 
-    let backingPoints = MAX_SCORE*0.1;
+    const ratio = valuationBasis > 0 ? liquidity / valuationBasis : null;
+    const rFactor = ratio != null ? ratioFactor(ratio) : 0.4; // no valuation basis - neutral-ish, never guessed strong
 
-    if(valuationBasis > 0){
+    if(ratio != null){
 
-        const ratio = liquidity / valuationBasis;
+        if(rFactor >= 1.0 && absFactor >= 0.4){
 
-        if(ratio >= 0.15){
-
-            backingPoints = MAX_SCORE*0.5;
-
-            // A healthy ratio on a tiny absolute liquidity figure
-            // (common on very-low-cap tokens, where liquidity can
-            // nominally exceed market cap) is not the same claim as a
-            // healthy ratio backed by real depth - saying "well-
-            // backed" in both cases the same way was found to read as
-            // more reassuring than the absolute number supports (see
-            // the recommendation-quality audit's ANGELBULL example:
-            // $3,194 liquidity, a hair above the $2,000 safety-veto
-            // floor, still worded as "well-backed"). Score is
-            // unchanged - this only corrects the wording.
-
-            if(liquidity >= 10000){
-
-                confirmations.push("Liquidity well-backed relative to valuation");
-
-            }
-            else{
-
-                confirmations.push(`Liquidity ratio is healthy (${(ratio*100).toFixed(0)}% of valuation), but the absolute amount is still low ($${Math.round(liquidity).toLocaleString()}) - slippage risk remains`);
-
-            }
+            confirmations.push("Liquidity well-backed relative to valuation");
 
         }
-        else if(ratio >= 0.08) backingPoints = MAX_SCORE*0.35;
-        else if(ratio >= 0.03) backingPoints = MAX_SCORE*0.2;
-        else{ backingPoints = MAX_SCORE*0.05; riskReasons.push(`Liquidity thin relative to valuation (${(ratio*100).toFixed(1)}%) - possible rug risk`); }
+        else if(rFactor >= 1.0){
+
+            // Same real case this module's own history already
+            // documented (ANGELBULL: $3,194 liquidity) - a healthy
+            // RATIO on a small ABSOLUTE figure is worded honestly, and
+            // - unlike before - no longer scores as if it were fully
+            // backed either.
+            confirmations.push(`Liquidity ratio is healthy (${(ratio*100).toFixed(0)}% of valuation), but the absolute amount is still low ($${Math.round(liquidity).toLocaleString()}) - slippage risk remains`);
+
+        }
+        else if(rFactor <= 0.1){
+
+            riskReasons.push(`Liquidity thin relative to valuation (${(ratio*100).toFixed(1)}%) - possible rug risk`);
+
+        }
 
     }
 
+    const hybridScore = MAX_SCORE * rFactor * absFactor;
+
     return {
 
-        score: Math.min(MAX_SCORE, Math.round(liquidityPoints + backingPoints)),
+        score: Math.min(MAX_SCORE, Math.round(hybridScore)),
 
         max: MAX_SCORE,
 
@@ -81,7 +91,7 @@ function score(token){
 
         riskReasons,
 
-        facts: { liquidity, backingRatio: valuationBasis > 0 ? liquidity/valuationBasis : null }
+        facts: { liquidity, backingRatio: ratio }
 
     };
 

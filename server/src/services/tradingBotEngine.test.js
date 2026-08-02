@@ -637,14 +637,13 @@ test("isInProfitProtectionTerritory is true once ROI reaches the position's own 
 
     const position = { entry_price: 1.0 };
 
-    assert.equal(isInProfitProtectionTerritory(position, { price: 1.05 }, {}), false, "5% ROI is below the default 15% floor");
-    assert.equal(isInProfitProtectionTerritory(position, { price: 1.14999 }, {}), false, "just under the floor");
-    // Not 1.15 exactly - (1.15/1.0 - 1) * 100 is 14.999999999999991 in
-    // floating point, not 15 - a real boundary-precision fact about
-    // computed ratios, not something either isInProfitProtectionTerritory
-    // or this test should paper over with an artificial rounding step.
-    assert.equal(isInProfitProtectionTerritory(position, { price: 1.150001 }, {}), true, "just past the floor");
-    assert.equal(isInProfitProtectionTerritory(position, { price: 1.20 }, {}), true, "20% ROI is past the floor");
+    // Arjuna V3 (FINAL SPRINT), Part 10: the default floor is now 25%
+    // (exitSystemConfig.tp1.triggerPct - dynamicExitService.MIN_TP_PCT is
+    // aligned to it), not the old 15%.
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.05 }, {}), false, "5% ROI is below the default 25% floor");
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.24999 }, {}), false, "just under the floor");
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.250001 }, {}), true, "just past the floor");
+    assert.equal(isInProfitProtectionTerritory(position, { price: 1.30 }, {}), true, "30% ROI is past the floor");
 
     // A profile's own exitOverrides.fixedTpPct (Strategy Profile refactor)
     // must govern this too, never a second hardcoded floor drifting apart
@@ -713,12 +712,12 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
             targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
         });
 
-        // +20% ROI (past the 15% floor) and genuinely fresh (last_seen/
-        // updated_at = now, still in the shared trending snapshot) - the
-        // distinguishing shape from the already-covered "fallen out of
-        // trending entirely" case above.
+        // +30% ROI (past Arjuna V3's 25% floor) and genuinely fresh
+        // (last_seen/updated_at = now, still in the shared trending
+        // snapshot) - the distinguishing shape from the already-covered
+        // "fallen out of trending entirely" case above.
         gmgnTokenRepository.getTokenByAddress = () => ({
-            token_address: "TestProfitProtectToken111", symbol: "PROFITPROT", price: 1.20,
+            token_address: "TestProfitProtectToken111", symbol: "PROFITPROT", price: 1.30,
             price_change_5m: 5, volume_1h: 1000,
             market_cap: 1000, last_seen: nowStamp, updated_at: nowStamp
         });
@@ -732,7 +731,7 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
                 return { data: { liquidity: "9000" } };
             },
             async getTokenKline(){
-                return { data: { list: [{ close: "1.22" }] } }; // a genuinely newer real price
+                return { data: { list: [{ close: "1.32" }] } }; // a genuinely newer real price
             }
         };
 
@@ -742,7 +741,7 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
         assert.equal(seenTtlSeconds, PROFIT_PROTECTION_REFRESH_TTL_SECONDS, "the profit-protection refresh must request a short TTL, never reuse the 60s default built for occasional dashboard lookups");
 
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
-        assert.equal(position.current_price, 1.22, "the freshly-refreshed price must be what this cycle actually tracked, not the shared snapshot's own (up to 30s stale) 1.20");
+        assert.equal(position.current_price, 1.32, "the freshly-refreshed price must be what this cycle actually tracked, not the shared snapshot's own (up to 30s stale) 1.30");
 
     }
     finally{

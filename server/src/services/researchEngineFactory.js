@@ -29,6 +29,13 @@ const gmgnLaunchpadStatsRepository = require("../repositories/gmgnLaunchpadStats
 const gmgnOndemandCacheRepository = require("../repositories/gmgnOndemandCacheRepository");
 const walletRepository = require("../repositories/walletRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+// Arjuna vNext sprint, "validated momentum" fix: reuses emiService.js's
+// own real, already-tested age computation (gmgn_tokens.launch_time,
+// 99.4% real coverage, gmgn_trenches.created_timestamp as fallback) -
+// the SAME single-source-of-truth tradeManager.js already persists for
+// observability on every real BUY - never a second, drifting copy of
+// this formula.
+const { resolveTokenAgeMinutes } = require("./emiService");
 
 const accumulation = require("./intelligence/participant/accumulation");
 const smartMoney = require("./intelligence/participant/smartMoney");
@@ -370,6 +377,46 @@ function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kol
 
 }
 
+// Arjuna vNext sprint, "validated momentum" fix (2026-08-02): root
+// cause of entries clustering on tokens minutes old was investigated
+// and found to be STRUCTURAL, not an explicit age rule - nothing in
+// this file or scoringConfig.js ever reads launch age. accumulation.js/
+// smartMoney.js/kol.js score "significance" against FIXED ABSOLUTE-
+// DOLLAR floors (minSignificantVolumeUsd: $500/$300/$150), never
+// normalized by a token's own liquidity/market cap. A brand-new,
+// thin-liquidity token needs only a couple of buyers to cross those
+// floors AND to read as ~100% buy-dominant (few transactions exist at
+// all yet) - the exact same dollar amount is noise on a token with
+// deeper, more mature liquidity. Momentum Hunter's own
+// flattenEarliness: true (deliberate, validated by the Real Capital
+// Tournament, NOT touched here) then never discounts that inflated
+// score for being early-stage, since removing that discount is this
+// philosophy's entire adversarial hypothesis. The combination
+// structurally favors the youngest, thinnest-liquidity candidates
+// without any code ever asking "how old is this."
+// computeAccelerationSignal (the "acceleration score") was RULED OUT -
+// momentumHunter never sets philosophy.acceleration below, so
+// accelerationBonus is always 0 for it; this was not the mechanism.
+//
+// Fix, scoped to momentumHunter only via the SAME entryGate extension
+// point breakoutHunter/reversalHunter already use below (an ADDITIVE
+// requirement on top of the normal score/tier/veto pipeline - downgrades
+// an otherwise-BUY-tier candidate to HOLD, never a new AVOID, never a
+// weight/curve/module change): require the token to have been alive at
+// least MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES before Arjuna will act on
+// it, using the SAME real launch_time/created_timestamp data
+// emiService.js already relies on. This does not touch scoringConfig.js,
+// does not touch accumulation.js/smartMoney.js/kol.js (shared by every
+// other philosophy/version - deliberately untouched, no wider blast
+// radius), does not change any weight or the flattened earliness curve -
+// Arjuna still enters early, just no longer in the first few minutes
+// where a handful of wallets can trivially fake "validated" accumulation.
+// 10 minutes is a first-cut, unvalidated starting point - like every
+// other new threshold in this codebase's history (scoringConfig.js's own
+// actionTiers comment) - meant to be re-checked against real outcome
+// data once enough volume accumulates at this floor, not a final number.
+const MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES = 10;
+
 // =====================================
 // PHILOSOPHY DEFINITIONS - every override is named and justified.
 // Unlisted fields default to production's real values (no change).
@@ -418,7 +465,15 @@ const PHILOSOPHIES = [
         key: "momentumHunter",
         name: "Momentum Hunter",
         hypothesis: "Direct adversarial test of production's own core philosophy: scoringConfig.js says a token that already ran is 'far more likely to be late FOMO.' This engine removes the earliness discount entirely (factor pinned to 1.0) to test whether that assumption actually costs profit in practice.",
-        weights: {}, tiers: {}, minLiquidityUsd: null, flattenEarliness: true, smBonus: false
+        weights: {}, tiers: {}, minLiquidityUsd: null, flattenEarliness: true, smBonus: false,
+        // "Validated momentum" fix - see this file's own comment above
+        // PHILOSOPHIES for the full root-cause writeup. Missing age data
+        // (tokenAgeMinutes == null, ~0.6% of tokens) fails the gate -
+        // "if essential data isn't ready, SKIP rather than BUY" is
+        // already this codebase's own established rule for new entries
+        // (entryGateService.js's MISSING_QUALITY_DATA gate), applied
+        // consistently here rather than defaulting an unknown to a pass.
+        entryGate: (f) => f.tokenAgeMinutes != null && f.tokenAgeMinutes >= MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES
     },
 
     {
@@ -674,7 +729,13 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     // that doesn't meet their own additional criteria).
     if(philosophy.entryGate && (action === "BUY" || action === "STRONG BUY")){
         const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
-        const gatePassed = philosophy.entryGate({ change1h, change5m, marketHealth: marketScore, risk, marketAgeSeconds, participantScore });
+        // tokenAgeMinutes: added for momentumHunter's own "validated
+        // momentum" entryGate (see PHILOSOPHIES' own comment above) -
+        // purely additive, every other existing entryGate (breakoutHunter/
+        // reversalHunter) simply never reads this field, so their
+        // behavior is byte-identical to before.
+        const tokenAgeMinutes = resolveTokenAgeMinutes(token, trenchesEntry);
+        const gatePassed = philosophy.entryGate({ change1h, change5m, marketHealth: marketScore, risk, marketAgeSeconds, participantScore, tokenAgeMinutes });
         if(!gatePassed) action = "HOLD";
     }
 

@@ -30,6 +30,12 @@ function goodToken(overrides = {}){
         price: 0.001, market_cap: 1000000, liquidity: 50000, holders: 200,
         volume_1h: 30000, price_change_1h: 20, price_change_5m: 1,
         updated_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+        // "Validated momentum" fix: momentumHunter's own entryGate needs
+        // real age data - 2h old by default (well past
+        // MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES) so every EXISTING test
+        // using this fixture keeps testing what it always tested, not
+        // this new gate. Tests for the gate itself override this.
+        launch_time: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " "),
         ...overrides
     };
 }
@@ -195,6 +201,59 @@ test("real replay (fresh-data isolation): MOON and Fukuruto's own real trenches 
     assert.equal(moonResult.participantScore, 64);
     assert.ok(moonResult.participantScore < 75, "must fall below AGGRESSIVE's strongBuy floor (75) - was 77 (STRONG BUY) before this fix");
     assert.equal(moonResult.action, "BUY"); // was STRONG BUY (77, real DB replay) before this fix
+});
+
+// Arjuna vNext sprint, "validated momentum" fix (2026-08-02): a token
+// with an otherwise-genuine BUY-tier score is downgraded to HOLD until
+// it has survived MOMENTUM_HUNTER_MIN_TOKEN_AGE_MINUTES since launch -
+// scoped to momentumHunter only, via the SAME entryGate mechanism
+// breakoutHunter/reversalHunter already use (never a weight/curve/module
+// change - confirmed below by proving participantScore is unchanged,
+// only `action` moves).
+// tiers: { buy: 1 } isolates the age-gate mechanism from the underlying
+// participantScore/tier interaction - same technique the pre-existing
+// "tiers override" test above already uses to guarantee a BUY-tier
+// crossing regardless of the exact score these fixtures produce.
+const nearZeroBuyTier = { tiers: { buy: 1 } };
+
+test("momentumHunter entryGate: a genuinely young token (just-launched) is downgraded to HOLD, not AVOID", () => {
+    const ctx = ctxWithAccumulation();
+    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 2 minutes old
+    const matureToken = goodToken(); // 2h old, from goodToken's own default
+
+    const [youngResult] = analyzeTokensWithOverride([youngToken], ctx, "momentumHunter", nearZeroBuyTier);
+    const [matureResult] = analyzeTokensWithOverride([matureToken], ctx, "momentumHunter", nearZeroBuyTier);
+
+    assert.equal(youngResult.participantScore, matureResult.participantScore, "the underlying score must be untouched - only the action changes");
+    assert.equal(youngResult.action, "HOLD");
+    assert.notEqual(youngResult.action, "AVOID"); // downgraded, never a new hard reject
+    assert.ok(["BUY", "STRONG BUY"].includes(matureResult.action), "the mature token must still reach its normal tier - this test only proves age is what changed");
+});
+
+test("momentumHunter entryGate: exactly at the age floor passes, one minute short does not", () => {
+    const ctx = ctxWithAccumulation();
+    const exactlyAtFloor = goodToken({ launch_time: new Date(Date.now() - 10 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
+    const oneMinuteShort = goodToken({ launch_time: new Date(Date.now() - 9 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
+
+    const [atFloor] = analyzeTokensWithOverride([exactlyAtFloor], ctx, "momentumHunter", nearZeroBuyTier);
+    const [short] = analyzeTokensWithOverride([oneMinuteShort], ctx, "momentumHunter", nearZeroBuyTier);
+
+    assert.ok(["BUY", "STRONG BUY"].includes(atFloor.action));
+    assert.equal(short.action, "HOLD");
+});
+
+test("momentumHunter entryGate: missing age data (no launch_time, no trenches created_timestamp) fails safe to HOLD, never fabricates a pass", () => {
+    const ctx = ctxWithAccumulation(); // TOKEN1's trenches entry has no created_timestamp either
+    const noAgeData = goodToken({ launch_time: null });
+    const [result] = analyzeTokensWithOverride([noAgeData], ctx, "momentumHunter", nearZeroBuyTier);
+    assert.equal(result.action, "HOLD");
+});
+
+test("momentumHunter entryGate never affects other philosophies (production/aggressive/etc never set entryGate)", () => {
+    const ctx = ctxWithAccumulation();
+    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
+    const [productionResult] = analyzeTokensWithOverride([youngToken], ctx, "production", nearZeroBuyTier);
+    assert.notEqual(productionResult.action, "HOLD"); // same score, same tier logic as before this sprint - age never gates it
 });
 
 // False Positive Reduction V2, Priority 3: confidence must fall as risk

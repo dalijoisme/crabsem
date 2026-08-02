@@ -93,23 +93,12 @@ const productionEngineResolver = require("./productionEngineResolver");
 const HELD_POSITION_CHAIN = "sol";
 const HELD_POSITION_STALE_AFTER_MS = 90 * 1000;
 
-// Exit Engine realtime-latency fix (real incident: a position peaked
-// well past its own take-profit floor, then rode all the way back down
-// to a loss before ever closing). Proven root cause, distinct from the
-// staleness case above: even a token that NEVER falls out of trending
-// (so HELD_POSITION_STALE_AFTER_MS above never trips) still only gets a
-// new price once every 30s - collectors/gmgn/trendingCollector.js's own
-// tick - no matter how low a user sets exit_evaluation_interval_seconds
-// (as fine as 1s, scheduler/exitEvaluationScheduler.js). Once a position
-// reaches its own take-profit floor, services/dynamicExitService.js's
-// "ride the winner, but must see reversal fast" branch is what's
-// actually deciding whether to keep holding - exactly where a 30s-old
-// price is the most costly to get wrong. Fix: from that point on, every
-// exit cycle re-verifies price on demand too, not only once genuinely
-// stale - bounded to positions that have already reached
-// profit-protection territory (a small subset of an already-small open-
-// position set), never the full open-position set, so this can never
-// increase GMGN load for a position still below its own floor.
+// Exit Engine realtime-latency fix, ORIGINAL scope (Aug 2026 profit-
+// protection incident: a position peaked well past its own take-profit
+// floor, then rode all the way back down to a loss before ever
+// closing) - superseded below by FINAL PRODUCTION SPRINT P0's symmetric
+// fix, kept only as the live isInProfitProtectionTerritory() helper
+// still used by tradingBotService.js's own dashboard-side estimate.
 function isInProfitProtectionTerritory(position, token, botConfig){
     const currentPrice = Number(token?.price) || position.current_price || position.entry_price;
     if(!currentPrice || !position.entry_price) return false;
@@ -118,13 +107,32 @@ function isInProfitProtectionTerritory(position, token, botConfig){
     return roiPct >= minTpPct;
 }
 
-// Generous relative to the tightest allowed exit_evaluation_interval_seconds
-// (1s) while still respectful of GMGN's own rate limit - a profit-
-// protection refresh is bounded to positions already at/above their own
-// TP floor, never the full open-position set, so a short TTL here is
-// cheap in aggregate. Deliberately still well under the trending
-// collector's own 30s tick (the exact latency this fix exists to beat).
-const PROFIT_PROTECTION_REFRESH_TTL_SECONDS = 5;
+// FINAL PRODUCTION SPRINT P0 - root cause of "Stop Loss -20% did not
+// close a real position until -43.8%/-81%". The Aug-1 profit-protection
+// fix above only ever re-verified price on demand for a position ALREADY
+// showing +25%+ under the STALE (up to 30s old) trending-snapshot price -
+// one-sided, upside only. A position heading toward a LOSS got no such
+// refresh at all: `token.price` stayed whatever
+// collectors/gmgn/trendingCollector.js's 30s tick last wrote, no matter
+// how low exit_evaluation_interval_seconds was configured (down to 1s).
+// A fast-dumping/rugging memecoin can fall through -20%, -40%, -80%
+// inside that 30s gap before the exit cycle ever sees a real crashed
+// price - the scheduler was ticking every 1s exactly as designed, but
+// the PRICE it evaluated against wasn't moving. This also explains
+// missed TP1: a brief pump that spikes +25%+ and retraces within a
+// single 30s window can be entirely invisible to the shared snapshot.
+// Fix, matching the spec's own required architecture ("Exit harus
+// dipicu oleh price update sehingga ketika ROI melewati +25% atau -20%,
+// Exit Engine langsung mengevaluasi posisi"): every OPEN position gets
+// its own on-demand price/liquidity refresh EVERY exit cycle, upside and
+// downside alike - not gated on already being in profit. No websocket/
+// push feed exists anywhere in this codebase (confirmed - GMGN's
+// integration here is REST-only), so "triggered by a price update" is
+// implemented as tightly as a REST architecture allows: a real,
+// individually-fetched price on every evaluation, bounded by a short TTL
+// cache so repeated evaluations within the same few seconds reuse one
+// fetch rather than hammering GMGN.
+const REALTIME_EXIT_REFRESH_TTL_SECONDS = 5;
 
 function msSinceTokenSeen(token){
     const lastSeen = token?.last_seen || token?.updated_at;
@@ -431,31 +439,21 @@ async function manageOpenPositions(userId, tradeManagerForUser, botConfig, token
         // never evaluated against a price that stopped being real.
         const stale = msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS;
 
-        // Exit Engine realtime-latency fix (see isInProfitProtectionTerritory's
-        // own header comment above) - a position already at/above its own
-        // take-profit floor is refreshed EVERY exit cycle regardless of
-        // staleness, since that is exactly where a 30s-old trending-tick
-        // price costs the most. Skipped when `stale` already covers it
-        // (avoids a redundant duplicate check/log) or when there is no
-        // token at all yet (nothing to compute an ROI against - the
-        // `stale` branch above already handles token==null via
-        // msSinceTokenSeen's own Infinity fallback).
-        const needsProfitProtectionRefresh = !stale && token && isInProfitProtectionTerritory(position, token, botConfig);
-
         if(stale){
             token = await refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale: true });
         }
-        else if(needsProfitProtectionRefresh){
-            // markContextStale: false - the token is still in this
-            // cycle's shared trending snapshot (or was seen within the
-            // last HELD_POSITION_STALE_AFTER_MS), so its price_change_5m/
-            // volume_1h/trenches are still genuinely fresh; only price/
-            // liquidity are being re-verified early here, so
-            // dynamicExitService's momentum-hold check must keep treating
-            // that momentum evidence as real, never as stale.
+        else if(token){
+            // FINAL PRODUCTION SPRINT P0 (see REALTIME_EXIT_REFRESH_TTL_SECONDS's
+            // own header comment) - EVERY still-trending open position is
+            // re-verified on demand, every exit cycle, upside and downside
+            // alike - Stop Loss/TP1 both trigger off THIS fresh price, never
+            // the 30s-old shared trending snapshot. markContextStale: false
+            // since the token's other fields (price_change_5m/volume_1h/
+            // trenches) are still genuinely fresh either way - only price/
+            // liquidity are being re-verified early here.
             token = await refreshStaleHeldToken(userId, position, token, ondemandService, {
                 markContextStale: false,
-                ttlSeconds: PROFIT_PROTECTION_REFRESH_TTL_SECONDS
+                ttlSeconds: REALTIME_EXIT_REFRESH_TTL_SECONDS
             });
         }
         if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
@@ -754,6 +752,26 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
             continue;
         }
 
+        // FINAL PRODUCTION SPRINT P0 (Observability - Decision Snapshot
+        // "Quality Gate Result"): syntheticCheck was computed then
+        // discarded right here for every candidate that PASSED it - only
+        // a REJECTED candidate ever got its result written down (the
+        // WARNING log above). A candidate that reaches an actual real BUY
+        // deserves the exact same audit trail: this IS the last gate that
+        // ran before the swap, and evaluation.eligible=true here already
+        // proves qualityGateService.passesQualityGate() passed inside
+        // entryGateService's own evaluateEntry() a moment earlier - both
+        // real, already-computed results, attached onto `live` (same
+        // pattern as entryGateResult just above) so tradeManager.js can
+        // persist them immutably rather than only ever explaining a
+        // rejection.
+        evaluation.live.qualityGateResult = {
+            qualityGatePassed: true,
+            syntheticMarketPassed: syntheticCheck.pass,
+            syntheticScore: syntheticCheck.syntheticScore,
+            syntheticReasons: syntheticCheck.reasons
+        };
+
         const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
 
         if(result.opened){
@@ -947,6 +965,6 @@ module.exports = {
     runCycle, orderCandidates, buildLiveExecutionOptions,
     msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
     isInProfitProtectionTerritory,
-    HELD_POSITION_STALE_AFTER_MS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS,
+    HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS,
     manageOpenPositions, runExitCycle
 };

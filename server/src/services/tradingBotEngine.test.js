@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 
-const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
+const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
@@ -676,12 +676,12 @@ test("refreshStaleHeldToken honors markContextStale=false for the profit-protect
 
     const result = await refreshStaleHeldToken(1, position, freshToken, workingOndemand, {
         markContextStale: false,
-        ttlSeconds: PROFIT_PROTECTION_REFRESH_TTL_SECONDS
+        ttlSeconds: REALTIME_EXIT_REFRESH_TTL_SECONDS
     });
 
     assert.equal(result.price, 1.22, "the refreshed price must win over the shared snapshot's own (potentially up to 30s stale) price");
     assert.equal(result.marketContextStale, false, "a still-fresh token's momentum evidence must never be marked stale just because its price was re-verified early");
-    assert.deepEqual(seenTtlSeconds, [PROFIT_PROTECTION_REFRESH_TTL_SECONDS, PROFIT_PROTECTION_REFRESH_TTL_SECONDS], "both on-demand calls must use the short profit-protection TTL, never the 60s default");
+    assert.deepEqual(seenTtlSeconds, [REALTIME_EXIT_REFRESH_TTL_SECONDS, REALTIME_EXIT_REFRESH_TTL_SECONDS], "both on-demand calls must use the short profit-protection TTL, never the 60s default");
 
 });
 
@@ -738,7 +738,7 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
         await runExitCycle(userId, spyOndemand);
 
         assert.equal(refreshCalls, 1, "an in-profit, still-fresh position must still get an on-demand refresh every exit cycle - never wait out the trending collector's own 30s tick");
-        assert.equal(seenTtlSeconds, PROFIT_PROTECTION_REFRESH_TTL_SECONDS, "the profit-protection refresh must request a short TTL, never reuse the 60s default built for occasional dashboard lookups");
+        assert.equal(seenTtlSeconds, REALTIME_EXIT_REFRESH_TTL_SECONDS, "the profit-protection refresh must request a short TTL, never reuse the 60s default built for occasional dashboard lookups");
 
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         assert.equal(position.current_price, 1.32, "the freshly-refreshed price must be what this cycle actually tracked, not the shared snapshot's own (up to 30s stale) 1.30");
@@ -758,13 +758,15 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
 
 });
 
-// Cost guard, mirroring the existing "does NOT call the on-demand
-// fallback for a position whose token is still fresh" test above at a
-// higher ROI just under the floor - proves the new profit-protection
-// trigger is genuinely bounded to positions actually AT/ABOVE their own
-// take-profit floor, never a blanket "always refresh" that would defeat
-// the whole point of gating GMGN load in the first place.
-test("runExitCycle does NOT call the on-demand fallback for a still-fresh position whose ROI has not yet reached its take-profit floor", async () => {
+// FINAL PRODUCTION SPRINT P0: proves the fix for real production
+// evidence (Stop Loss -20% not closing a real position until -43.8%/
+// -81%) - the OLD behavior this test used to assert (no on-demand
+// refresh below the take-profit floor) was ITSELF the root cause. A
+// losing position must get exactly the same realtime refresh a winning
+// one does - Stop Loss is evaluated against the SAME up-to-30s-stale
+// shared-snapshot price otherwise, and a fast-dumping token can blow
+// through -20% long before the next 30s trending tick ever notices.
+test("runExitCycle refreshes a still-fresh, still-LOSING position's price on demand too - not only positions already in profit", async () => {
 
     const testEmail = `tradingbotengine.test.belowfloor.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -778,26 +780,35 @@ test("runExitCycle does NOT call the on-demand fallback for a still-fresh positi
 
         tradingBotRepository.updateState(userId, { status: "RUNNING", mode: "SIMULATION", lastAction: "TEST_START" });
 
-        tradingBotRepository.insertPosition(userId, {
+        const positionId = tradingBotRepository.insertPosition(userId, {
             tokenAddress: "TestBelowFloorToken111", tokenSymbol: "BELOWFLOOR",
             entryPrice: 1.0, sizeUsd: 10, confidence: 60,
             exitStrategy: "dynamicExit", engineVersion: "production_v2",
             targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
         });
 
-        // +10% ROI - genuinely below the default 15% floor.
+        // Shared snapshot still shows -10% (above the -20% Stop Loss
+        // floor) - but the REAL, on-demand price has since crashed to
+        // -30%, past Stop Loss. Only a genuine refresh can catch this.
         gmgnTokenRepository.getTokenByAddress = () => ({
-            token_address: "TestBelowFloorToken111", symbol: "BELOWFLOOR", price: 1.10,
-            price_change_5m: 2, volume_1h: 1000,
+            token_address: "TestBelowFloorToken111", symbol: "BELOWFLOOR", price: 0.90,
+            price_change_5m: -2, volume_1h: 1000,
             market_cap: 1000, last_seen: nowStamp, updated_at: nowStamp
         });
 
-        const mustNeverBeCalled = {
-            async getTokenPoolInfo(){ throw new Error("must never be called - ROI has not reached the take-profit floor yet"); },
-            async getTokenKline(){ throw new Error("must never be called - ROI has not reached the take-profit floor yet"); }
+        let refreshCalls = 0;
+        const spyOndemand = {
+            async getTokenPoolInfo(){ refreshCalls++; return { data: { liquidity: "500" } }; },
+            async getTokenKline(){ return { data: { list: [{ close: "0.70" }] } }; } // real crash past -20% SL
         };
 
-        await runExitCycle(userId, mustNeverBeCalled);
+        await runExitCycle(userId, spyOndemand);
+
+        assert.equal(refreshCalls, 1, "a losing/below-floor position must be refreshed on demand every exit cycle too - symmetric with the profit-side fix");
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND token_address = 'TestBelowFloorToken111'").get(userId);
+        assert.ok(trade, "Stop Loss must have actually fired against the freshly-refreshed crashed price, not the stale -10% snapshot");
+        assert.equal(trade.reason, "STOP_LOSS");
 
     }
     finally{
@@ -870,12 +881,11 @@ test("runCycle refreshes a held position's price on-demand when its token has fa
 
 });
 
-// Cost/behavior guard: a FRESH token (well inside the staleness window)
-// must never trigger the on-demand fallback at all - the injected
-// ondemandService here throws immediately if either method is called,
-// proving the shared trending snapshot's own price is used untouched
-// whenever it's actually still real-time.
-test("runCycle does NOT call the on-demand fallback for a position whose token is still fresh", async () => {
+// FINAL PRODUCTION SPRINT P0: a FRESH, still-trending token now DOES
+// still get an on-demand realtime refresh every cycle (the fix for the
+// asymmetric-refresh root cause above) - the refreshed price must win
+// over the shared snapshot's own, since that's the entire point.
+test("runCycle refreshes a still-fresh position's price on demand every cycle - the realtime-exit fix applies here too, not only to the independent exit scheduler", async () => {
 
     const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -908,15 +918,17 @@ test("runCycle does NOT call the on-demand fallback for a position whose token i
             ["TestFreshTrendingToken111", { action: "AVOID", confidence: 0, hasDecision: false, decayFraction: 0, risk: "HIGH", excludeFromTrending: true }]
         ]);
 
-        const mustNeverBeCalled = {
-            async getTokenPoolInfo(){ throw new Error("must never be called - token is still fresh"); },
-            async getTokenKline(){ throw new Error("must never be called - token is still fresh"); }
+        let refreshCalls = 0;
+        const spyOndemand = {
+            async getTokenPoolInfo(){ refreshCalls++; return { data: { liquidity: "9000" } }; },
+            async getTokenKline(){ return { data: { list: [{ close: "1.07" }] } }; } // real, newer price than the shared snapshot's 1.05
         };
 
-        await runCycle(userId, cycleTokens, cycleLiveByAddress, mustNeverBeCalled);
+        await runCycle(userId, cycleTokens, cycleLiveByAddress, spyOndemand);
 
+        assert.equal(refreshCalls, 1, "every open position's own on-demand refresh must fire every cycle now, not only once already stale or in profit");
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
-        assert.equal(position.current_price, 1.05); // the shared snapshot's own real price, used untouched
+        assert.equal(position.current_price, 1.07, "the freshly-refreshed price must win over the shared snapshot's own (potentially up to 30s stale) 1.05");
 
     }
     finally{

@@ -58,6 +58,7 @@ const security = require("./intelligence/market/security");
 const holderDistribution = require("./intelligence/market/holderDistribution");
 const volume = require("./intelligence/market/volume");
 const priceStability = require("./intelligence/market/priceStability");
+const momentumPhase = require("./intelligence/market/momentumPhase");
 
 const PARTICIPANT_MAX = config.participant.maxTotal;
 const MARKET_MAX = config.market.maxTotal;
@@ -749,7 +750,17 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         security: scaleModule(security.score(securityFacts), w.security ?? 1),
         holderDistribution: scaleModule(holderDistribution.score(token, trenchesEntry), w.holderDistribution ?? 1),
         volume: scaleModule(volume.score(token), w.volume ?? 1),
-        priceStability: scaleModule(priceStability.score(token), w.priceStability ?? 1)
+        priceStability: scaleModule(priceStability.score(token), w.priceStability ?? 1),
+        // FINAL PRODUCTION SPRINT P0: real-data momentum-phase
+        // classification (EARLY_MOMENTUM/HEALTHY_MOMENTUM/DEAD_BOUNCE/
+        // POST_RUG_RECOVERY/EXIT_LIQUIDITY - see momentumPhase.js's own
+        // header). score/max are always 0 - it is not one of
+        // config.entryScore.weights' named keys, so computeUnifiedEntryScore
+        // never sees it and the unified score/BUY threshold are completely
+        // unaffected. Not wrapped in scaleModule - a philosophy weight
+        // multiplying 0 is still 0, and this is observability/risk-signal
+        // only, never a scored module.
+        momentumPhase: momentumPhase.score(token, trenchesEntry)
     };
 
     const marketScore = combineScore(marketModules, MARKET_MAX, config.market.neutralFraction);
@@ -860,6 +871,17 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         // bonus) - observability, read by no decision logic beyond
         // what already fed into `participantScore` above.
         entryScoreBreakdown: entryScoreResult,
+        // FINAL PRODUCTION SPRINT P0: the real momentum-phase
+        // classification and the facts behind it (see
+        // intelligence/market/momentumPhase.js) - persisted onto the
+        // Decision Snapshot (tradeManager.js's breakdown_json) so every
+        // BUY can be explained by WHICH phase Arjuna believed the token
+        // was in, not just its aggregate score. Never drives action/risk
+        // beyond the one riskReason already folded into `riskReasons`
+        // above when the phase is DEAD_BOUNCE/POST_RUG_RECOVERY/
+        // EXIT_LIQUIDITY.
+        momentumPhase: marketModules.momentumPhase.phase,
+        momentumPhaseFacts: marketModules.momentumPhase.facts,
         breakdown: {
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
             market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))

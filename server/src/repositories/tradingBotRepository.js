@@ -447,7 +447,7 @@ const insertTradeStmt = db.prepare(`
         entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification,
         actual_sol_spent, actual_sol_received, realized_pnl_sol, realized_roi_pct,
         entry_tx_signature, exit_tx_signature, entry_block_time, exit_block_time,
-        roi_version, dataset_version
+        roi_version, dataset_version, actual_exit_price
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
         @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason,
@@ -457,7 +457,7 @@ const insertTradeStmt = db.prepare(`
         @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification,
         @actualSolSpent, @actualSolReceived, @realizedPnlSol, @realizedRoiPct,
         @entryTxSignature, @exitTxSignature, @entryBlockTime, @exitBlockTime,
-        @roiVersion, @datasetVersion
+        @roiVersion, @datasetVersion, @actualExitPrice
     )
 `);
 
@@ -536,7 +536,11 @@ function closePosition(userId, position, {
     exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason, txHash, closeExecutionId,
     actualSolSpent = null, actualSolReceived = null, realizedPnlSol = null, realizedRoiPct = null,
     entryTxSignature = null, exitTxSignature = null, entryBlockTime = null, exitBlockTime = null,
-    roiVersion = null
+    roiVersion = null,
+    // FINAL PRODUCTION SPRINT P0 (Exit Log - "Actual Exit Price"): the
+    // real fill price (actualSolReceived / real token quantity sold),
+    // observability only - never fed into realized_roi_pct/roiCalculator.js.
+    actualExitPrice = null
 }){
     let closed = false;
     const tx = db.transaction(() => {
@@ -572,7 +576,7 @@ function closePosition(userId, position, {
             exitClassification: classifyExit(position.mfe_pct, realizedRoiPct ?? roiPct),
             actualSolSpent, actualSolReceived, realizedPnlSol, realizedRoiPct,
             entryTxSignature, exitTxSignature, entryBlockTime, exitBlockTime,
-            roiVersion
+            roiVersion, actualExitPrice
         });
     });
     tx();
@@ -599,7 +603,7 @@ function partialClosePosition(userId, position, {
     exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId,
     actualSolSpent = null, actualSolReceived = null, realizedPnlSol = null, realizedRoiPct = null,
     entryTxSignature = null, exitTxSignature = null, entryBlockTime = null, exitBlockTime = null,
-    roiVersion = null
+    roiVersion = null, actualExitPrice = null
 }){
     let applied = false;
     const tx = db.transaction(() => {
@@ -638,7 +642,7 @@ function partialClosePosition(userId, position, {
             exitClassification: "PARTIAL_TP1",
             actualSolSpent, actualSolReceived, realizedPnlSol, realizedRoiPct,
             entryTxSignature, exitTxSignature, entryBlockTime, exitBlockTime,
-            roiVersion
+            roiVersion, actualExitPrice
         });
     });
     tx();

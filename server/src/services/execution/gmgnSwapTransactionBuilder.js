@@ -35,6 +35,32 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const CHAIN = "sol";
 const DEFAULT_SLIPPAGE_PCT = 10;
 
+// FINAL PRODUCTION SPRINT P0 - root cause of "Stop Loss identified the
+// exit but the position stayed OPEN". executionGuard.js's price-impact/
+// slippage/route-hop ceilings exist to protect a BUY from being tricked
+// into thin/fake liquidity - a genuinely discretionary decision about
+// whether to take on NEW risk. A SELL triggered by Dynamic Exit
+// (dynamicExitService.js's Stop Loss/TP/Emergency Exit) is the opposite
+// kind of decision: the risk is already owned, already decided against,
+// and the ONLY question left is what price the position exits at - ANY
+// completed exit is strictly better than a blocked one, because a
+// blocked exit doesn't reduce risk, it just prolongs exposure while the
+// position keeps bleeding. Confirmed in production: a token that
+// crashed enough to trigger Stop Loss almost always ALSO has price
+// impact past the entry-oriented 5% ceiling by then - every retry (as
+// often as the exit-evaluation interval, down to 1s) rebuilt the exact
+// same quote against the exact same thin liquidity and got rejected by
+// executionGuard identically, forever, while the position kept falling
+// further past -20% with no way out. Fix: SELL swaps skip the three
+// risk-TOLERANCE ceilings (price impact, requested slippage, route
+// hops) entirely - executionGuard's hard sanity checks (a real route
+// exists, output amount is positive - i.e. "can this swap even execute
+// at all") still apply unconditionally, since those aren't a judgment
+// call, a quote with literally no route truly cannot be submitted
+// either way. BUY is completely untouched - same 5%/15%/3-hop ceilings
+// as before, Arjuna's entry risk posture is not part of this fix.
+const EXIT_SLIPPAGE_REQUEST_PCT = 50; // requested tolerance sent to GMGN's own quote/swap for a SELL - wide enough that a fast-moving exit doesn't itself get rejected on-chain for exceeding a tight tolerance; unrelated to (and much wider than) executionGuard's own now-bypassed-for-SELL ceiling.
+
 /**
  * @typedef {object} GmgnSwapTransactionBuilderDeps
  * @property {ReturnType<import("../../collectors/gmgn/authClient").createGmgnClient>} gmgnClient
@@ -75,7 +101,7 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
 
         const inputToken = isBuy ? SOL_MINT : tokenAddress;
         const outputToken = isBuy ? tokenAddress : SOL_MINT;
-        const slippage = guardLimits.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT;
+        const slippage = isSell ? EXIT_SLIPPAGE_REQUEST_PCT : (guardLimits.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT);
 
         // 2. Real GMGN quote - read-only, confirmed live, API-key-only auth.
         const { data: quote } = await gmgnClient.getSwapQuote(CHAIN, {
@@ -87,8 +113,16 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
         });
 
         // 3. Execution Guard - price impact / slippage / route quality,
-        // facts about THIS specific quote, checked before anything real happens.
-        assertQuoteIsSafeToExecute(quote, guardLimits);
+        // facts about THIS specific quote, checked before anything real
+        // happens. SELL (a decided exit, not a discretionary entry) skips
+        // the three risk-TOLERANCE ceilings - see this file's header
+        // comment (EXIT_SLIPPAGE_REQUEST_PCT) for the real production
+        // incident this closes. The hard sanity checks inside
+        // assertQuoteIsSafeToExecute (route exists, output amount > 0)
+        // still apply either way - unconditional regardless of limits.
+        assertQuoteIsSafeToExecute(quote, isSell
+            ? { ...guardLimits, maxPriceImpactPct: Infinity, maxSlippagePct: Infinity, maxRouteHops: Infinity }
+            : guardLimits);
 
         // 4. Nothing irreversible has happened yet - build() only
         // validates. The actual state-changing POST /v1/trade/swap call

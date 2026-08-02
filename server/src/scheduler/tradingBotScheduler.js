@@ -226,7 +226,14 @@ async function computeLiveByAddressForPhilosophy(tokens, philosophy){
             // fix, one more time - riskReasons/freshnessPenalty already
             // computed by researchEngineFactory.js to produce `risk`/
             // `confidence` themselves, previously discarded right here.
-            riskReasons: signal.riskReasons, freshnessPenalty: signal.freshnessPenalty
+            riskReasons: signal.riskReasons, freshnessPenalty: signal.freshnessPenalty,
+            // FINAL PRODUCTION SPRINT P0: the real momentum-phase
+            // classification (see intelligence/market/momentumPhase.js) -
+            // same "computed then discarded" fix as riskReasons/
+            // acceleration above, flows through to tradeManager.js's
+            // Decision Snapshot (breakdown_json) so every real BUY can be
+            // explained by which phase Arjuna believed the token was in.
+            momentumPhase: signal.momentumPhase, momentumPhaseFacts: signal.momentumPhaseFacts
         });
 
     }

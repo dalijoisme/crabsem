@@ -999,6 +999,13 @@ test("LIVE round trip: realized_roi_pct comes from REAL SOL amounts, not the sna
         assert.ok(trade.roi_pct < -25, `legacy snapshot roi_pct should show the bad ratio, got ${trade.roi_pct}`);
         assert.ok(Math.abs(trade.realized_roi_pct) < 2, `realized_roi_pct should be near breakeven (real SOL), got ${trade.realized_roi_pct}`);
 
+        // FINAL PRODUCTION SPRINT P0 (Exit Log - "Actual Exit Price"):
+        // real SOL received (0.0347) / real token quantity sold
+        // (1,000,000, from actualAmounts.tokenDeltaUi = -1,000,000) -
+        // an observability fact, distinct from and never fed into
+        // realized_roi_pct above.
+        assert.ok(Math.abs(trade.actual_exit_price - (0.0347 / 1_000_000)) < 1e-12, `actual_exit_price should be the real fill price, got ${trade.actual_exit_price}`);
+
     }
     finally{
         deleteTestUser(userId);
@@ -1069,6 +1076,114 @@ test("dataset_version is stamped on every trade row (Arjuna V4, Part 6 - self-le
         const trade = db.prepare("SELECT dataset_version, engine_version FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
         assert.equal(trade.dataset_version, "v2_realized_roi");
         assert.equal(trade.engine_version, "production_v2");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// =====================================
+// FINAL PRODUCTION SPRINT P0 - root cause: executionService.execute()
+// THROWS synchronously (not a FAILED outcome) when this wallet already
+// has another execution in flight (a real BUY racing a real SELL on
+// independent scheduler timers). Before this fix, that throw propagated
+// all the way past finalizeClose/partialClose uncaught - the position
+// looked silently stuck with zero DB trail. Proves it's now caught,
+// logged, and retried like any other non-SUCCESS outcome.
+// =====================================
+
+test("finalizeClose: a wallet-contention throw from executionService.execute() is caught, logged, and retried - not left silently uncaught with zero DB trail", async () => {
+
+    const testEmail = `tradermanager.test.contention.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenContention111", tokenSymbol: "CONTEND", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const liveOptions = {
+            userId, walletPublicKey: "FakeWalletContention111",
+            executionService: {
+                async execute(){
+                    throw new Error("executionService: user already has an active execution (#1, status SUBMITTING) - only one at a time");
+                }
+            },
+            balanceService: { async getSplTokenBalance(){ return { amountRaw: "1000000", decimals: 6, uiAmount: 1 }; } }
+        };
+
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId), liveOptions);
+        const config = tradingBotRepository.getConfig(userId);
+
+        const result = await tm.finalizeClose(position, 0.7, "STOP_LOSS", config);
+
+        assert.equal(result.closed, false);
+        assert.equal(result.retrying, true);
+
+        const stillOpen = db.prepare("SELECT status FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(stillOpen.status, "OPEN", "the position must remain OPEN so the very next exit cycle retries it, never silently marked closed on a SELL that never happened");
+
+        const log = db.prepare("SELECT * FROM trading_bot_log WHERE user_id = ? AND log_type = 'ERROR' ORDER BY id DESC LIMIT 1").get(userId);
+        assert.ok(log, "the contention failure must leave a real, visible DB trail - not just a console.error swallowed by the scheduler's own top-level catch");
+        assert.match(log.message, /could not even start/);
+        assert.match(log.message, /already has an active execution/);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("partialClose: a wallet-contention throw from executionService.execute() is caught, logged, and retried at full size", async () => {
+
+    const testEmail = `tradermanager.test.contentionpartial.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenContentionPartial111", tokenSymbol: "CONTENDP", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const liveOptions = {
+            userId, walletPublicKey: "FakeWalletContentionPartial111",
+            executionService: {
+                async execute(){
+                    throw new Error("executionService: user already has an active execution (#1, status SUBMITTING) - only one at a time");
+                }
+            },
+            balanceService: { async getSplTokenBalance(){ return { amountRaw: "1000000", decimals: 6, uiAmount: 1 }; } }
+        };
+
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId), liveOptions);
+        const config = tradingBotRepository.getConfig(userId);
+
+        const result = await tm.partialClose(position, 1.25, 0.8, "TP1", config);
+
+        assert.equal(result.closed, false);
+        assert.equal(result.retrying, true);
+
+        const stillFullSize = db.prepare("SELECT status, tp1_hit_at FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(stillFullSize.status, "OPEN");
+        assert.equal(stillFullSize.tp1_hit_at, null, "TP1 must not be marked hit on a sell that never actually happened");
+
+        const log = db.prepare("SELECT * FROM trading_bot_log WHERE user_id = ? AND log_type = 'ERROR' ORDER BY id DESC LIMIT 1").get(userId);
+        assert.ok(log, "the contention failure must leave a real, visible DB trail");
+        assert.match(log.message, /could not even start/);
 
     }
     finally{

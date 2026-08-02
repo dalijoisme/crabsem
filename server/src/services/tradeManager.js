@@ -282,6 +282,25 @@ function createTradeManager(repository, liveOptions = null){
                 // attached onto `live` right before this call. Was
                 // computed then discarded before this fix.
                 entryGateResult: live.entryGateResult ?? null,
+                // FINAL PRODUCTION SPRINT P0 (Observability - Decision
+                // Snapshot "Quality Gate Result"): the real, already-
+                // computed result of the LAST gate before this exact BUY
+                // (qualityGateService's own pass, plus the Synthetic
+                // Market Filter's real score/reasons) - see
+                // tradingBotEngine.js's runCycle, attached onto `live`
+                // right before this call, previously computed then
+                // discarded for every candidate that passed it.
+                qualityGateResult: live.qualityGateResult ?? null,
+                // FINAL PRODUCTION SPRINT P0 (Observability - Decision
+                // Snapshot "Momentum"): which of the five real momentum
+                // phases (EARLY_MOMENTUM/HEALTHY_MOMENTUM/DEAD_BOUNCE/
+                // POST_RUG_RECOVERY/EXIT_LIQUIDITY - see
+                // intelligence/market/momentumPhase.js) Arjuna classified
+                // this token as at the moment of BUY, and the real facts
+                // (drawdown from peak, 5m/1h change, net 24h buy
+                // pressure) behind that classification.
+                momentumPhase: live.momentumPhase ?? null,
+                momentumPhaseFacts: live.momentumPhaseFacts ?? null,
                 // False Positive Reduction V4: real token age at entry,
                 // observability only - see the comment above where this
                 // is computed.
@@ -381,6 +400,9 @@ function createTradeManager(repository, liveOptions = null){
         let actualSolReceived = null;
         let exitTxSignature = null;
         let exitBlockTime = null;
+        // FINAL PRODUCTION SPRINT P0 (Exit Log - "Actual Exit Price"):
+        // see below, filled in only for a real, confirmed LIVE SELL.
+        let actualExitPrice = null;
 
         // ---- Real execution (Founder Trading Wallet only). Selling the
         // REAL on-chain token balance, not a re-derived USD estimate -
@@ -429,13 +451,41 @@ function createTradeManager(repository, liveOptions = null){
                 return { closed: true, reason: `${reason}_NO_REAL_BALANCE`, roiPct: 0 };
             }
 
-            const result = await liveOptions.executionService.execute({
-                userId: liveOptions.userId,
-                walletPublicKey: liveOptions.walletPublicKey,
-                action: "SELL",
-                amountLamports: sellAmountBaseUnits,
-                tokenAddress: position.token_address
-            });
+            // FINAL PRODUCTION SPRINT P0 (Observability - "tidak boleh ada
+            // titik yang kehilangan informasi"): executionService.execute()
+            // THROWS synchronously (not a FAILED outcome) when this
+            // wallet already has another execution in flight
+            // (executionService.js's own one-at-a-time guard - a real BUY
+            // elsewhere in the same cycle can win this race, since
+            // scheduler/tradingBotScheduler.js's BUY-side cycle and
+            // scheduler/exitEvaluationScheduler.js's exit-only cycle run
+            // on independent timers for the same wallet). Uncaught, this
+            // propagated all the way to the scheduler's own top-level
+            // catch (console-only) - the position looked silently stuck
+            // with zero DB trail: no execution row, no trading_bot_log
+            // entry, nothing a dashboard could ever show. Caught here so
+            // it becomes the exact same visible, retried "did not
+            // succeed" case as a real FAILED execution outcome - the
+            // very next exit cycle (as soon as 1s later) tries again once
+            // the wallet frees up.
+            let result;
+            try{
+                result = await liveOptions.executionService.execute({
+                    userId: liveOptions.userId,
+                    walletPublicKey: liveOptions.walletPublicKey,
+                    action: "SELL",
+                    amountLamports: sellAmountBaseUnits,
+                    tokenAddress: position.token_address
+                });
+            }
+            catch(err){
+                repository.insertLog({
+                    logType: "ERROR", tokenSymbol: position.token_symbol,
+                    message: `Real SELL attempt for ${position.token_symbol} could not even start (${err.message}) - position remains open, will retry`,
+                    meta: { tokenAddress: position.token_address, error: err.message }
+                });
+                return { closed: false, retrying: true };
+            }
 
             if(result.outcome !== "SUCCESS"){
                 // Position stays OPEN - closeIfDue() will re-evaluate and
@@ -455,6 +505,17 @@ function createTradeManager(repository, liveOptions = null){
             // solDeltaLamports is positive for a SELL (SOL arrived).
             if(result.actualAmounts?.solDeltaLamports != null){
                 actualSolReceived = result.actualAmounts.solDeltaLamports / 1e9;
+            }
+            // FINAL PRODUCTION SPRINT P0 (Exit Log - "Actual Exit Price"):
+            // the real fill price this swap actually executed at - real
+            // SOL received divided by the real token quantity that
+            // actually left the wallet (tokenDeltaUi is negative for a
+            // SELL). An observability fact only, NEVER fed into
+            // roiCalculator.js or any ROI computation - realized_roi_pct
+            // above remains the one official ROI (spec: "Tidak boleh ada
+            // ROI kedua").
+            if(result.actualAmounts?.tokenDeltaUi != null && result.actualAmounts.tokenDeltaUi !== 0 && actualSolReceived != null){
+                actualExitPrice = actualSolReceived / Math.abs(result.actualAmounts.tokenDeltaUi);
             }
 
         }
@@ -501,7 +562,10 @@ function createTradeManager(repository, liveOptions = null){
             actualSolSpent: actualSolSpentForThisClose, actualSolReceived,
             realizedPnlSol, realizedRoiPct, roiVersion,
             entryTxSignature: position.entry_tx_signature ?? null, exitTxSignature,
-            entryBlockTime: position.entry_block_time ?? null, exitBlockTime
+            entryBlockTime: position.entry_block_time ?? null, exitBlockTime,
+            // FINAL PRODUCTION SPRINT P0 - real fill price, observability
+            // only (see where it's computed above) - never a second ROI.
+            actualExitPrice
 
         });
 
@@ -556,6 +620,7 @@ function createTradeManager(repository, liveOptions = null){
         let actualSolReceived = null;
         let exitTxSignature = null;
         let exitBlockTime = null;
+        let actualExitPrice = null;
 
         if(liveOptions){
 
@@ -571,13 +636,29 @@ function createTradeManager(repository, liveOptions = null){
 
             const sellAmountBaseUnits = Math.floor(totalBaseUnits * sellFraction);
 
-            const result = await liveOptions.executionService.execute({
-                userId: liveOptions.userId,
-                walletPublicKey: liveOptions.walletPublicKey,
-                action: "SELL",
-                amountLamports: sellAmountBaseUnits,
-                tokenAddress: position.token_address
-            });
+            // FINAL PRODUCTION SPRINT P0: same catch as finalizeClose's own
+            // SELL call above - execute() throws synchronously (not a
+            // FAILED outcome) on wallet contention, and left this position
+            // silently stuck with zero DB trail if uncaught. See that
+            // comment for the full explanation.
+            let result;
+            try{
+                result = await liveOptions.executionService.execute({
+                    userId: liveOptions.userId,
+                    walletPublicKey: liveOptions.walletPublicKey,
+                    action: "SELL",
+                    amountLamports: sellAmountBaseUnits,
+                    tokenAddress: position.token_address
+                });
+            }
+            catch(err){
+                repository.insertLog({
+                    logType: "ERROR", tokenSymbol: position.token_symbol,
+                    message: `Real partial SELL attempt for ${position.token_symbol} could not even start (${err.message}) - position remains open at full size, will retry`,
+                    meta: { tokenAddress: position.token_address, error: err.message }
+                });
+                return { closed: false, retrying: true };
+            }
 
             if(result.outcome !== "SUCCESS"){
                 repository.insertLog({
@@ -594,6 +675,11 @@ function createTradeManager(repository, liveOptions = null){
             exitBlockTime = result.actualAmounts?.blockTime ?? null;
             if(result.actualAmounts?.solDeltaLamports != null){
                 actualSolReceived = result.actualAmounts.solDeltaLamports / 1e9;
+            }
+            // FINAL PRODUCTION SPRINT P0 (Exit Log - "Actual Exit Price") -
+            // same real fill-price computation as finalizeClose's own.
+            if(result.actualAmounts?.tokenDeltaUi != null && result.actualAmounts.tokenDeltaUi !== 0 && actualSolReceived != null){
+                actualExitPrice = actualSolReceived / Math.abs(result.actualAmounts.tokenDeltaUi);
             }
 
         }
@@ -618,7 +704,8 @@ function createTradeManager(repository, liveOptions = null){
             actualSolSpent: actualSolSpentForThisSell, actualSolReceived,
             realizedPnlSol, realizedRoiPct, roiVersion,
             entryTxSignature: position.entry_tx_signature ?? null, exitTxSignature,
-            entryBlockTime: position.entry_block_time ?? null, exitBlockTime
+            entryBlockTime: position.entry_block_time ?? null, exitBlockTime,
+            actualExitPrice
         });
 
         if(!outcome.applied){

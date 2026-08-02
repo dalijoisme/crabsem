@@ -124,6 +124,69 @@ test("an unsafe quote (excessive price impact) is rejected by the Execution Guar
     assert.equal(gmgnClient.swapCallCount(), 0); // guard rejection must never reach the state-changing call
 });
 
+// FINAL PRODUCTION SPRINT P0: proves the fix for the real production
+// incident where Stop Loss correctly decided to sell but the position
+// stayed OPEN anyway (real evidence: -43.8%/-81%) - every retry rebuilt
+// the exact same quote against the same crashed liquidity and
+// executionGuard rejected it identically forever. A SELL must never be
+// blocked by the same price-impact/slippage/route-hop ceilings BUY is
+// held to - the risk is already owned; any completed exit beats a
+// blocked one.
+test("a SELL with excessive price impact/slippage/route hops is NOT rejected - a decided exit must never be blocked by an entry-oriented risk ceiling", async () => {
+    const gmgnClient = fakeGmgnClient({
+        quoteResponse: realShapedQuote({
+            slippage: 40,
+            tx: { quote: { priceImpactPct: "35", routePlan: [{}, {}, {}, {}, {}] }, raw_tx: {} }
+        })
+    });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+
+    assert.equal(result.__custodialExecution, true, "a SELL this far outside BUY's own risk ceilings must still build successfully");
+    assert.equal(gmgnClient.quoteCallCount(), 1);
+});
+
+// The exact same shape rejected for BUY (line above) must still be
+// rejected for BUY after this fix - only SELL's risk tolerance changed.
+test("a BUY with excessive price impact is still rejected by the Execution Guard - the fix is SELL-only, BUY's entry risk posture is untouched", async () => {
+    const gmgnClient = fakeGmgnClient({ quoteResponse: realShapedQuote({ tx: { quote: { priceImpactPct: "20", routePlan: [{}] }, raw_tx: {} } }) });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    await assert.rejects(
+        () => builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "BUY", amountLamports: 1000000, tokenAddress: TOKEN }),
+        /price impact 20% exceeds/
+    );
+});
+
+// A SELL still can't execute against a quote that is genuinely
+// impossible to submit (no route, non-positive output) - bypassing the
+// risk-TOLERANCE ceilings must never bypass the hard sanity checks too.
+test("a SELL quote with literally no route is still rejected - the hard sanity check is unconditional, only the risk-tolerance ceilings are bypassed", async () => {
+    const gmgnClient = fakeGmgnClient({ quoteResponse: realShapedQuote({ tx: { quote: { priceImpactPct: "0", routePlan: [] }, raw_tx: {} } }) });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    await assert.rejects(
+        () => builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN }),
+        /quote returned no route/
+    );
+});
+
+// A SELL requests a much wider slippage tolerance FROM GMGN itself
+// (not just our own guard) - so the real on-chain swap doesn't revert
+// on a fast-crashing token for exceeding a tight tolerance negotiated at
+// quote time. BUY's own tolerance (10%, unchanged) is untouched.
+test("a SELL requests a wide slippage tolerance from GMGN; BUY keeps the existing 10% default", async () => {
+    const gmgnClient = fakeGmgnClient();
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "BUY", amountLamports: 1000000, tokenAddress: TOKEN });
+    assert.equal(gmgnClient.lastQuoteParams().slippage, 10);
+
+    await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+    assert.equal(gmgnClient.lastQuoteParams().slippage, 50);
+});
+
 test("build() with a safe quote returns a custodial-execution marker and performs NO irreversible action yet", async () => {
     const gmgnClient = fakeGmgnClient();
     const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });

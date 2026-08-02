@@ -87,6 +87,38 @@ executionService.reconcilePendingExecutions()
         console.error("[startup] Execution layer reconciliation failed (continuing startup regardless):", err.message);
     });
 
+// SPRINT 12 (Arjuna V5) - ROOT CAUSE FIX for "Execution Queue masih
+// mempunyai status SUBMITTING dalam waktu lama, Lock tidak dilepas":
+// reconcilePendingExecutions() above only ever recovers a row that
+// already reached SUBMITTED/CONFIRMING with a real tx_hash. A row stuck
+// EARLIER (IDLE/PREPARING/SIGNING/SUBMITTING, no tx_hash yet - a crash
+// or a genuinely hung await before a signature was ever received) is
+// invisible to it and permanently blocks that user's one-active-
+// execution slot forever (migration 045's own partial unique index).
+// STUCK_EXECUTION_TIMEOUT_MS is generous versus this pipeline's own
+// real worst case (GMGN's 15s HTTP timeout x however many steps remain
+// before a signature is captured) so this never force-fails a
+// genuinely still-in-flight execution. Run at boot (same as above) AND
+// on a periodic timer - a live-operation guarantee, not only a boot-
+// time recovery, per the CTO spec's own explicit requirement.
+const STUCK_EXECUTION_TIMEOUT_MS = 2 * 60 * 1000;
+const STUCK_EXECUTION_SWEEP_INTERVAL_MS = 60 * 1000;
+
+function sweepStuckExecutions(){
+    executionService.reconcileStuckExecutions(STUCK_EXECUTION_TIMEOUT_MS)
+        .then((results) => {
+            if(results.length){
+                console.log(`[execution-lock-sweep] Force-released ${results.length} stuck execution(s), no permanent lock left behind.`, results);
+            }
+        })
+        .catch((err) => {
+            console.error("[execution-lock-sweep] Sweep failed (will retry next interval):", err.message);
+        });
+}
+
+sweepStuckExecutions();
+setInterval(sweepStuckExecutions, STUCK_EXECUTION_SWEEP_INTERVAL_MS).unref();
+
 // CEO Dashboard (Section 9, Engine Improvement History) - records a
 // real snapshot the first time this process starts up running a
 // version it hasn't seen before. A no-op on every subsequent restart

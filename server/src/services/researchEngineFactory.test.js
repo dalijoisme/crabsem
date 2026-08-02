@@ -163,13 +163,17 @@ test("a module with no real data drags the aggregate toward neutral, never gets 
     assert.equal(result.breakdown.participant.accumulation.score, result.breakdown.participant.accumulation.max); // maxed out
     assert.equal(result.breakdown.participant.smartMoney.hasData, false);
 
-    // Before this sprint, combineScore would have excluded every
+    // Before the dilution fix, combineScore would have excluded every
     // hasData:false module and scored this ~100 (accumulation alone,
-    // maxed, is 100% of the only weight counted). With the fix, the 9
+    // maxed, is 100% of the only weight counted). With that fix, the 9
     // missing modules' own real neutral scores (40% of their weight)
     // are folded in too, pulling the real total well below a maxed
-    // single-module score.
-    assert.ok(result.participantScore < 70, `expected the missing modules to drag participantScore below 70, got ${result.participantScore}`);
+    // single-module score. SPRINT 12 (Arjuna V5): this token has no
+    // seeded token_price_history (emptyCtx()), so it honestly classifies
+    // EARLY_MOMENTUM (never a fabricated crash) - the CTO's own +10
+    // scoring modifier applies uniformly, raising the ceiling this
+    // assertion checks against from 70 to 80.
+    assert.ok(result.participantScore < 80, `expected the missing modules to drag participantScore below 80, got ${result.participantScore}`);
 });
 
 // Real replay: this account's own two real BUYs (Fukuruto, MOON -
@@ -214,14 +218,20 @@ test("real replay: MOON and Fukuruto's own real trenches data, under Arjuna V3's
 
     // FUK: real 255 holders now legitimately earns full holderDistribution
     // credit (Part 4's >=120 bucket) under the unified score - reaches
-    // STRONG BUY on real breadth of participation, not a bug.
-    assert.equal(fukResult.participantScore, 75);
+    // STRONG BUY on real breadth of participation, not a bug. SPRINT 12
+    // (Arjuna V5): neither fixture seeds token_price_history (emptyCtx()),
+    // so both real, large 1h/5m moves classify as EARLY_MOMENTUM
+    // (drawdownFromPeak is honestly null, never a fabricated crash) -
+    // the CTO's own +10 scoring modifier applies uniformly, 75 -> 85.
+    assert.equal(fukResult.participantScore, 85);
     assert.equal(fukResult.action, "STRONG BUY");
 
     // MOON: real 18 holders falls in Part 4's <40 bucket (0 credit) -
     // stays well short of FUK's score despite similar accumulation/price
     // action, exactly the real differentiator this sprint intended.
-    assert.equal(moonResult.participantScore, 62);
+    // Same EARLY_MOMENTUM +10 modifier applies here too, 62 -> 72 - still
+    // well under AGGRESSIVE's strongBuy floor (75).
+    assert.equal(moonResult.participantScore, 72);
     assert.ok(moonResult.participantScore < 75, "MOON's real 18 holders must keep it below AGGRESSIVE's strongBuy floor (75), unlike FUK's real 255");
     assert.equal(moonResult.action, "BUY");
 });
@@ -266,6 +276,44 @@ test("Part 8: age bonus buckets match the final spec exactly (0/2/5/8)", () => {
         const [result] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
         assert.equal(result.entryScoreBreakdown.ageBonusPoints, expectedBonus, `${minutesAgo}min old should get +${expectedBonus}`);
     }
+});
+
+// SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL): proves the momentum
+// scoring modifier is genuinely wired end to end (module -> config
+// lookup -> computeUnifiedEntryScore's final score), not just correct
+// in isolation (see intelligence/market/momentumPhase.test.js for the
+// phase-classification logic itself). EXIT_LIQUIDITY is used here
+// because it's the one phase reachable without seeding real
+// token_price_history (a DB-free trenches.net_buy_24h fact is enough) -
+// consistent with this file's own "DB-free ctx" convention.
+test("Part 12 (Sprint 12): momentum scoring modifier is applied directly into the final entry score, never as a separate reject", () => {
+    // buys_5m/sells_5m are read ONLY by momentumPhase.js in the entry-
+    // scoring pipeline (never by accumulation/any other module) - the
+    // cleanest isolated lever to flip EXIT_LIQUIDITY on/off without
+    // touching any other module's own real score, unlike net_buy_24h
+    // (which accumulation.js also legitimately reads).
+    const ctx = ctxWithAccumulation();
+    const risingToken = goodToken({ price_change_5m: 5, price_change_1h: 20, buys_5m: 1000, sells_5m: 9000 });
+
+    const [withPenalty] = analyzeTokensWithOverride([risingToken], ctx, "momentumHunter", null);
+    assert.equal(withPenalty.entryScoreBreakdown.momentumPhase, "EXIT_LIQUIDITY");
+    assert.equal(withPenalty.entryScoreBreakdown.momentumModifierPoints, -12, "the CTO's own fixed point table (config/scoringConfig.js) must be applied verbatim");
+
+    // Same token, but with real 5m buy pressure DOMINANT instead - no
+    // longer EXIT_LIQUIDITY. This fixture has no seeded
+    // token_price_history (this file's own DB-free ctx convention), so
+    // it honestly falls back to EARLY_MOMENTUM (+10, never a fabricated
+    // crash) rather than HEALTHY_MOMENTUM - participantScore must be
+    // exactly 22 points higher (-12 -> +10), all else identical.
+    const cleanCtx = ctxWithAccumulation();
+    const healthyToken = goodToken({ price_change_5m: 5, price_change_1h: 20, buys_5m: 9000, sells_5m: 1000 });
+    const [withoutPenalty] = analyzeTokensWithOverride([healthyToken], cleanCtx, "momentumHunter", null);
+    assert.equal(withoutPenalty.entryScoreBreakdown.momentumPhase, "EARLY_MOMENTUM");
+    assert.equal(withoutPenalty.participantScore - withPenalty.participantScore, 22, "the EXIT_LIQUIDITY(-12) -> EARLY_MOMENTUM(+10) swing must be the ONLY difference between these two otherwise-identical tokens");
+
+    // Never a hard reject on its own - action tier is governed purely by
+    // whether the resulting Final Score still clears the threshold.
+    assert.ok(!["HIGH_RISK_REJECTED"].includes(withPenalty.action), "momentum must never produce a reject reason - only a score delta");
 });
 
 // False Positive Reduction V2, Priority 3: confidence must fall as risk

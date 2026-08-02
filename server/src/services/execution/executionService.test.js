@@ -42,6 +42,19 @@ function fakeRepository(){
         insertLog(executionId, entry){ logs.push({ executionId, ...entry }); },
         findPendingWithTxHash(){
             return [...rows.values()].filter(r => ["SUBMITTED", "CONFIRMING"].includes(r.status) && r.tx_hash);
+        },
+        // SPRINT 12 (Arjuna V5) - mirrors the real repository's own
+        // WHERE clause (status NOT IN terminal, tx_hash IS NULL,
+        // created_at old enough) using each row's own fake createdAtMs
+        // (set by the test itself) instead of a real SQL datetime diff.
+        findStuckWithoutTxHash(olderThanMs){
+            const now = Date.now();
+            return [...rows.values()].filter(r =>
+                !["SUCCESS", "FAILED", "TIMEOUT"].includes(r.status) &&
+                !r.tx_hash &&
+                r.createdAtMs != null &&
+                (now - r.createdAtMs) >= olderThanMs
+            ).map(r => ({ ...r, created_at: new Date(r.createdAtMs).toISOString() }));
         }
     };
 }
@@ -335,6 +348,71 @@ test("reconcilePendingExecutions ignores rows with no tx_hash and terminal rows"
 
     assert.equal(results.length, 0);
     assert.equal(repository.rows.get(idleId).status, STATES.IDLE);
+});
+
+// =====================================
+// SPRINT 12 (Arjuna V5) - reconcileStuckExecutions(): the counterpart
+// recovery pass for a row stuck BEFORE a real tx_hash was ever captured
+// (IDLE/PREPARING/SIGNING/SUBMITTING) - invisible to
+// reconcilePendingExecutions() above, and (in the real repository)
+// permanently blocks that user's one-active-execution slot forever.
+// =====================================
+
+test("reconcileStuckExecutions force-FAILs a row stuck at SUBMITTING with no tx_hash, releasing the lock", async () => {
+    const repository = fakeRepository();
+    const id = repository.insertExecution(1, { walletPublicKey, action: "TEST_TRANSFER", amountLamports: null, tokenAddress: null });
+    repository.transitionExecution(id, STATES.PREPARING, {});
+    repository.transitionExecution(id, STATES.SIGNING, {});
+    repository.transitionExecution(id, STATES.SUBMITTING, {});
+    repository.rows.get(id).createdAtMs = Date.now() - 5 * 60 * 1000; // 5 minutes old
+
+    const { service } = buildService({ repository });
+    const results = await service.reconcileStuckExecutions(2 * 60 * 1000);
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].outcome, STATES.FAILED);
+    assert.equal(results[0].previousStatus, STATES.SUBMITTING);
+    assert.equal(repository.rows.get(id).status, STATES.FAILED);
+    assert.match(repository.rows.get(id).error_message, /stuck at SUBMITTING/);
+});
+
+test("reconcileStuckExecutions handles a row stuck at IDLE (two-step IDLE->PREPARING->FAILED, since IDLE cannot jump straight to FAILED)", async () => {
+    const repository = fakeRepository();
+    const id = repository.insertExecution(1, { walletPublicKey, action: "TEST_TRANSFER", amountLamports: null, tokenAddress: null });
+    repository.rows.get(id).createdAtMs = Date.now() - 5 * 60 * 1000;
+
+    const { service } = buildService({ repository });
+    const results = await service.reconcileStuckExecutions(2 * 60 * 1000);
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].outcome, STATES.FAILED);
+    assert.equal(repository.rows.get(id).status, STATES.FAILED);
+});
+
+test("reconcileStuckExecutions leaves a recent (not yet timed out) row alone - never force-fails a genuinely still-in-flight execution", async () => {
+    const repository = fakeRepository();
+    const id = repository.insertExecution(1, { walletPublicKey, action: "TEST_TRANSFER", amountLamports: null, tokenAddress: null });
+    repository.transitionExecution(id, STATES.PREPARING, {});
+    repository.rows.get(id).createdAtMs = Date.now() - 5000; // only 5s old
+
+    const { service } = buildService({ repository });
+    const results = await service.reconcileStuckExecutions(2 * 60 * 1000);
+
+    assert.equal(results.length, 0);
+    assert.equal(repository.rows.get(id).status, STATES.PREPARING);
+});
+
+test("reconcileStuckExecutions never touches a row that already has a real tx_hash - that's reconcilePendingExecutions()'s job", async () => {
+    const repository = fakeRepository();
+    const id = repository.insertExecution(1, { walletPublicKey, action: "TEST_TRANSFER", amountLamports: null, tokenAddress: null });
+    repository.transitionExecution(id, STATES.SUBMITTED, { txHash: "sig-real" });
+    repository.rows.get(id).createdAtMs = Date.now() - 5 * 60 * 1000;
+
+    const { service } = buildService({ repository });
+    const results = await service.reconcileStuckExecutions(2 * 60 * 1000);
+
+    assert.equal(results.length, 0);
+    assert.equal(repository.rows.get(id).status, STATES.SUBMITTED, "a row with a real signature must be reconciled via reconcilePendingExecutions, never force-FAILed while it might still genuinely succeed");
 });
 
 // ---- Custodial execution path (Sprint 2, Founder Decision - Path A) ----

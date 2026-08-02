@@ -608,9 +608,24 @@ async function updateOpenTradePositions(){
 // regardless of whether a position was opened for it.
 // =====================================
 
+// SPRINT 12 (Arjuna V5) - ROOT CAUSE FIX: only predictions still young
+// enough for at least one configured horizon to legitimately still be
+// pending are worth re-scanning - see findRecentLite's own header
+// comment for the real production incident this closes. maxHorizonSeconds
+// is real (config.timelineHorizons' own largest value), never a second,
+// independently-drifting number; 3600s slack covers this scheduler's
+// own worst-case single-cycle delay plus a fresh boundary that just
+// elapsed.
+const TIMELINE_LOOKBACK_SLACK_SECONDS = 3600;
+
+function timelineLookbackCutoff(){
+    const maxHorizonSeconds = Math.max(...config.timelineHorizons.map(h => h.seconds));
+    return toSqliteTimestamp(new Date(Date.now() - (maxHorizonSeconds + TIMELINE_LOOKBACK_SLACK_SECONDS) * 1000));
+}
+
 async function recordTimelineSnapshots(){
 
-    const predictions = predictionHistoryRepository.findAllLite();
+    const predictions = predictionHistoryRepository.findRecentLite(timelineLookbackCutoff());
 
     let recorded = 0;
 

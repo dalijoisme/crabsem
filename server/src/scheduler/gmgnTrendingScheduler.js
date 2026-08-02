@@ -15,6 +15,7 @@ const { collectHotSearches } = require("../collectors/gmgn/hotSearchesCollector"
 const { collectKolActivity, collectSmartMoneyActivity } = require("../collectors/gmgn/activityFeedCollector");
 const { collectGasPrice } = require("../collectors/gmgn/gasPriceCollector");
 const { collectLaunchpadStats } = require("../collectors/gmgn/launchpadStatsCollector");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 const INTERVAL_MS = 30000;
 
@@ -41,7 +42,16 @@ const COLLECTORS = [
 
 ];
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): the hand-rolled isRunning boolean below is
+// replaced by the shared lock guard (services/schedulerLockGuard.js) -
+// same try/finally contract as before, PLUS a watchdog ceiling so this
+// scheduler can never be permanently stuck ("previous batch still in
+// progress" forever) even if something inside runOnce() truly hangs
+// (a never-resolving await) despite every collector already having its
+// own 15s HTTP timeout (collectors/gmgn/authClient.js). Generous versus
+// a real batch (7 collectors x ~15s worst case + spacing, see
+// TICK_STUCK_AFTER_MS below) so this never fires on a merely slow tick.
+const lockGuard = createLockGuard("gmgn-scheduler", { maxDurationMs: 5 * 30000 });
 
 // HEALTH MONITORING (collector-staleness investigation): before this,
 // the only externally-visible signal was gmgn_tokens.updated_at - which
@@ -54,19 +64,6 @@ let isRunning = false;
 // index.js - so a live accessor here is more accurate than inferring
 // anything from timestamps in the database).
 const collectorHealth = new Map();
-
-// Tick-level stuck detection - if isRunning is somehow still true long
-// after a tick should have finished (a future bug reintroducing an
-// unbounded await, for example), that's a scheduler that has silently
-// stopped making progress, distinct from any single collector failing.
-let currentTickStartedAt = null;
-let lastTickFinishedAt = null;
-let lastTickDurationMs = null;
-
-// Generous relative to a real batch (7 collectors x ~15s worst-case
-// timeout + spacing = well under this) - flags a tick that is stuck for
-// a reason THIS scheduler itself cannot recover from on its own.
-const TICK_STUCK_AFTER_MS = 5 * INTERVAL_MS;
 
 function recordCollectorResult(name, result){
 
@@ -125,11 +122,24 @@ function getCollectorHealth(){
 
 }
 
+// Same external shape as before this sprint (services/health.js's own
+// contract - checkHealth() reads tick.stuck; the full object is embedded
+// verbatim in the /health response) - field names preserved
+// (currentTickStartedAt/lastTickFinishedAt/lastTickDurationMs), now
+// sourced from the shared lock guard instead of duplicated bookkeeping.
+// lastOutcome is new/additive.
 function getTickHealth(){
 
-    const stuck = isRunning && currentTickStartedAt != null && (Date.now() - currentTickStartedAt) > TICK_STUCK_AFTER_MS;
+    const health = lockGuard.getHealth();
 
-    return { isRunning, currentTickStartedAt, lastTickFinishedAt, lastTickDurationMs, stuck };
+    return {
+        isRunning: health.isRunning,
+        currentTickStartedAt: health.startedAt,
+        lastTickFinishedAt: health.lastFinishedAt,
+        lastTickDurationMs: health.lastDurationMs,
+        lastOutcome: health.lastOutcome,
+        stuck: health.stuck
+    };
 
 }
 
@@ -176,7 +186,7 @@ async function runCollector({ name, run }){
 
 async function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
 
         console.warn(`[gmgn-scheduler] Skipped: previous batch still in progress (${new Date().toISOString()})`);
 
@@ -184,12 +194,7 @@ async function runOnce(){
 
     }
 
-    isRunning = true;
-
     const startedAt = Date.now();
-
-    currentTickStartedAt = startedAt;
-
     const results = [];
 
     try{
@@ -208,18 +213,16 @@ async function runOnce(){
 
         console.log(`[gmgn-scheduler] Batch finished in ${durationMs}ms - ${okCount}/${results.length} collectors OK`);
 
+        lockGuard.release("FINISHED");
+
         return { ok: okCount === results.length, durationMs, results };
 
     }
-    finally{
+    catch(err){
 
-        isRunning = false;
-
-        currentTickStartedAt = null;
-
-        lastTickFinishedAt = new Date().toISOString();
-
-        lastTickDurationMs = Date.now() - startedAt;
+        console.error(`[gmgn-scheduler] Batch FAILED: ${err.message}`, err);
+        lockGuard.release("ERROR");
+        return null;
 
     }
 

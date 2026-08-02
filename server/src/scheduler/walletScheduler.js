@@ -7,22 +7,23 @@
 
 const { buildLedgerFromActivityFeed, registerDevWallets } = require("../services/walletLedgerService");
 const { recomputeAllWalletStats } = require("../services/walletIntelligenceService");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 const INTERVAL_MS = 5 * 60 * 1000;
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): mandatory lifecycle + watchdog, see
+// services/schedulerLockGuard.js's own header.
+const lockGuard = createLockGuard("wallet-scheduler", { maxDurationMs: 10 * INTERVAL_MS });
 
 function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
 
         console.warn("[wallet-scheduler] Skipped: previous run still in progress");
 
         return null;
 
     }
-
-    isRunning = true;
 
     const startedAt = Date.now();
 
@@ -38,6 +39,8 @@ function runOnce(){
 
         console.log(`[wallet-scheduler] ledger=${JSON.stringify(ledgerResult)} devWallets=${devResult.registered} scored=${statsResult.walletsScored} (${durationMs}ms)`);
 
+        lockGuard.release("FINISHED");
+
         return { ledgerResult, devResult, statsResult, durationMs };
 
     }
@@ -45,12 +48,9 @@ function runOnce(){
 
         console.error(`[wallet-scheduler] FAILED: ${err.message}`);
 
+        lockGuard.release("ERROR");
+
         return { ok: false, error: err.message };
-
-    }
-    finally{
-
-        isRunning = false;
 
     }
 
@@ -68,4 +68,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce };
+module.exports = { start, runOnce, getTickHealth: lockGuard.getHealth };

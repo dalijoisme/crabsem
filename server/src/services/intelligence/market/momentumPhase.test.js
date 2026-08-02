@@ -1,9 +1,15 @@
-// services/intelligence/market/momentumPhase.test.js - FINAL PRODUCTION
-// SPRINT P0. Proves each of the five real momentum phases classifies
-// correctly from real, already-collected data shapes, that the module
-// never contributes to the unified entry score (score/max always 0),
-// and that only the three risk phases (DEAD_BOUNCE/POST_RUG_RECOVERY/
-// EXIT_LIQUIDITY) produce a riskReason. Run with `node --test`.
+// services/intelligence/market/momentumPhase.test.js - proves each of
+// the six real momentum phases classifies correctly from real, already-
+// collected data shapes. SPRINT 12 (Arjuna V5) CTO DECISION (FINAL):
+// this module is a pure SCORING MODIFIER now - it never returns a
+// riskReason/veto of any kind (that coupling, from FINAL PRODUCTION
+// SPRINT P0, was explicitly reversed by this sprint's CTO decision
+// because it could push a token toward a HIGH-risk hard-reject purely on
+// momentum). score()'s score/max are always 0 - the phase's real point
+// value (config/scoringConfig.js's entryScore.momentumModifier) is
+// looked up and applied separately by
+// researchEngineFactory.js's computeUnifiedEntryScore (see that file's
+// own tests for the applied-modifier proof). Run with `node --test`.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -34,7 +40,6 @@ test("EARLY_MOMENTUM: no price history at all - never penalized for lacking a tr
     const token = realToken({ price_change_5m: 3, price_change_1h: 8 });
     const result = classifyMomentumPhase(token, null);
     assert.equal(result.phase, "EARLY_MOMENTUM");
-    assert.equal(result.riskReason, null);
     assert.equal(result.facts.peak, null);
     assert.equal(result.facts.drawdownFromPeak, null);
 });
@@ -45,19 +50,27 @@ test("EARLY_MOMENTUM: real price history exists but current price is at/near its
     try{
         const result = classifyMomentumPhase(token, null);
         assert.equal(result.phase, "EARLY_MOMENTUM");
-        assert.equal(result.riskReason, null);
         assert.ok(Math.abs(result.facts.drawdownFromPeak - 0.02) < 1e-9);
     }
     finally{ cleanup(token.token_address); }
 });
 
-test("HEALTHY_MOMENTUM: an established move with a moderate pullback from peak, no risk phase triggered", () => {
+test("HEALTHY_MOMENTUM: an established move with a moderate pullback from peak and price still genuinely rising", () => {
     const token = realToken({ price: 0.85, price_change_5m: 1, price_change_1h: 3 });
     seedPriceHistory(token.token_address, [0.5, 1.0, 0.85]); // 15% drawdown - above EARLY floor, below DEAD_BOUNCE floor
     try{
         const result = classifyMomentumPhase(token, null);
         assert.equal(result.phase, "HEALTHY_MOMENTUM");
-        assert.equal(result.riskReason, null);
+    }
+    finally{ cleanup(token.token_address); }
+});
+
+test("NORMAL: a moderate pullback from peak with price flat/negative - the true neutral default, distinct from HEALTHY_MOMENTUM", () => {
+    const token = realToken({ price: 0.85, price_change_5m: -1, price_change_1h: -2 });
+    seedPriceHistory(token.token_address, [0.5, 1.0, 0.85]); // same drawdown shape as the HEALTHY_MOMENTUM case, but not rising
+    try{
+        const result = classifyMomentumPhase(token, null);
+        assert.equal(result.phase, "NORMAL");
     }
     finally{ cleanup(token.token_address); }
 });
@@ -68,8 +81,6 @@ test("DEAD_BOUNCE: down 50%+ from its own real peak, 5m ticking up but the 1h tr
     try{
         const result = classifyMomentumPhase(token, null);
         assert.equal(result.phase, "DEAD_BOUNCE");
-        assert.ok(result.riskReason);
-        assert.match(result.riskReason, /bounce inside an ongoing dump/);
         assert.ok(Math.abs(result.facts.drawdownFromPeak - 0.6) < 1e-9);
     }
     finally{ cleanup(token.token_address); }
@@ -81,8 +92,6 @@ test("POST_RUG_RECOVERY: down 70%+ from its own real peak, but BOTH 5m and 1h ar
     try{
         const result = classifyMomentumPhase(token, null);
         assert.equal(result.phase, "POST_RUG_RECOVERY");
-        assert.ok(result.riskReason);
-        assert.match(result.riskReason, /severe 75% drawdown/);
     }
     finally{ cleanup(token.token_address); }
 });
@@ -92,16 +101,12 @@ test("EXIT_LIQUIDITY: price rising but real 24h net buy pressure is negative", (
     const trenchesEntry = { net_buy_24h: -50000 };
     const result = classifyMomentumPhase(token, trenchesEntry);
     assert.equal(result.phase, "EXIT_LIQUIDITY");
-    assert.ok(result.riskReason);
-    assert.match(result.riskReason, /net buy pressure is negative/);
 });
 
 test("EXIT_LIQUIDITY: price rising but real 5m sell volume exceeds buy volume", () => {
     const token = realToken({ price: 1.1, price_change_5m: 3, price_change_1h: 10, buys_5m: 4000, sells_5m: 9000 });
     const result = classifyMomentumPhase(token, null);
     assert.equal(result.phase, "EXIT_LIQUIDITY");
-    assert.ok(result.riskReason);
-    assert.match(result.riskReason, /more real sell volume than buy volume/);
 });
 
 test("EXIT_LIQUIDITY takes priority over DEAD_BOUNCE/POST_RUG_RECOVERY when both real signals are present", () => {
@@ -121,23 +126,28 @@ test("a real positive move that is neither an early high nor a bounce/recovery/e
     try{
         const result = classifyMomentumPhase(token, { net_buy_24h: 5000 });
         assert.equal(result.phase, "HEALTHY_MOMENTUM");
-        assert.equal(result.riskReason, null);
     }
     finally{ cleanup(token.token_address); }
 });
 
-test("score() never contributes to the unified entry score - max is always 0, hasData is always true, riskReasons only present for the three risk phases", () => {
+// SPRINT 12 (Arjuna V5): score() is a pure SCORING MODIFIER carrier now -
+// it never vetoes, never returns a risk reason of any kind, for ANY
+// phase including the three that used to. The real point value lives in
+// config/scoringConfig.js and is applied by
+// researchEngineFactory.js's computeUnifiedEntryScore, not here.
+test("score() never contributes to the unified entry score directly (max always 0) and never returns a risk reason of any kind, for any phase", () => {
     const cleanToken = realToken({ price_change_5m: 2, price_change_1h: 5 });
     const cleanResult = score(cleanToken, null);
     assert.equal(cleanResult.score, 0);
     assert.equal(cleanResult.max, 0);
     assert.equal(cleanResult.hasData, true);
-    assert.deepEqual(cleanResult.riskReasons, []);
+    assert.equal(cleanResult.riskReasons, undefined, "momentumPhase.js must never expose riskReasons - that coupling was explicitly reversed by this sprint's CTO decision");
     assert.equal(cleanResult.phase, "EARLY_MOMENTUM");
 
     const exitLiquidityToken = realToken({ price: 1.1, price_change_5m: 3, price_change_1h: 10 });
     const riskyResult = score(exitLiquidityToken, { net_buy_24h: -1 });
     assert.equal(riskyResult.score, 0);
     assert.equal(riskyResult.max, 0);
-    assert.equal(riskyResult.riskReasons.length, 1);
+    assert.equal(riskyResult.phase, "EXIT_LIQUIDITY");
+    assert.equal(riskyResult.riskReasons, undefined);
 });

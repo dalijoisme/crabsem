@@ -9,20 +9,21 @@ const validationConfig = require("../config/validationConfig");
 const { logRecommendations } = require("../services/recommendationLoggerService");
 const { evaluateDueOutcomes } = require("../services/outcomeEvaluatorService");
 const { pruneOldData } = require("../services/retentionService");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): mandatory lifecycle + watchdog, see
+// services/schedulerLockGuard.js's own header.
+const lockGuard = createLockGuard("validation-scheduler", { maxDurationMs: 10 * validationConfig.intervalMs });
 
 async function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
 
         console.warn("[validation-scheduler] Skipped: previous run still in progress");
 
         return null;
 
     }
-
-    isRunning = true;
 
     const startedAt = Date.now();
 
@@ -38,6 +39,8 @@ async function runOnce(){
 
         console.log(`[validation-scheduler] Logged ${logResult.logged} recommendations, evaluated outcomes: ${JSON.stringify(evalResult)}, pruned: ${JSON.stringify(pruneResult)} (${durationMs}ms)`);
 
+        lockGuard.release("FINISHED");
+
         return { logResult, evalResult, pruneResult, durationMs };
 
     }
@@ -45,12 +48,9 @@ async function runOnce(){
 
         console.error(`[validation-scheduler] FAILED: ${err.message}`);
 
+        lockGuard.release("ERROR");
+
         return { ok: false, error: err.message };
-
-    }
-    finally{
-
-        isRunning = false;
 
     }
 
@@ -76,4 +76,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce };
+module.exports = { start, runOnce, getTickHealth: lockGuard.getHealth };

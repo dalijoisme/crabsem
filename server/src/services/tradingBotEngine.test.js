@@ -194,7 +194,10 @@ test("runCycle writes a real cycle-summary log row every time it actually runs",
         const cycleLogRow = log.find(l => l.message.startsWith("Cycle complete:"));
         assert.ok(cycleLogRow, "a real 'Cycle complete: ...' SYSTEM log row must exist after a real cycle ran");
         assert.equal(cycleLogRow.log_type, "SYSTEM");
-        assert.equal(cycleLogRow.message, "Cycle complete: scanned 1, opened 0, closed 0, skipped 1.");
+        // SPRINT 12 (Arjuna V5) - mandatory observability: Engine Version
+        // is now part of every real per-cycle summary row.
+        assert.match(cycleLogRow.message, /^Cycle complete: scanned 1, opened 0, closed 0, skipped 1\. engine=\S+$/);
+        assert.ok(JSON.parse(cycleLogRow.meta_json).engineVersion, "engineVersion must be present in the structured meta too, not just the message string");
 
     }
     finally{
@@ -1402,17 +1405,25 @@ test("runCycle attaches real freshness observability to every decision-snapshot 
 
 });
 
-// Production Stabilization V2 (BUY Quality sprint): real replay of this
-// account's own actual, historical BUY. MOON (opened 2026-07-30, token
-// 415jRB5Y5t9BujcL8BZkKQiK6oBx9Ce29cynp47eMooN) was really bought with
-// risk:"HIGH" already computed and stored (trading_bot_positions.risk) -
-// 18 holders, 59.3% top-10 concentration, developer holding 32% of
-// supply, snipers holding 32%, an already-350%-in-1h move - 5 real
-// riskReasons, verified against this exact real row. Nothing gated on
-// that classification before this sprint. This test proves the new gate
-// would have blocked the actual real incident, not a synthetic stand-in,
-// and that the rejection is never silent.
-test("real replay: runCycle rejects MOON's own real HIGH-risk profile and logs why, never silently", async () => {
+// SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL), ENTRY DECISION: real
+// replay of this account's own actual, historical BUY. MOON (opened
+// 2026-07-30, token 415jRB5Y5t9BujcL8BZkKQiK6oBx9Ce29cynp47eMooN) was
+// really bought with risk:"HIGH" already computed and stored
+// (trading_bot_positions.risk) - 18 holders, 59.3% top-10 concentration,
+// developer holding 32% of supply, snipers holding 32%, an already-
+// 350%-in-1h move - 5 real riskReasons, verified against this exact
+// real row. A prior sprint (Production Stabilization V2) added a hard
+// reject on this exact classification; THIS sprint's CTO decision
+// explicitly reverses it ("Final Score >=68 langsung BUY. Tidak boleh
+// ada classifier lain yang membatalkan BUY.") - risk="HIGH" must never
+// be the reason a BUY-tier candidate is skipped anymore. MOON's own
+// real recorded confidence (49) genuinely falls below this account's
+// 60% floor - a separate, real, unrelated, still-active gate - so this
+// proves the reason is never HIGH_RISK_REJECTED (impossible now), then
+// separately proves the identical HIGH-risk profile DOES open once
+// confidence alone clears that unrelated floor - Arjuna's own
+// "tetap agresif" DNA.
+test("real replay: runCycle no longer rejects MOON's own real HIGH-risk profile for its risk - only for its real, unrelated below-floor confidence", async () => {
 
     const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -1437,13 +1448,17 @@ test("real replay: runCycle rejects MOON's own real HIGH-risk profile and logs w
         ]);
 
         const result = await runCycle(userId, cycleTokens, cycleLiveByAddress);
-        assert.equal(result.opened, 0, "MOON's real HIGH-risk profile must never actually be bought under the new gate");
-        assert.equal(result.skipReasons.HIGH_RISK_REJECTED, 1);
+        assert.equal(result.skipReasons.HIGH_RISK_REJECTED, undefined, "HIGH_RISK_REJECTED no longer exists as a possible skip reason at all");
+        assert.equal(result.skipReasons.CONFIDENCE_BELOW_FLOOR, 1, "MOON's real 49% confidence genuinely falls below the 60% floor - an unrelated, still-active gate, not risk");
 
-        const log = tradingBotRepository.findRecentLog(userId, 10);
-        const warningLog = log.find(l => l.log_type === "WARNING" && l.message.startsWith("Rejected: HIGH risk"));
-        assert.ok(warningLog, "a real, human-readable WARNING log row must exist - never a silent rejection");
-        assert.ok(warningLog.message.includes("5 red flags"));
+        // The identical HIGH-risk profile, with confidence bumped to
+        // clear that unrelated floor, must now actually open - proving
+        // risk alone no longer decides it.
+        const eligibleLiveByAddress = new Map([
+            [moonAddress, { action: "STRONG BUY", confidence: 80, hasDecision: true, decayFraction: 1, risk: "HIGH", riskReasons: moonRiskReasons, excludeFromTrending: false }]
+        ]);
+        const eligibleResult = await runCycle(userId, cycleTokens, eligibleLiveByAddress);
+        assert.equal(eligibleResult.opened, 1, "the exact same real HIGH-risk profile must now open once its own real confidence clears the (unrelated) floor");
 
     }
     finally{

@@ -80,6 +80,28 @@ function findPendingWithTxHash(){
     ).all();
 }
 
+// SPRINT 12 (Arjuna V5) - ROOT CAUSE FIX for "Execution Queue masih
+// mempunyai status SUBMITTING dalam waktu lama, Lock tidak dilepas":
+// findPendingWithTxHash() above ONLY ever reconciles a row that already
+// reached SUBMITTED/CONFIRMING with a real tx_hash - a row still at
+// IDLE/PREPARING/SIGNING/SUBMITTING (the process crashed or an await
+// truly hung BEFORE a signature was ever received) has no tx_hash at
+// all and was completely invisible to it, forever. Since
+// idx_executions_one_active_per_user (migration 045) is a partial
+// UNIQUE index over every non-terminal status, a single such row
+// permanently blocks that user's wallet from ever starting a NEW BUY or
+// SELL again - exactly the reported symptom. There is no real signature
+// to reconcile for these rows (we genuinely don't know if a swap ever
+// reached GMGN), so the only honest recovery is to mark them FAILED,
+// releasing the lock - the same "never fabricate a success we can't
+// prove" convention transactionBalanceReader.js already uses, applied
+// to the opposite case (never fabricate a failure's ABSENCE either).
+function findStuckWithoutTxHash(olderThanMs){
+    return db.prepare(
+        "SELECT * FROM executions WHERE status NOT IN ('SUCCESS', 'FAILED', 'TIMEOUT') AND tx_hash IS NULL AND created_at <= datetime('now', '-' || ? || ' seconds')"
+    ).all(Math.round(olderThanMs / 1000));
+}
+
 // Single generic transition writer - the repository doesn't have a
 // dedicated statement per state (PREPARING/SIGNING/...) because each
 // transition only ever touches a handful of the same optional columns;
@@ -154,7 +176,7 @@ function forUser(userId){
 }
 
 module.exports = {
-    insertExecution, findById, findByUser, findActiveByUser, findPendingWithTxHash, findFailedBuysSince,
+    insertExecution, findById, findByUser, findActiveByUser, findPendingWithTxHash, findStuckWithoutTxHash, findFailedBuysSince,
     transitionExecution,
     insertLog, findLogByExecutionId,
     forUser

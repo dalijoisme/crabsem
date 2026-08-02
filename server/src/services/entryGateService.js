@@ -102,32 +102,34 @@ function createEntryGateService(repository){
             return { eligible: false, reason: "STALE_MARKET_DATA", marketAgeSeconds };
         }
 
-        // Production Stabilization V2 (BUY Quality sprint, Section L
-        // proposal #1): scoringConfig.computeRisk already classifies a
-        // token HIGH when it hits a hard trigger (parabolic >=500% 1h
-        // move) or accumulates >=4 real riskReasons (dev still holding a
-        // large share, snipers/bundlers/insiders concentrated, very few
-        // holders, extreme top-10 concentration, net distribution, price
-        // already moved sharply, etc. - see intelligence/participant/*.js
-        // and market/priceStability.js, all real, already-collected
-        // facts). Before this sprint, `risk` was computed and displayed
-        // but never gated anything - a candidate could be labeled HIGH
-        // risk and still be bought. This closes that gap the same way
-        // the freshness gate closed the stale-data one: a hard,
-        // non-tunable reject on an already-computed signal, never a new
-        // one. Verified against this account's own real BUY history: the
-        // real MOON position (2026-07-30) was risk:"HIGH" (5 real
-        // riskReasons - 18 holders, 59.3% top-10 concentration, developer
-        // holding 32%, snipers holding 32%, and an already-350%-1h price
-        // move) and would be rejected here today. Global and non-profile-
-        // tunable for the same reason MAX_MARKET_DATA_AGE_SECONDS is: this
-        // is a data-integrity/character floor, not a strategy knob - the
-        // Founder's own instruction for this sprint is to lose winners
-        // rather than buy losers, uniformly, regardless of which Strategy
-        // Profile is active.
-        if(live.risk === "HIGH"){
-            return { eligible: false, reason: "HIGH_RISK_REJECTED", riskReasons: live.riskReasons || [] };
-        }
+        // SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL), ENTRY DECISION:
+        // "Final Score >=68 langsung BUY. Tidak boleh ada classifier
+        // lain yang membatalkan BUY. Final Decision hanya berasal dari
+        // Final Score." REMOVED (was Production Stabilization V2's own
+        // HIGH_RISK_REJECTED gate): a hard reject purely on
+        // riskReasons.length >= 4 accumulated across many independent
+        // real signals (developer/sniper/bundle/insider/priceStability/
+        // holderDistribution/etc.) - exactly the "classifier lain" this
+        // CTO decision forbids, since it could reject an already-BUY-
+        // tier (score >= 68) candidate on a count of minor flags with no
+        // single one individually disqualifying. The CTO's own closed
+        // hard-reject list (honeypot, cannot sell, liquidity critical,
+        // hard blacklist, security critical) remains fully enforced -
+        // untouched by this removal - via researchEngineFactory.js's
+        // safetyVeto mechanism (isHoneypot/security.hardReject/
+        // liquidity floor/backingRatio/minHolders), which sets
+        // action="AVOID" directly in the scoring pipeline BEFORE this
+        // gate ever ran - a vetoed token never reaches BUY/STRONG BUY
+        // action tier at all, so it is already rejected by this
+        // function's own NOT_A_BUY_TIER_* check above, independent of
+        // `risk`. Individual risky signals (a developer still holding a
+        // large share, sniper/bundler/insider concentration, an already-
+        // sharp price move, a risky momentum phase, etc.) still lower
+        // the Final Score itself (researchEngineFactory.js's
+        // computeUnifiedEntryScore, e.g. Part 6's security penalty, this
+        // sprint's own momentum scoring modifier) - real signals still
+        // matter, they just no longer separately veto a score that
+        // already cleared the BUY threshold.
 
         if(live.decayFraction < config.min_decay_fraction){
             return { eligible: false, reason: "DECISION_TOO_STALE" };

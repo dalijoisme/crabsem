@@ -663,7 +663,18 @@ function computeUnifiedEntryScore({ participantModules, marketModules, trenchesE
     const ageBucket = ageMinutes != null ? e.ageBonus.find(b => ageMinutes <= b.maxMinutes) : null;
     const ageBonusPoints = ageBucket ? ageBucket.bonus : 0;
 
-    const finalScore = Math.max(0, Math.min(100, Math.round(baseScore - securityPenalty - washPenalty + ageBonusPoints)));
+    // SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL): Momentum is a
+    // SCORING MODIFIER, added directly here (same additive spot as
+    // ageBonusPoints), never a separate hard-reject path. momentumPhase
+    // is computed unconditionally by marketModules.momentumPhase (see
+    // intelligence/market/momentumPhase.js) for every token regardless
+    // of whether it's in config.entryScore.weights - a phase this table
+    // doesn't recognize (should never happen; defensive only) contributes
+    // 0, never a guess.
+    const momentumPhase = marketModules.momentumPhase?.phase ?? null;
+    const momentumModifierPoints = momentumPhase != null ? (e.momentumModifier[momentumPhase] ?? 0) : 0;
+
+    const finalScore = Math.max(0, Math.min(100, Math.round(baseScore - securityPenalty - washPenalty + ageBonusPoints + momentumModifierPoints)));
 
     return {
         score: finalScore,
@@ -673,6 +684,8 @@ function computeUnifiedEntryScore({ participantModules, marketModules, trenchesE
         syntheticScore,
         ageBonusPoints,
         ageMinutes,
+        momentumPhase,
+        momentumModifierPoints,
         volumeValidated,
         componentBreakdown
     };

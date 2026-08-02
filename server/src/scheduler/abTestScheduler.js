@@ -3,16 +3,17 @@
 // Completely inert (one cheap state read) when the test isn't active.
 
 const abTestEngine = require("../services/abTestEngine");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 const INTERVAL_MS = 60000;
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): mandatory lifecycle + watchdog, see
+// services/schedulerLockGuard.js's own header.
+const lockGuard = createLockGuard("ab-test-scheduler", { maxDurationMs: 10 * INTERVAL_MS });
 
 function tick(){
 
-    if(isRunning) return;
-
-    isRunning = true;
+    if(!lockGuard.tryAcquire()) return;
 
     try{
 
@@ -26,15 +27,13 @@ function tick(){
 
         }
 
+        lockGuard.release("FINISHED");
+
     }
     catch(err){
 
         console.error(`[ab-test-scheduler] FAILED: ${err.message}`, err);
-
-    }
-    finally{
-
-        isRunning = false;
+        lockGuard.release("ERROR");
 
     }
 
@@ -50,4 +49,4 @@ function start(){
 
 }
 
-module.exports = { start };
+module.exports = { start, getTickHealth: lockGuard.getHealth };

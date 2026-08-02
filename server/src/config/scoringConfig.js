@@ -240,7 +240,28 @@ module.exports = {
             { maxMinutes: 10, bonus: 2 },
             { maxMinutes: 20, bonus: 5 },
             { maxMinutes: Infinity, bonus: 8 }
-        ]
+        ],
+
+        // SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL): Momentum is a
+        // SCORING MODIFIER, never a hard gate. Added directly into the
+        // final 0-100 entry score (same additive spot as ageBonusPoints
+        // below), exactly like every other module here - never a
+        // separate reject path, never routed through riskReasons/
+        // computeRisk's HIGH-risk aggregation (that coupling was this
+        // sprint's own prior turn - explicitly reversed by this CTO
+        // decision because it could push a token toward HIGH-risk hard-
+        // reject purely on momentum, which is exactly the "hard gate"
+        // shape forbidden here). See
+        // intelligence/market/momentumPhase.js's classifyMomentumPhase
+        // for the six real, data-driven phases these numbers apply to.
+        momentumModifier: {
+            EARLY_MOMENTUM: 10,
+            HEALTHY_MOMENTUM: 6,
+            NORMAL: 0,
+            DEAD_BOUNCE: -8,
+            EXIT_LIQUIDITY: -12,
+            POST_RUG_RECOVERY: -15
+        }
 
     },
 

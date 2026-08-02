@@ -172,25 +172,32 @@ test("evaluateEntry accepts a BUY-tier candidate right at the freshness boundary
     assert.equal(gate.evaluateEntry(justOutside, freshBuyLive(), config, 0).reason, "STALE_MARKET_DATA");
 });
 
-// Production Stabilization V2 (BUY Quality sprint, Section L proposal #1):
-// a HIGH-risk candidate is rejected outright, never merely scored lower -
-// same "hard reject on an already-computed signal" pattern as the
-// freshness gate above, checked before decayFraction/confidence.
-test("evaluateEntry rejects a BUY-tier candidate whose engine-computed risk is HIGH", () => {
+// SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL), ENTRY DECISION: the
+// former Production Stabilization V2 hard-reject-on-risk=HIGH gate
+// (riskReasons.length >= 4) was REMOVED - "Final Score >=68 langsung
+// BUY. Tidak boleh ada classifier lain yang membatalkan BUY." A
+// risk="HIGH" candidate is no longer a hard reject here; its real
+// underlying signals (developer/sniper/holder concentration/price
+// move/momentum phase/etc.) already lower the Final Score itself
+// (researchEngineFactory.js's computeUnifiedEntryScore) - only the
+// CTO's own closed 5-item hard-reject list (honeypot, cannot sell,
+// liquidity critical, hard blacklist, security critical) can still
+// block a BUY, enforced independently via safetyVeto (action=AVOID
+// before this function's own NOT_A_BUY_TIER_* check).
+test("evaluateEntry no longer hard-rejects on risk=HIGH alone - Final Score/action tier is the sole BUY decision", () => {
     const gate = createEntryGateService(mockRepository());
     const live = { ...freshBuyLive(), risk: "HIGH", riskReasons: ["Very few holders (18) - concentration risk", "High holder concentration (top 10 hold 59.3%)"] };
 
     const result = gate.evaluateEntry(freshToken(), live, config, 0);
-    assert.equal(result.eligible, false);
-    assert.equal(result.reason, "HIGH_RISK_REJECTED");
-    assert.equal(result.riskReasons.length, 2);
+    assert.equal(result.eligible, true, "risk=HIGH alone must never block an otherwise-eligible BUY-tier candidate - momentum/risk signals are scoring inputs, not a separate gate");
 });
 
-test("evaluateEntry accepts MEDIUM/LOW risk candidates - only HIGH is a hard reject", () => {
+test("evaluateEntry accepts MEDIUM/LOW/HIGH risk candidates alike - risk level itself is no longer a gate of any kind", () => {
     const gate = createEntryGateService(mockRepository());
 
     assert.equal(gate.evaluateEntry(freshToken({ token_address: "M" }), { ...freshBuyLive(), risk: "MEDIUM" }, config, 0).eligible, true);
     assert.equal(gate.evaluateEntry(freshToken({ token_address: "L" }), { ...freshBuyLive(), risk: "LOW" }, config, 0).eligible, true);
+    assert.equal(gate.evaluateEntry(freshToken({ token_address: "H" }), { ...freshBuyLive(), risk: "HIGH" }, config, 0).eligible, true);
 });
 
 // Real replay: this account's own actual, historical BUY. MOON
@@ -199,9 +206,18 @@ test("evaluateEntry accepts MEDIUM/LOW risk candidates - only HIGH is a hard rej
 // top-10 concentration, developer still holding 32% of supply, snipers
 // holding 32%, and an already-350%-in-1h price move (5 real riskReasons,
 // stored verbatim in trading_bot_positions.risk for this real position).
-// This proves the new gate would have blocked the exact real BUY that
-// motivated this sprint, not a synthetic stand-in.
-test("real replay: MOON's own real HIGH-risk profile at entry is rejected by the new gate", () => {
+// SPRINT 12 (Arjuna V5): the CTO decision explicitly reverses the prior
+// sprint's own hard-reject-on-HIGH-risk gate that this exact replay used
+// to prove blocked MOON - risk="HIGH" must no longer be the reason this
+// candidate fails, full stop. MOON's own real recorded confidence at
+// entry (49) is a separate, real historical fact that happens to fall
+// below this account's later-configured 60% confidence floor (an
+// unrelated, still-active, untouched-by-this-sprint gate) - kept
+// verbatim rather than inflated to make the test look cleaner, so this
+// asserts the ONE thing this sprint actually changed: the rejection
+// reason is CONFIDENCE_BELOW_FLOOR, never HIGH_RISK_REJECTED (which no
+// longer exists as a possible reason at all).
+test("real replay: MOON's own real HIGH-risk profile at entry is no longer rejected FOR ITS RISK under the CTO's Final-Score-only decision", () => {
     const gate = createEntryGateService(mockRepository());
     const moonLive = {
         hasDecision: true, excludeFromTrending: false, action: "STRONG BUY",
@@ -217,6 +233,13 @@ test("real replay: MOON's own real HIGH-risk profile at entry is rejected by the
     const moonToken = freshToken({ token_address: "415jRB5Y5t9BujcL8BZkKQiK6oBx9Ce29cynp47eMooN" });
 
     const result = gate.evaluateEntry(moonToken, moonLive, config, 0);
+    assert.notEqual(result.reason, "HIGH_RISK_REJECTED", "HIGH_RISK_REJECTED no longer exists as a possible reason at all");
     assert.equal(result.eligible, false);
-    assert.equal(result.reason, "HIGH_RISK_REJECTED");
+    assert.equal(result.reason, "CONFIDENCE_BELOW_FLOOR", "MOON's own real 49% confidence genuinely falls below the 60% floor - an unrelated, still-active gate, not risk");
+
+    // With a confidence at/above today's floor, the exact same HIGH-risk
+    // profile IS eligible - proving risk alone is no longer what decides it.
+    const eligibleMoonLive = { ...moonLive, confidence: 80 };
+    const eligibleResult = gate.evaluateEntry(moonToken, eligibleMoonLive, config, 0);
+    assert.equal(eligibleResult.eligible, true);
 });

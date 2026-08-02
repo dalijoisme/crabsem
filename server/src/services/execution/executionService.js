@@ -316,7 +316,65 @@ function createExecutionService({ repository, connectionProvider, signingService
 
     }
 
-    return { execute, reconcilePendingExecutions };
+    // SPRINT 12 (Arjuna V5) - the counterpart recovery pass to
+    // reconcilePendingExecutions() above, for the case that one can
+    // never reach: a row stuck at IDLE/PREPARING/SIGNING/SUBMITTING with
+    // NO tx_hash yet (a crash or a genuinely hung await before a real
+    // signature was ever received). See
+    // repositories/executionRepository.js's findStuckWithoutTxHash for
+    // the full incident this closes - without this, such a row
+    // permanently blocks that user's ONE-active-execution slot
+    // (migration 045's own partial unique index), so no new BUY or SELL
+    // could ever start again. There is no real signature to reconcile -
+    // the only honest recovery is FAILED, releasing the lock.
+    //
+    // Called both at boot (src/index.js, alongside
+    // reconcilePendingExecutions()) AND on a periodic timer while the
+    // process keeps running - the CTO spec's own explicit requirement
+    // ("Status SUBMITTING tidak boleh bertahan selamanya... Jika
+    // timeout: FAIL -> release lock -> log") describes a live-operation
+    // guarantee, not only a boot-time recovery.
+    async function reconcileStuckExecutions(olderThanMs){
+
+        const stuck = repository.findStuckWithoutTxHash(olderThanMs);
+        const results = [];
+
+        for(const row of stuck){
+
+            try{
+
+                const machine = buildMachine(row.id, row.status);
+                // IDLE's only legal transition is to PREPARING - can't
+                // jump straight to FAILED from there (executorStateMachine.js's
+                // own LEGAL_TRANSITIONS table). Every other stuck state
+                // (PREPARING/SIGNING/SUBMITTING) can go straight to FAILED.
+                if(machine.getState() === STATES.IDLE){
+                    machine.transition(STATES.PREPARING);
+                }
+
+                const ageMs = Date.now() - new Date(`${String(row.created_at).replace(" ", "T")}Z`).getTime();
+                machine.transition(STATES.FAILED, {
+                    errorMessage: `Execution stuck at ${row.status} for ${Math.round(ageMs / 1000)}s with no transaction signature - timed out, marked FAILED to release the execution lock`,
+                    completed: true
+                });
+
+                logger.logError(row.id, `stuck execution force-FAILED after ${Math.round(ageMs / 1000)}s at status=${row.status} - lock released`);
+
+                results.push({ executionId: row.id, outcome: STATES.FAILED, previousStatus: row.status });
+
+            }
+            catch(err){
+                logger.logError(row.id, `stuck-execution reconciliation failed: ${err.message}`);
+                results.push({ executionId: row.id, outcome: "RECONCILE_ERROR", error: err.message });
+            }
+
+        }
+
+        return results;
+
+    }
+
+    return { execute, reconcilePendingExecutions, reconcileStuckExecutions };
 
 }
 

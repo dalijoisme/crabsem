@@ -286,17 +286,20 @@ function orderCandidates(tokens, liveByAddress, botConfig){
         for(const token of tokens){
             const live = liveByAddress.get(token.token_address);
             // False Positive Reduction V2, Priority 4: a HIGH-risk candidate
-            // is never ranked - entryGateService already hard-rejects it
-            // outright (Production Stabilization V2), so ranking it was
-            // pure noise at best - at worst, Opportunity Priority's own
-            // heat-based formula (confidenceVelocity/participantScoreVelocity/
+            // is never RANKED - Opportunity Priority's own heat-based
+            // formula (confidenceVelocity/participantScoreVelocity/
             // triggerHeat/priceVelocity/buyPressure - none of them a safety
             // signal) could and did rank a HIGH-risk token to the very top
             // (real proof: MOON, this account's own real BUY, ranked #2 of 2
-            // at priority 97 while risk:"HIGH"). Routed to `rest` instead of
-            // `buyCandidates` - still visited by the entry-gate loop below in
-            // its original scan order (so it is still real-logged as
-            // HIGH_RISK_REJECTED, same as today), just never occupies a
+            // at priority 97 while risk:"HIGH"). SPRINT 12 (Arjuna V5) - CTO
+            // DECISION: entryGateService no longer hard-rejects on risk="HIGH"
+            // (see its own header comment - "Final Decision hanya berasal
+            // dari Final Score") - a HIGH-risk candidate CAN still be bought
+            // on its own Final Score/action-tier merits, this only keeps it
+            // out of the ranked leaderboard's priority ordering, a safety-
+            // conscious tie-break for scarce slots/cash, never a reject.
+            // Routed to `rest` instead of `buyCandidates` - still visited by
+            // the entry-gate loop below in its original scan order, just never occupies a
             // ranked leaderboard slot or a real candidate's sibling list.
             // This changes ORDER/observability only - identical to before
             // for every LOW/MEDIUM-risk candidate, and no token that was
@@ -654,20 +657,6 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
                     }
                 });
             }
-            // Production Stabilization V2 (BUY Quality sprint, Section 3
-            // observability requirement carried forward): a HIGH-risk
-            // rejection is never silent either - same real log-row
-            // convention as the freshness rejection above, listing the
-            // actual riskReasons that pushed this candidate to HIGH so
-            // the Founder can see exactly why, not just that it happened.
-            if(evaluation.reason === "HIGH_RISK_REJECTED"){
-                tradingBotRepository.insertLog(userId, {
-                    logType: "WARNING",
-                    tokenSymbol: token.symbol,
-                    message: `Rejected: HIGH risk (${(evaluation.riskReasons || []).length} red flags) - ${token.symbol || token.token_address.slice(0, 8)}`,
-                    meta: { tokenAddress: token.token_address, riskReasons: evaluation.riskReasons }
-                });
-            }
             // Missed Opportunity sprint priority: only for tokens that
             // genuinely cleared the BUY/STRONG BUY action tier (rankInfo
             // truthy) - never for NOT_A_BUY_TIER_*/HARD_EXCLUDED_*/
@@ -907,10 +896,16 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
     // entirely. One row per cycle, not one per scanned token - bounded
     // by TIME (~5,760/day at a 15s interval), never by the ~12,000-token
     // scan size, which is what a per-token log would cost instead.
+    // SPRINT 12 (Arjuna V5) - mandatory observability: Engine Version is
+    // now part of every real per-cycle summary row, not only buried
+    // per-trade (trading_bot_positions.engine_version) - "Semua harus
+    // dapat diaudit" includes knowing WHICH engine produced a given
+    // cycle's own candidate/BUY/reject counts, not just which engine a
+    // later-opened position used.
     tradingBotRepository.insertLog(userId, {
         logType: "SYSTEM",
-        message: `Cycle complete: scanned ${scanned}, opened ${opened}, closed ${closed}, skipped ${skipped}.`,
-        meta: { scanned, opened, closed, skipped, skipReasons }
+        message: `Cycle complete: scanned ${scanned}, opened ${opened}, closed ${closed}, skipped ${skipped}. engine=${productionEngineResolver.getActiveVersion()}`,
+        meta: { scanned, opened, closed, skipped, skipReasons, engineVersion: productionEngineResolver.getActiveVersion() }
     });
 
     // Live Decision Center sprint: two more real, per-cycle SYSTEM rows -

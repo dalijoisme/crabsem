@@ -18,19 +18,24 @@ const tradingWalletRepository = require("../repositories/tradingWalletRepository
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const walletService = require("../services/walletService");
 const { computeInitialCapitalFromReal } = require("../services/tradingBotService");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 const INTERVAL_MS = 5 * 60 * 1000;
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): mandatory lifecycle + watchdog - this
+// scheduler makes a real per-user RPC call (walletService.getRealWalletBalance)
+// with no visible per-call timeout, so a single hung RPC could otherwise
+// wedge this lock forever, same class of bug as gmgnTrendingScheduler's
+// own root cause. See services/schedulerLockGuard.js's own header.
+const lockGuard = createLockGuard("wallet-balance-sync-scheduler", { maxDurationMs: 10 * INTERVAL_MS });
 
 async function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
         console.warn("[wallet-balance-sync-scheduler] Skipped: previous run still in progress");
         return null;
     }
 
-    isRunning = true;
     const startedAt = Date.now();
     let synced = 0, skipped = 0, failed = 0;
 
@@ -65,11 +70,14 @@ async function runOnce(){
 
         const durationMs = Date.now() - startedAt;
         console.log(`[wallet-balance-sync-scheduler] synced=${synced} skipped=${skipped} failed=${failed} of ${userIds.length} users (${durationMs}ms)`);
+        lockGuard.release("FINISHED");
         return { synced, skipped, failed, total: userIds.length, durationMs };
 
     }
-    finally{
-        isRunning = false;
+    catch(err){
+        console.error(`[wallet-balance-sync-scheduler] FAILED: ${err.message}`, err);
+        lockGuard.release("ERROR");
+        return { ok: false, error: err.message };
     }
 
 }
@@ -86,4 +94,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce };
+module.exports = { start, runOnce, getTickHealth: lockGuard.getHealth };

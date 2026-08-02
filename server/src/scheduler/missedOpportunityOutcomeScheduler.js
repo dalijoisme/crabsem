@@ -15,6 +15,7 @@
 
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 // Tunable: how long to wait after a miss before checking "what did it do
 // afterward". 6 hours gives real memecoin momentum room to play out
@@ -31,16 +32,16 @@ const MAX_WAIT_HOURS = 24;
 
 const TICK_MS = 15 * 60 * 1000;
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): mandatory lifecycle + watchdog, see
+// services/schedulerLockGuard.js's own header.
+const lockGuard = createLockGuard("missed-opportunity-outcome-scheduler", { maxDurationMs: 10 * TICK_MS });
 
 async function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
         console.warn("[missed-opportunity-outcome-scheduler] Skipped: previous run still in progress");
         return null;
     }
-
-    isRunning = true;
 
     try{
 
@@ -69,18 +70,16 @@ async function runOnce(){
 
         console.log(`[missed-opportunity-outcome-scheduler] evaluated=${evaluated} stillWaitingForData=${stillWaiting} of ${pending.length} pending row(s) past the ${OUTCOME_HORIZON_HOURS}h horizon`);
 
+        lockGuard.release("FINISHED");
+
         return { evaluated, stillWaiting, pendingChecked: pending.length };
 
     }
     catch(err){
 
         console.error(`[missed-opportunity-outcome-scheduler] FAILED: ${err.message}`, err);
+        lockGuard.release("ERROR");
         return { ok: false, error: err.message };
-
-    }
-    finally{
-
-        isRunning = false;
 
     }
 
@@ -98,4 +97,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce, OUTCOME_HORIZON_HOURS, MAX_WAIT_HOURS };
+module.exports = { start, runOnce, OUTCOME_HORIZON_HOURS, MAX_WAIT_HOURS, getTickHealth: lockGuard.getHealth };

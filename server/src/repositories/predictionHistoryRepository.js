@@ -83,13 +83,31 @@ function findOpen(){
 }
 
 // Lightweight rows (no large JSON blobs) for the per-minute timeline
-// sweep, which runs over EVERY prediction (open or already closed) -
-// a closed prediction can still have real, un-recorded timeline
-// horizons between its creation and its close.
+// sweep, which runs over every prediction still young enough that a
+// configured horizon (config/predictionValidationConfig.js's
+// timelineHorizons) might legitimately still be pending - a closed
+// prediction can still have real, un-recorded timeline horizons between
+// its creation and its close.
+//
+// SPRINT 12 (Arjuna V5) - ROOT CAUSE FIX for "Prediction Validation
+// membutuhkan waktu sangat lama, run berikutnya selalu di-skip": this
+// used to be an unbounded SELECT over the ENTIRE table, re-scanned every
+// single 60s cycle, forever - a prediction older than the largest
+// configured timeline horizon (24h) either already has every horizon
+// recorded (reprocessing it is pure waste) or never will (its price-
+// history source data has long since aged out of
+// retentionConfig's own token_price_history window) - so re-including
+// it in every cycle's scan is never productive, only ever expensive,
+// and grows unboundedly with the table (699K+ rows and counting,
+// per this account's own real data - retentionService.js does not
+// prune prediction_history). Bounded by prediction_time (a real,
+// already-indexed column - idx_prediction_history_prediction_time),
+// this returns only predictions still young enough for at least one
+// configured horizon to legitimately still be pending - a small,
+// roughly-constant-size window instead of the whole table.
+function findRecentLite(sinceTimestamp){
 
-function findAllLite(){
-
-    return db.prepare("SELECT id, token_address, prediction_time FROM prediction_history").all();
+    return db.prepare("SELECT id, token_address, prediction_time FROM prediction_history WHERE prediction_time >= ?").all(sinceTimestamp);
 
 }
 
@@ -375,7 +393,7 @@ module.exports = {
 
     findOpen,
 
-    findAllLite,
+    findRecentLite,
 
     updateTracking,
 

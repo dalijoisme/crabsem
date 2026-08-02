@@ -10,20 +10,26 @@
 const config = require("../config/predictionValidationConfig");
 const predictionValidationService = require("../services/predictionValidationService");
 const learnService = require("../services/learnService");
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
-let isRunning = false;
+// SPRINT 12 (Arjuna V5): watchdog ceiling so this scheduler can never be
+// permanently stuck - real root cause of "run berikutnya selalu di-skip"
+// was recordTimelineSnapshots() unboundedly re-scanning the entire
+// prediction_history table every cycle (see
+// repositories/predictionHistoryRepository.js's findRecentLite, this
+// sprint's own fix for that), but a watchdog is still mandatory defense-
+// in-depth against any future cause of the same symptom.
+const lockGuard = createLockGuard("prediction-validation-scheduler", { maxDurationMs: 10 * config.schedulerIntervalMs });
 
 async function runOnce(){
 
-    if(isRunning){
+    if(!lockGuard.tryAcquire()){
 
         console.warn("[prediction-validation-scheduler] Skipped: previous run still in progress");
 
         return null;
 
     }
-
-    isRunning = true;
 
     const startedAt = Date.now();
 
@@ -51,6 +57,8 @@ async function runOnce(){
 
         catch(learnErr){ console.error(`[prediction-validation-scheduler] Learn System snapshot failed: ${learnErr.message}`, learnErr); }
 
+        lockGuard.release("FINISHED");
+
         return result;
 
     }
@@ -58,12 +66,9 @@ async function runOnce(){
 
         console.error(`[prediction-validation-scheduler] FAILED: ${err.message}`, err);
 
+        lockGuard.release("ERROR");
+
         return { ok: false, error: err.message };
-
-    }
-    finally{
-
-        isRunning = false;
 
     }
 
@@ -81,4 +86,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce };
+module.exports = { start, runOnce, getTickHealth: lockGuard.getHealth };

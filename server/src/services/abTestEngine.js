@@ -36,6 +36,7 @@ const productionEngineResolver = require("./productionEngineResolver");
 const factory = require("./researchEngineFactory");
 const tradePlanService = require("./tradePlanService");
 const dynamicExitService = require("./dynamicExitService");
+const { computeRoiPct } = require("./roiCalculator");
 
 const TEST_CONFIG = {
     initial_capital: 150,
@@ -210,19 +211,28 @@ function openPositionTournament(profile, token, riskBands, equity, availableCash
 // SHARED CLOSE LOGIC - identical Dynamic Exit for both profiles
 // =====================================
 
+// Arjuna V4 (Sprint 11) bugfix: Arjuna V3 (Sprint 10) replaced
+// dynamicExitService.evaluateDynamicExit's whole signature/return shape
+// ({shouldClose,reason} -> {action,sellFraction,reason}) but this file
+// was never updated to match - result.shouldClose has been `undefined`
+// (always falsy) ever since, silently meaning this benchmark's own
+// positions never closed at all. Fixed here: the current signature
+// ({position, token, trenchesEntry} - engineAction/stopLossPrice are no
+// longer read at all, the REVERSAL check that used to need a fresh
+// engine re-score is gone from the new deterministic state machine, a
+// real efficiency win too) and the action-based return.
+//
+// ab_test_positions/ab_test_trades (abTestRepository.js) predate Arjuna
+// V3's partial-exit capability and are out of this sprint's explicit
+// scope to extend - a SELL_PARTIAL (TP1) is treated as a full close
+// here, same documented fallback services/tradeManager.js's own
+// partialClose() already uses for repositories without partial-close
+// support (e.g. the Benchmark Harness). This benchmark will show a full
+// TP1 exit where live trading shows an 80%-then-Free-Ride split -
+// acceptable for a research/comparison tool, never live money.
 function closeIfDue(profile, position, token, trenchesEntry){
 
-    // Fresh engine signal, same engine either way (Production V2 IS
-    // Momentum Hunter via the resolver) - used only for the REVERSAL
-    // check, identical code path for both profiles.
-    const activeEngine = productionEngineResolver.getActiveEngine();
-    const freshSignal = activeEngine.analyzeToken(token);
-
-    const result = dynamicExitService.evaluateDynamicExit({
-        position, token, trenchesEntry,
-        engineAction: freshSignal.action,
-        stopLossPrice: position.stop_loss_price
-    });
+    const result = dynamicExitService.evaluateDynamicExit({ position, token, trenchesEntry });
 
     const mfePct = Math.max(position.mfe_pct || 0, result.roiPct);
     const maePct = Math.min(position.mae_pct || 0, result.roiPct);
@@ -232,7 +242,7 @@ function closeIfDue(profile, position, token, trenchesEntry){
         currentPrice: result.currentPrice, mfePct, maePct, lastVolume1h: currentVolume1h
     });
 
-    if(!result.shouldClose) return { closed: false };
+    if(result.action === "HOLD") return { closed: false };
 
     return finalizeClose(profile, position, result.currentPrice, result.reason);
 
@@ -240,7 +250,12 @@ function closeIfDue(profile, position, token, trenchesEntry){
 
 function finalizeClose(profile, position, exitPrice, reason){
 
-    const roiPct = ((exitPrice / position.entry_price) - 1) * 100;
+    // Arjuna V4 (Sprint 11), Part 1: THE single ROI formula - see
+    // services/roiCalculator.js's own header comment. ab-test never has
+    // a real on-chain swap (always a simulation), so this IS the
+    // official ROI for this table, same as before - just no longer a
+    // second, independently-drifting inline copy of the formula.
+    const roiPct = computeRoiPct(position.entry_price, exitPrice);
 
     let feeUsd;
     if(profile === "HIGH_THROUGHPUT"){

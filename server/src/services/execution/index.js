@@ -21,6 +21,7 @@ const { createGmgnClient } = require("../../collectors/gmgn/authClient");
 const { createSolanaConnectionProvider } = require("./solanaConnectionProvider");
 const { createTransactionSigningService } = require("./transactionSigningService");
 const { createBalanceValidationService } = require("./balanceValidationService");
+const { createTransactionBalanceReader } = require("./transactionBalanceReader");
 const { createTransactionConfirmationService } = require("./transactionConfirmationService");
 const { createGmgnSwapTransactionBuilder } = require("./gmgnSwapTransactionBuilder");
 const { createExecutionLogger } = require("./executionLogger");
@@ -31,6 +32,8 @@ const connectionProvider = createSolanaConnectionProvider(config);
 const signingService = createTransactionSigningService({ walletService, tradingWalletRepository });
 
 const balanceService = createBalanceValidationService(connectionProvider);
+
+const balanceReader = createTransactionBalanceReader(connectionProvider);
 
 const confirmationService = createTransactionConfirmationService(connectionProvider, {
     timeoutMs: config.EXECUTION_CONFIRMATION_TIMEOUT_MS,
@@ -67,12 +70,14 @@ const executionService = createExecutionService({
     balanceService,
     confirmationService,
     transactionBuilder,
-    logger
+    logger,
+    balanceReader
 });
 
 module.exports = {
     executionService,
     balanceService,
+    balanceReader,
     connectionProvider,
     executionRepository,
     tradingWalletRepository,

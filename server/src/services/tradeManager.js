@@ -40,8 +40,29 @@ const qualityGateService = require("./qualityGateService");
 const productionEngineResolver = require("./productionEngineResolver");
 const dynamicExitService = require("./dynamicExitService");
 const { resolveTokenAgeMinutes } = require("./emiService");
+// Arjuna V4 (Sprint 11), Part 1 - THE single ROI formula. See its own
+// header comment: computeRoiPct is the generic ratio (used for TRIGGER/
+// tracking-side math only, snapshot-based, still allowed per the final
+// spec's Part 4); computeRealizedRoi is the OFFICIAL, recorded ROI for a
+// completed trade.
+const { computeRoiPct, computeRealizedRoi } = require("./roiCalculator");
 
 const FEE_PCT_DEFAULT = 1;
+
+// Arjuna V4 (Sprint 11), Part 1/2: position.actual_sol_spent (real,
+// captured once at BUY) covers the position's ORIGINAL full size - a
+// partial (TP1) or final close only ever accounts for a FRACTION of
+// that original entry, so the real SOL cost attributable to THIS close
+// is the same fraction of the real total. initial_size_usd defaults to
+// the position's own current size_usd for a legacy row from before
+// migration 065 ever existed (fraction 1 - the whole thing, correct for
+// a position that was never partially sold).
+function proratedActualSolSpent(position, portionUsd){
+    if(position.actual_sol_spent == null) return null;
+    const initialSizeUsd = position.initial_size_usd ?? position.size_usd;
+    if(!initialSizeUsd || initialSizeUsd <= 0) return null;
+    return position.actual_sol_spent * (portionUsd / initialSizeUsd);
+}
 
 // Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
 // 5 - Position Snapshot): breakdown_json already persisted every
@@ -181,6 +202,14 @@ function createTradeManager(repository, liveOptions = null){
         // row is ever written - the founder's capital either moved for
         // real and confirmed, or nothing here pretends it did. ----
         let executionId = null;
+        // Arjuna V4 (Sprint 11), Part 1/2: real actual_sol_spent/
+        // entry_tx_signature/entry_block_time - null for SIMULATION (no
+        // real swap exists to read) and for a real trade whose post-
+        // confirmation balance read itself failed (fails soft, see
+        // executionService.js - the BUY still succeeded either way).
+        let actualSolSpent = null;
+        let entryTxSignature = null;
+        let entryBlockTime = null;
 
         if(liveOptions){
 
@@ -199,6 +228,13 @@ function createTradeManager(repository, liveOptions = null){
             }
 
             executionId = result.executionId;
+            entryTxSignature = result.txHash ?? null;
+            // solDeltaLamports is negative for a BUY (SOL left the
+            // wallet) - actual_sol_spent is stored as a positive amount.
+            if(result.actualAmounts?.solDeltaLamports != null){
+                actualSolSpent = Math.abs(result.actualAmounts.solDeltaLamports) / 1e9;
+            }
+            entryBlockTime = result.actualAmounts?.blockTime ?? null;
 
         }
 
@@ -272,6 +308,11 @@ function createTradeManager(repository, liveOptions = null){
             stopLossMarketCap: riskBands.stopLoss.marketCap,
             lastVolume1h: token.volume_1h != null ? Number(token.volume_1h) : null,
             executionId,
+            // Arjuna V4 (Sprint 11), Part 2: real trade accounting -
+            // null for SIMULATION, real for a confirmed LIVE BUY.
+            actualSolSpent,
+            entryTxSignature,
+            entryBlockTime,
             breakdownJson,
             // Live Decision Center sprint: this cycle's own real
             // Opportunity Priority rank (tradingBotEngine.js's
@@ -325,9 +366,21 @@ function createTradeManager(repository, liveOptions = null){
     // below.
     async function finalizeClose(position, exitPrice, reason, config, options = {}){
 
-        const roiPct = ((exitPrice / position.entry_price) - 1) * 100;
+        // computeRoiPct - the generic ratio, snapshot-based. This is
+        // still the "legacy" roi_pct column (kept for backward
+        // compatibility/analytic display, Part 2 explicitly allows it) -
+        // NEVER the official realized_roi_pct, computed further below.
+        const roiPct = computeRoiPct(position.entry_price, exitPrice);
         const feeUsd = position.size_usd * ((config.fee_pct || FEE_PCT_DEFAULT) / 100) * 2; // entry + exit
         const durationSeconds = Math.round((Date.now() - new Date(`${String(position.opened_at).replace(" ", "T")}Z`).getTime()) / 1000);
+
+        // Arjuna V4 (Sprint 11), Part 1: the OFFICIAL, recorded ROI.
+        // realizedSpent/realizedReceived/realizedRoiPct/roiVersion are
+        // filled in below, once the real (or simulated) exit outcome is
+        // known - never from exitPrice/entry_price.
+        let actualSolReceived = null;
+        let exitTxSignature = null;
+        let exitBlockTime = null;
 
         // ---- Real execution (Founder Trading Wallet only). Selling the
         // REAL on-chain token balance, not a re-derived USD estimate -
@@ -357,7 +410,14 @@ function createTradeManager(repository, liveOptions = null){
                 // { closed: false } comes back and this must NOT log a
                 // second, misleading "position closed" line for an
                 // action that didn't actually happen here.
-                const outcome = repository.closePosition(position, { exitPrice, roiPct: 0, feeUsd: 0, slippagePct: 0, durationSeconds, reason: `${reason}_NO_REAL_BALANCE` });
+                const outcome = repository.closePosition(position, {
+                    exitPrice, roiPct: 0, feeUsd: 0, slippagePct: 0, durationSeconds, reason: `${reason}_NO_REAL_BALANCE`,
+                    // Arjuna V4, Part 1: genuinely nothing real to record -
+                    // no SOL changed hands in THIS call (whatever balance
+                    // existed is already gone), never fabricate a realized
+                    // figure for it.
+                    realizedRoiPct: 0, roiVersion: "v1_no_real_balance"
+                });
                 if(!outcome.closed){
                     return { closed: false, reason: "ALREADY_CLOSED" };
                 }
@@ -390,7 +450,34 @@ function createTradeManager(repository, liveOptions = null){
 
             closeExecutionId = result.executionId;
             txHash = result.txHash ?? null;
+            exitTxSignature = result.txHash ?? null;
+            exitBlockTime = result.actualAmounts?.blockTime ?? null;
+            // solDeltaLamports is positive for a SELL (SOL arrived).
+            if(result.actualAmounts?.solDeltaLamports != null){
+                actualSolReceived = result.actualAmounts.solDeltaLamports / 1e9;
+            }
 
+        }
+
+        // Arjuna V4 (Sprint 11), Part 1: the official realized ROI.
+        //   - Real on-chain data exists (LIVE, both sides read
+        //     successfully) -> real actual SOL, roi_version='v1_onchain'.
+        //   - Otherwise (SIMULATION, or a LIVE trade whose balance read
+        //     failed) -> falls back to the same real, already-computed
+        //     snapshot roiPct above, roi_version='v1_simulated' /
+        //     'v1_price_fallback' - honestly labeled provenance, never
+        //     silently blended with genuine on-chain numbers.
+        const actualSolSpentForThisClose = proratedActualSolSpent(position, position.size_usd);
+        let realizedPnlSol = null, realizedRoiPct = null, roiVersion;
+        if(actualSolSpentForThisClose != null && actualSolReceived != null){
+            const realized = computeRealizedRoi({ spent: actualSolSpentForThisClose, received: actualSolReceived });
+            realizedPnlSol = realized.realizedPnl;
+            realizedRoiPct = realized.realizedRoiPct;
+            roiVersion = "v1_onchain";
+        }
+        else{
+            realizedRoiPct = roiPct;
+            roiVersion = liveOptions ? "v1_price_fallback" : "v1_simulated";
         }
 
         // Production Stabilization V1 Final Sprint (Section I): same
@@ -408,7 +495,13 @@ function createTradeManager(repository, liveOptions = null){
             exitPrice, roiPct, feeUsd,
             slippagePct: config.slippage_pct || 0,
             durationSeconds, reason,
-            txHash, closeExecutionId
+            txHash, closeExecutionId,
+            // Arjuna V4 (Sprint 11), Part 1/2 - the official trade
+            // accounting fields.
+            actualSolSpent: actualSolSpentForThisClose, actualSolReceived,
+            realizedPnlSol, realizedRoiPct, roiVersion,
+            entryTxSignature: position.entry_tx_signature ?? null, exitTxSignature,
+            entryBlockTime: position.entry_block_time ?? null, exitBlockTime
 
         });
 
@@ -416,15 +509,20 @@ function createTradeManager(repository, liveOptions = null){
             return { closed: false, reason: "ALREADY_CLOSED" };
         }
 
+        // Arjuna V4 (Sprint 11), Part 7: the human-readable log line
+        // shows the OFFICIAL realized ROI (real on-chain for LIVE), never
+        // the legacy snapshot figure, so the dashboard's own activity
+        // feed never contradicts Trade History's realized_roi_pct.
+        const displayRoiPct = realizedRoiPct ?? roiPct;
         const kind = closeExecutionId ? "Real" : (options.skipBalanceCheck ? "Detected External" : "Virtual");
         repository.insertLog({
             logType: "SELL",
             tokenSymbol: position.token_symbol,
-            message: `${kind} SELL ${position.token_symbol} @ $${exitPrice} - ${reason} (${roiPct >= 0 ? "+" : ""}${roiPct.toFixed(2)}%)${closeExecutionId ? ` [execution #${closeExecutionId}]` : ""}`,
-            meta: { tokenAddress: position.token_address, reason, roiPct, feeUsd, closeExecutionId }
+            message: `${kind} SELL ${position.token_symbol} @ $${exitPrice} - ${reason} (${displayRoiPct >= 0 ? "+" : ""}${displayRoiPct.toFixed(2)}%)${closeExecutionId ? ` [execution #${closeExecutionId}]` : ""}`,
+            meta: { tokenAddress: position.token_address, reason, roiPct, realizedRoiPct, roiVersion, feeUsd, closeExecutionId }
         });
 
-        return { closed: true, reason, roiPct };
+        return { closed: true, reason, roiPct, realizedRoiPct, roiVersion };
 
     }
 
@@ -449,12 +547,15 @@ function createTradeManager(repository, liveOptions = null){
             return finalizeClose(position, exitPrice, reason, config);
         }
 
-        const roiPct = ((exitPrice / position.entry_price) - 1) * 100;
+        const roiPct = computeRoiPct(position.entry_price, exitPrice);
         const sellSizeUsd = position.size_usd * sellFraction;
         const feeUsd = sellSizeUsd * ((config.fee_pct || FEE_PCT_DEFAULT) / 100) * 2;
 
         let closeExecutionId = null;
         let txHash = null;
+        let actualSolReceived = null;
+        let exitTxSignature = null;
+        let exitBlockTime = null;
 
         if(liveOptions){
 
@@ -489,11 +590,35 @@ function createTradeManager(repository, liveOptions = null){
 
             closeExecutionId = result.executionId;
             txHash = result.txHash ?? null;
+            exitTxSignature = result.txHash ?? null;
+            exitBlockTime = result.actualAmounts?.blockTime ?? null;
+            if(result.actualAmounts?.solDeltaLamports != null){
+                actualSolReceived = result.actualAmounts.solDeltaLamports / 1e9;
+            }
 
         }
 
+        // Arjuna V4 (Sprint 11), Part 1 - same official-ROI logic as
+        // finalizeClose, prorated to only the SOLD portion.
+        const actualSolSpentForThisSell = proratedActualSolSpent(position, sellSizeUsd);
+        let realizedPnlSol = null, realizedRoiPct = null, roiVersion;
+        if(actualSolSpentForThisSell != null && actualSolReceived != null){
+            const realized = computeRealizedRoi({ spent: actualSolSpentForThisSell, received: actualSolReceived });
+            realizedPnlSol = realized.realizedPnl;
+            realizedRoiPct = realized.realizedRoiPct;
+            roiVersion = "v1_onchain";
+        }
+        else{
+            realizedRoiPct = roiPct;
+            roiVersion = liveOptions ? "v1_price_fallback" : "v1_simulated";
+        }
+
         const outcome = repository.partialClosePosition(position, {
-            exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId
+            exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId,
+            actualSolSpent: actualSolSpentForThisSell, actualSolReceived,
+            realizedPnlSol, realizedRoiPct, roiVersion,
+            entryTxSignature: position.entry_tx_signature ?? null, exitTxSignature,
+            entryBlockTime: position.entry_block_time ?? null, exitBlockTime
         });
 
         if(!outcome.applied){
@@ -505,22 +630,27 @@ function createTradeManager(repository, liveOptions = null){
             return { closed: false, reason: "ALREADY_PROCESSED" };
         }
 
+        const displayRoiPct = realizedRoiPct ?? roiPct;
         const kind = closeExecutionId ? "Real" : "Virtual";
         repository.insertLog({
             logType: "SELL",
             tokenSymbol: position.token_symbol,
-            message: `${kind} PARTIAL SELL (${Math.round(sellFraction * 100)}%) ${position.token_symbol} @ $${exitPrice} - ${reason} (${roiPct >= 0 ? "+" : ""}${roiPct.toFixed(2)}%)${closeExecutionId ? ` [execution #${closeExecutionId}]` : ""}`,
-            meta: { tokenAddress: position.token_address, reason, roiPct, feeUsd, sellSizeUsd, closeExecutionId }
+            message: `${kind} PARTIAL SELL (${Math.round(sellFraction * 100)}%) ${position.token_symbol} @ $${exitPrice} - ${reason} (${displayRoiPct >= 0 ? "+" : ""}${displayRoiPct.toFixed(2)}%)${closeExecutionId ? ` [execution #${closeExecutionId}]` : ""}`,
+            meta: { tokenAddress: position.token_address, reason, roiPct, realizedRoiPct, roiVersion, feeUsd, sellSizeUsd, closeExecutionId }
         });
 
-        return { closed: false, partiallyClosed: true, reason, roiPct, sellSizeUsd };
+        return { closed: false, partiallyClosed: true, reason, roiPct, realizedRoiPct, roiVersion, sellSizeUsd };
 
     }
 
     async function closeIfDue(position, token, config){
 
         const currentPriceNow = Number(token.price) || position.current_price || position.entry_price;
-        const roiSoFarPct = ((currentPriceNow / position.entry_price) - 1) * 100;
+        // Arjuna V4, Part 4: MFE/MAE tracking is a TRIGGER/observability
+        // concern, not a recorded settlement - snapshot-based is
+        // explicitly still allowed here. Routed through the shared
+        // computeRoiPct helper for DRY, same formula as before.
+        const roiSoFarPct = computeRoiPct(position.entry_price, currentPriceNow);
         const mfePctNow = Math.max(position.mfe_pct || 0, roiSoFarPct);
         const maePctNow = Math.min(position.mae_pct || 0, roiSoFarPct);
         const volume1hNow = token.volume_1h != null ? Number(token.volume_1h) : position.last_volume_1h;

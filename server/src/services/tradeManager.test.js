@@ -665,7 +665,7 @@ function healthyToken(overrides = {}){
     };
 }
 
-test("closeIfDue: TP1 (+25%) sells 50%, keeps the position OPEN with a reduced size, stamps tp1_hit_at, and inserts a real partial trade row", async () => {
+test("closeIfDue: TP1 (+25%) sells 80% (Arjuna V4, Part 3), keeps the position OPEN with a reduced size, stamps tp1_hit_at, and inserts a real partial trade row", async () => {
 
     const testEmail = `tradermanager.test.tp1.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -695,15 +695,15 @@ test("closeIfDue: TP1 (+25%) sells 50%, keeps the position OPEN with a reduced s
 
         const updated = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         assert.equal(updated.status, "OPEN", "TP1 must never close the position");
-        assert.equal(updated.size_usd, 5, "50% of the original $10 size must remain");
+        assert.equal(updated.size_usd, 2, "80% of the original $10 size must be sold - $2 (Free Ride Mode) remains");
         assert.equal(updated.initial_size_usd, 10, "the original size must never change");
         assert.ok(updated.tp1_hit_at, "tp1_hit_at must be stamped");
         assert.equal(updated.tp1_price, 1.25);
-        assert.ok(updated.realized_pnl_usd > 0, "the sold 50% at +25% must lock in a real positive realized PnL");
+        assert.ok(updated.realized_pnl_usd > 0, "the sold 80% at +25% must lock in a real positive realized PnL");
 
         const partialTrade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'TP1'").get(userId);
         assert.ok(partialTrade, "the sold portion must be recorded as its own real trade row");
-        assert.equal(partialTrade.size_usd, 5);
+        assert.equal(partialTrade.size_usd, 8);
         assert.equal(partialTrade.exit_classification, "PARTIAL_TP1");
 
     }
@@ -732,20 +732,20 @@ test("closeIfDue: TP1 does not re-fire on a position that already has tp1_hit_at
         const config = tradingBotRepository.getConfig(userId);
         const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
 
-        // Manually put the position into a post-TP1 state (as if a prior
-        // cycle already ran TP1), then re-check at the same +25% price -
-        // must NOT sell another 50%.
-        db.prepare("UPDATE trading_bot_positions SET tp1_hit_at = CURRENT_TIMESTAMP, tp1_price = 1.25, size_usd = 5 WHERE id = ?").run(positionId);
+        // Manually put the position into a post-TP1 (Free Ride Mode)
+        // state (as if a prior cycle already ran TP1), then re-check at
+        // the same +25% price - must NOT sell another 80%.
+        db.prepare("UPDATE trading_bot_positions SET tp1_hit_at = CURRENT_TIMESTAMP, tp1_price = 1.25, size_usd = 2 WHERE id = ?").run(positionId);
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
 
-        const token = healthyToken({ price: 1.25, price_change_5m: 1 }); // still +25% remaining ROI - above 15% floor, below 50% second target
+        const token = healthyToken({ price: 1.25, price_change_5m: 1 }); // still +25% remaining ROI - below TP2 (100%), timer not expired
         const result = await tm.closeIfDue(position, token, config);
 
         assert.equal(result.closed, false);
         assert.notEqual(result.partiallyClosed, true);
 
         const updated = db.prepare("SELECT size_usd FROM trading_bot_positions WHERE id = ?").get(positionId);
-        assert.equal(updated.size_usd, 5, "size must be unchanged - no second partial sell");
+        assert.equal(updated.size_usd, 2, "size must be unchanged - no second partial sell");
 
     }
     finally{
@@ -754,9 +754,9 @@ test("closeIfDue: TP1 does not re-fire on a position that already has tp1_hit_at
 
 });
 
-test("closeIfDue: Step 6 Profit Protection closes the remaining 50% after TP1 when profit drops below +15%", async () => {
+test("closeIfDue: Free Ride Mode holds through a real pullback (no Profit Protection step anymore), then TP2 (+100%) closes the remainder", async () => {
 
-    const testEmail = `tradermanager.test.profitprotect.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const testEmail = `tradermanager.test.tp2.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
     assert.equal(registerResult.ok, true);
     const userId = registerResult.userId;
@@ -765,28 +765,37 @@ test("closeIfDue: Step 6 Profit Protection closes the remaining 50% after TP1 wh
 
         const positionId = tradingBotRepository.insertPosition(userId, {
             tokenAddress: "TestTokenArjunaV3Exit333", tokenSymbol: "AV3C",
-            entryPrice: 1.0, sizeUsd: 5, confidence: 60,
+            entryPrice: 1.0, sizeUsd: 2, confidence: 60,
             exitStrategy: "dynamicExit", engineVersion: "production_v2",
             targetPrice: 2, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
         });
         db.prepare("UPDATE trading_bot_positions SET tp1_hit_at = CURRENT_TIMESTAMP, tp1_price = 1.25, initial_size_usd = 10 WHERE id = ?").run(positionId);
-        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
 
         const config = tradingBotRepository.getConfig(userId);
         const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
 
-        const token = healthyToken({ price: 1.10 }); // dropped to +10%, below the 15% profit-protection floor
-        const result = await tm.closeIfDue(position, token, config);
+        // A real pullback to +10% must NOT close the Free Ride remainder -
+        // Arjuna V4 explicitly removed the old Profit Protection floor.
+        const pulledBackPosition = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        const holdResult = await tm.closeIfDue(pulledBackPosition, healthyToken({ price: 1.10 }), config);
+        assert.equal(holdResult.closed, false);
+
+        const stillOpen = db.prepare("SELECT status FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(stillOpen.status, "OPEN");
+
+        // TP2 at +100% closes the whole remainder.
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        const result = await tm.closeIfDue(position, healthyToken({ price: 2.00 }), config);
 
         assert.equal(result.closed, true);
-        assert.equal(result.reason, "PROFIT_PROTECTION");
+        assert.equal(result.reason, "TP2");
 
         const closedPosition = db.prepare("SELECT status FROM trading_bot_positions WHERE id = ?").get(positionId);
         assert.equal(closedPosition.status, "CLOSED");
 
-        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'PROFIT_PROTECTION'").get(userId);
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'TP2'").get(userId);
         assert.ok(trade);
-        assert.equal(trade.exit_classification, "NORMAL"); // a real, positive-ROI close, no meaningful peak to fail
+        assert.equal(trade.exit_classification, "NORMAL");
 
     }
     finally{
@@ -907,6 +916,159 @@ test("Part 13 MUPP: an ordinary loss with no real unrealized peak is classified 
         const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
         assert.equal(trade.mfe_pct, 2);
         assert.equal(trade.exit_classification, "BAD_ENTRY");
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// =====================================
+// Arjuna V4 (Sprint 11), Part 1/2 - real ROI accounting end to end.
+// The core of the sprint: a LIVE round trip's realized_roi_pct comes
+// from real actualAmounts (never token.price), a SIMULATION trade falls
+// back honestly (roi_version='v1_simulated'), and every consumer reads
+// the SAME realized_roi_pct field regardless of which path produced it.
+// =====================================
+
+test("LIVE round trip: realized_roi_pct comes from REAL SOL amounts, not the snapshot price ratio - proves Trade B's exact real-world shape (snapshot says -31%, real chain says ~breakeven)", async () => {
+
+    const testEmail = `tradermanager.test.realroi.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const liveOptions = {
+            userId, walletPublicKey: "FakeWalletRealRoi111",
+            convertUsdToLamports: async () => ({ lamports: 34_814_000, solUsdPrice: 150 }),
+            executionService: {
+                async execute({ action }){
+                    if(action === "BUY"){
+                        return {
+                            executionId: 1, outcome: "SUCCESS", txHash: "buy-sig-real-roi",
+                            actualAmounts: { solDeltaLamports: -34_814_000, tokenDeltaUi: 1_000_000, blockTime: 1785000000, slot: 1 }
+                        };
+                    }
+                    // SELL - real chain result lands near breakeven, even
+                    // though the DECISION-time snapshot price used for
+                    // exitPrice below implies a much worse -31% ratio -
+                    // exactly the real Trade B mismatch this sprint exists
+                    // to fix.
+                    return {
+                        executionId: 2, outcome: "SUCCESS", txHash: "sell-sig-real-roi",
+                        actualAmounts: { solDeltaLamports: 34_700_000, tokenDeltaUi: -1_000_000, blockTime: 1785000600, slot: 2 }
+                    };
+                }
+            },
+            balanceService: { async getSplTokenBalance(){ return { amountRaw: "1000000", decimals: 6, uiAmount: 1 }; } }
+        };
+
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId), liveOptions);
+        const config = tradingBotRepository.getConfig(userId);
+
+        const token = { token_address: "TestTokenRealRoi111", symbol: "ROI", price: 0.001, market_cap: 100000, liquidity: 20000 };
+        const live = { action: "BUY", confidence: 60, hasDecision: true };
+        const openResult = await tm.openPosition(token, live, config, 100);
+        assert.equal(openResult.opened, true, `open must succeed for this test to mean anything (reason=${openResult.reason})`);
+
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(openResult.positionId);
+        assert.equal(position.entry_tx_signature, "buy-sig-real-roi");
+        assert.ok(Math.abs(position.actual_sol_spent - 0.034814) < 1e-9);
+
+        // exitPrice deliberately implies a snapshot-based roiPct far
+        // worse than reality (~-31%, matching the real Trade B report),
+        // to prove realized_roi_pct is NOT derived from it.
+        const badSnapshotExitPrice = 0.00069;
+        await tm.finalizeClose(position, badSnapshotExitPrice, "STOP_LOSS", config);
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.roi_version, "v1_onchain");
+        assert.ok(Math.abs(trade.actual_sol_spent - 0.034814) < 1e-9);
+        assert.ok(Math.abs(trade.actual_sol_received - 0.0347) < 1e-9);
+        assert.equal(trade.entry_tx_signature, "buy-sig-real-roi");
+        assert.equal(trade.exit_tx_signature, "sell-sig-real-roi");
+        assert.equal(trade.entry_block_time, 1785000000);
+        assert.equal(trade.exit_block_time, 1785000600);
+
+        // The legacy snapshot roi_pct is still ~-31% (proving the OLD
+        // number really would have been that wrong) - but realized_roi_pct
+        // must be near breakeven, from the real SOL amounts.
+        assert.ok(trade.roi_pct < -25, `legacy snapshot roi_pct should show the bad ratio, got ${trade.roi_pct}`);
+        assert.ok(Math.abs(trade.realized_roi_pct) < 2, `realized_roi_pct should be near breakeven (real SOL), got ${trade.realized_roi_pct}`);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("SIMULATION trade: realized_roi_pct falls back to the snapshot ratio, honestly tagged roi_version='v1_simulated' - never fabricates real SOL amounts", async () => {
+
+    const testEmail = `tradermanager.test.simroi.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenSimRoi111", tokenSymbol: "SIMROI", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.actual_sol_spent, null, "SIMULATION never has real SOL - must stay null, never fabricated");
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId)); // no liveOptions - SIMULATION
+        await tm.finalizeClose(position, 1.20, "TP2", config);
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.roi_version, "v1_simulated");
+        assert.equal(trade.actual_sol_spent, null);
+        assert.equal(trade.actual_sol_received, null);
+        assert.equal(trade.realized_pnl_sol, null);
+        // For SIMULATION, realized_roi_pct is IDENTICAL to the legacy
+        // snapshot roi_pct (same underlying values, just routed through
+        // the shared roiCalculator helper) - single source of truth,
+        // not two independently-drifting numbers.
+        assert.equal(trade.realized_roi_pct, trade.roi_pct);
+        assert.ok(Math.abs(trade.realized_roi_pct - 20) < 1e-9);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+test("dataset_version is stamped on every trade row (Arjuna V4, Part 6 - self-learning versioning)", async () => {
+
+    const testEmail = `tradermanager.test.datasetversion.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenDatasetVer111", tokenSymbol: "DVER", entryPrice: 1.0, sizeUsd: 10,
+            confidence: 55, exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 1.5, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        await tm.finalizeClose(position, 1.05, "TEST_CLOSE", config);
+
+        const trade = db.prepare("SELECT dataset_version, engine_version FROM trading_bot_trades WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(userId);
+        assert.equal(trade.dataset_version, "v2_realized_roi");
+        assert.equal(trade.engine_version, "production_v2");
 
     }
     finally{

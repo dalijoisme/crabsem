@@ -360,13 +360,15 @@ const insertPositionStmt = db.prepare(`
         confidence, exit_strategy, engine_version,
         target_price, target_market_cap, stop_loss_price, stop_loss_market_cap,
         last_volume_1h, status, execution_id, breakdown_json,
-        rank_at_entry, priority_score_at_entry, risk, siblings_json, config_snapshot_json
+        rank_at_entry, priority_score_at_entry, risk, siblings_json, config_snapshot_json,
+        actual_sol_spent, entry_tx_signature, entry_block_time
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @entryPrice, @sizeUsd, @sizeUsd,
         @confidence, @exitStrategy, @engineVersion,
         @targetPrice, @targetMarketCap, @stopLossPrice, @stopLossMarketCap,
         @lastVolume1h, 'OPEN', @executionId, @breakdownJson,
-        @rankAtEntry, @priorityScoreAtEntry, @risk, @siblingsJson, @configSnapshotJson
+        @rankAtEntry, @priorityScoreAtEntry, @risk, @siblingsJson, @configSnapshotJson,
+        @actualSolSpent, @entryTxSignature, @entryBlockTime
     )
 `);
 
@@ -378,11 +380,14 @@ const insertPositionStmt = db.prepare(`
 // ab-test caller (whose signal stubs never set
 // live.breakdown/rankAtEntry/risk/siblings, and whose config isn't a real
 // trading_bot_config row) keeps writing null, exactly as before either
-// column existed.
+// column existed. actualSolSpent/entryTxSignature/entryBlockTime
+// (Arjuna V4, Sprint 11, Part 2) follow the same convention - null for
+// SIMULATION/benchmark/ab-test, real for a confirmed LIVE BUY.
 function insertPosition(userId, row){
     const info = insertPositionStmt.run({
         lastVolume1h: null, executionId: null, breakdownJson: null,
         rankAtEntry: null, priorityScoreAtEntry: null, risk: null, siblingsJson: null, configSnapshotJson: null,
+        actualSolSpent: null, entryTxSignature: null, entryBlockTime: null,
         ...row, userId
     });
     return info.lastInsertRowid;
@@ -439,40 +444,56 @@ const insertTradeStmt = db.prepare(`
         engine_version, opened_at, closed_at, tx_hash, open_execution_id, close_execution_id, position_id,
         confidence, participant_score, market_health, token_age_minutes_at_entry,
         holders_at_entry, liquidity_at_entry, volume_1h_at_entry, smart_money_metrics_json,
-        entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification
+        entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification,
+        actual_sol_spent, actual_sol_received, realized_pnl_sol, realized_roi_pct,
+        entry_tx_signature, exit_tx_signature, entry_block_time, exit_block_time,
+        roi_version, dataset_version
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
         @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason,
         @engineVersion, @openedAt, CURRENT_TIMESTAMP, @txHash, @openExecutionId, @closeExecutionId, @positionId,
         @confidence, @participantScore, @marketHealth, @tokenAgeMinutesAtEntry,
         @holdersAtEntry, @liquidityAtEntry, @volume1hAtEntry, @smartMoneyMetricsJson,
-        @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification
+        @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification,
+        @actualSolSpent, @actualSolReceived, @realizedPnlSol, @realizedRoiPct,
+        @entryTxSignature, @exitTxSignature, @entryBlockTime, @exitBlockTime,
+        @roiVersion, @datasetVersion
     )
 `);
 
-// Arjuna V3 (FINAL SPRINT), Part 13 - Maximum Unrealized Profit
-// Protection (MUPP): a trade that reached a real, meaningful unrealized
-// peak (mfePct) but gave most of it back before/at exit is an
+// Arjuna V4 (Sprint 11), Part 6 - self-learning dataset schema version.
+// v1 (Arjuna V3, Part 12) had no real ROI accounting at all - roi_pct
+// was always snapshot-price-based, with no way to tell. v2 adds the
+// full real-vs-simulated ROI distinction (realized_roi_pct/roi_version)
+// - any future consumer of this table (Self Learning, Dataset Builder)
+// MUST branch on dataset_version/roi_version rather than assume every
+// row means the same thing, per the final spec's explicit "jangan
+// dicampur" requirement.
+const DATASET_VERSION = "v2_realized_roi";
+
+// Arjuna V4 (Sprint 11), Part 13 - Maximum Unrealized Profit Protection
+// (MUPP), now driven by the OFFICIAL realized ROI (never the legacy
+// snapshot roi_pct): a trade that reached a real, meaningful unrealized
+// peak (mfePct) but gave most of it back before/at the REAL exit is an
 // "EXIT_FAILURE" - a bad EXIT, not a bad ENTRY (the entry genuinely
-// found a real winner; the exit failed to lock it in). Distinguished
-// from an ordinary loss (never had real upside to begin with) so future
-// analytics never conflate the two. 30%/40 points are a first-cut,
-// unvalidated starting point - like every other new threshold in this
-// codebase's history - meant to be re-checked once enough real trade
-// volume accumulates, not a final number.
-function classifyExit(mfePct, roiPct){
-    if(mfePct != null && mfePct >= 30 && roiPct <= mfePct - 40) return "EXIT_FAILURE";
-    if(roiPct < 0) return "BAD_ENTRY";
+// found a real winner; the exit failed to lock it in). 30%/40 points
+// are a first-cut, unvalidated starting point - like every other new
+// threshold in this codebase's history - meant to be re-checked once
+// enough real trade volume accumulates, not a final number.
+function classifyExit(mfePct, realizedRoiPct){
+    if(realizedRoiPct == null) return null; // no real verdict without a real/simulated ROI to classify
+    if(mfePct != null && mfePct >= 30 && realizedRoiPct <= mfePct - 40) return "EXIT_FAILURE";
+    if(realizedRoiPct < 0) return "BAD_ENTRY";
     return "NORMAL";
 }
 
-// Arjuna V3 (FINAL SPRINT), Part 12 - the permanent self-learning trade
-// dataset. Every field here is real and already-persisted on the
-// position (breakdown_json, written once at BUY time by
-// tradeManager.js's openPosition - never re-derived or guessed here) -
-// this just projects it onto the completed trade row so a future
-// analytics/ML pass never has to join back to trading_bot_positions or
-// re-parse JSON to answer "what did the engine know at entry."
+// Arjuna V3/V4 - the permanent self-learning trade dataset. Every field
+// here is real and already-persisted on the position (breakdown_json,
+// written once at BUY time by tradeManager.js's openPosition - never
+// re-derived or guessed here) - this just projects it onto the
+// completed trade row so a future analytics/ML pass never has to join
+// back to trading_bot_positions or re-parse JSON to answer "what did
+// the engine know at entry."
 function buildTradeDatasetFields(position){
     let breakdown = {};
     try{ breakdown = position.breakdown_json ? JSON.parse(position.breakdown_json) : {}; }
@@ -488,7 +509,8 @@ function buildTradeDatasetFields(position){
         smartMoneyMetricsJson: breakdown.breakdown?.participant?.smartMoney ? JSON.stringify(breakdown.breakdown.participant.smartMoney) : null,
         entryReasonsJson: breakdown.reasons ? JSON.stringify(breakdown.reasons) : null,
         riskReasonsJson: breakdown.riskReasons ? JSON.stringify(breakdown.riskReasons) : null,
-        moduleScoresJson: breakdown.breakdown ? JSON.stringify(breakdown.breakdown) : null
+        moduleScoresJson: breakdown.breakdown ? JSON.stringify(breakdown.breakdown) : null,
+        datasetVersion: DATASET_VERSION
     };
 }
 
@@ -503,7 +525,19 @@ function buildTradeDatasetFields(position){
 // closePositionStmt's own `AND status = 'OPEN'`, checked here via
 // info.changes) - the trade row is only ever inserted once, by whichever
 // caller's UPDATE genuinely won the race, never by both.
-function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason, txHash, closeExecutionId }){
+// Arjuna V4 (Sprint 11), Part 1/2: actualSolSpent/actualSolReceived/
+// realizedPnlSol/realizedRoiPct/entryTxSignature/exitTxSignature/
+// entryBlockTime/exitBlockTime/roiVersion are new - tradeManager.js's
+// finalizeClose always computes and passes them (real for LIVE,
+// simulated-fallback for SIMULATION - never omitted), defaulted to null
+// here purely so any older/test caller that doesn't pass them yet never
+// throws.
+function closePosition(userId, position, {
+    exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason, txHash, closeExecutionId,
+    actualSolSpent = null, actualSolReceived = null, realizedPnlSol = null, realizedRoiPct = null,
+    entryTxSignature = null, exitTxSignature = null, entryBlockTime = null, exitBlockTime = null,
+    roiVersion = null
+}){
     let closed = false;
     const tx = db.transaction(() => {
         const info = closePositionStmt.run(position.id);
@@ -535,7 +569,10 @@ function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePc
             ...dataset,
             mfePct: position.mfe_pct ?? null,
             maePct: position.mae_pct ?? null,
-            exitClassification: classifyExit(position.mfe_pct, roiPct)
+            exitClassification: classifyExit(position.mfe_pct, realizedRoiPct ?? roiPct),
+            actualSolSpent, actualSolReceived, realizedPnlSol, realizedRoiPct,
+            entryTxSignature, exitTxSignature, entryBlockTime, exitBlockTime,
+            roiVersion
         });
     });
     tx();
@@ -552,16 +589,25 @@ function closePosition(userId, position, { exitPrice, roiPct, feeUsd, slippagePc
 const partialCloseStmt = db.prepare(`
     UPDATE trading_bot_positions
     SET size_usd = size_usd - @sellSizeUsd,
-        realized_pnl_usd = realized_pnl_usd + (@sellSizeUsd * @roiPct / 100.0) - @feeUsd,
+        realized_pnl_usd = realized_pnl_usd + (@sellSizeUsd * @realizedOrLegacyRoiPct / 100.0) - @feeUsd,
         tp1_hit_at = CURRENT_TIMESTAMP,
         tp1_price = @exitPrice
     WHERE id = @id AND status = 'OPEN' AND tp1_hit_at IS NULL
 `);
 
-function partialClosePosition(userId, position, { exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId }){
+function partialClosePosition(userId, position, {
+    exitPrice, roiPct, feeUsd, sellSizeUsd, sellFraction, reason, txHash, closeExecutionId,
+    actualSolSpent = null, actualSolReceived = null, realizedPnlSol = null, realizedRoiPct = null,
+    entryTxSignature = null, exitTxSignature = null, entryBlockTime = null, exitBlockTime = null,
+    roiVersion = null
+}){
     let applied = false;
     const tx = db.transaction(() => {
-        const info = partialCloseStmt.run({ id: position.id, sellSizeUsd, roiPct, feeUsd, exitPrice });
+        // Arjuna V4, Part 1: the position's own running realized_pnl_usd
+        // total should reflect the OFFICIAL ROI when a real one exists,
+        // never the legacy snapshot figure once something more accurate
+        // is available.
+        const info = partialCloseStmt.run({ id: position.id, sellSizeUsd, realizedOrLegacyRoiPct: realizedRoiPct ?? roiPct, feeUsd, exitPrice });
         applied = info.changes > 0;
         if(!applied) return; // already processed by a concurrent caller - never a duplicate partial sell/trade row
         const dataset = buildTradeDatasetFields(position);
@@ -589,7 +635,10 @@ function partialClosePosition(userId, position, { exitPrice, roiPct, feeUsd, sel
             // A partial TP1 sell locking in real profit is never itself
             // an "exit failure" or a "bad entry" classification - that
             // verdict belongs to the position's FINAL close only.
-            exitClassification: "PARTIAL_TP1"
+            exitClassification: "PARTIAL_TP1",
+            actualSolSpent, actualSolReceived, realizedPnlSol, realizedRoiPct,
+            entryTxSignature, exitTxSignature, entryBlockTime, exitBlockTime,
+            roiVersion
         });
     });
     tx();
@@ -753,20 +802,27 @@ function insertLog(userId, { logType, tokenSymbol, message, meta }){
     });
 }
 
-// realizedPnl is NET of fees (size_usd*roi_pct/100 - fee_usd per trade, summed) -
-// matches abTestRepository.js's summarize(), the one place in this codebase that
-// already got this right. totalFees is still reported separately for transparency,
-// but must never be added back into realizedPnl/availableCash/equity by a caller.
+// Arjuna V4 (Sprint 11), Part 1/7: every aggregate below now reads
+// COALESCE(realized_roi_pct, roi_pct) - the OFFICIAL ROI (real on-chain
+// for LIVE, honest simulated fallback otherwise) when it exists, falling
+// back to the legacy snapshot-based roi_pct ONLY for rows written before
+// migration 066 ever existed (Part 10/11 - old data is never dropped,
+// never recomputed, just naturally superseded by the more accurate
+// column going forward). realizedPnl is NET of fees (size_usd*roi/100 -
+// fee_usd per trade, summed) - matches abTestRepository.js's summarize(),
+// the one place in this codebase that already got this right. totalFees
+// is still reported separately for transparency, but must never be
+// added back into realizedPnl/availableCash/equity by a caller.
 function sumClosedTrades(userId){
     return db.prepare(`
         SELECT
             COUNT(*) as closedCount,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN 1 ELSE 0 END), 0) as winCount,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
-            COALESCE(SUM((size_usd * roi_pct / 100.0) - fee_usd), 0) as realizedPnl,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN 1 ELSE 0 END), 0) as winCount,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
+            COALESCE(SUM((size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) - fee_usd), 0) as realizedPnl,
             COALESCE(SUM(fee_usd), 0) as totalFees,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN (size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossWin,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN ABS(size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossLoss
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN (size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossWin,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN ABS(size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossLoss
         FROM trading_bot_trades
         WHERE user_id = ? AND closed_at IS NOT NULL
     `).get(userId);
@@ -784,12 +840,12 @@ function sumClosedTradesSince(userId, sinceTimestamp){
     return db.prepare(`
         SELECT
             COUNT(*) as closedCount,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN 1 ELSE 0 END), 0) as winCount,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
-            COALESCE(SUM((size_usd * roi_pct / 100.0) - fee_usd), 0) as realizedPnl,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN 1 ELSE 0 END), 0) as winCount,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
+            COALESCE(SUM((size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) - fee_usd), 0) as realizedPnl,
             COALESCE(SUM(fee_usd), 0) as totalFees,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN (size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossWin,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN ABS(size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossLoss
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN (size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossWin,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN ABS(size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossLoss
         FROM trading_bot_trades
         WHERE user_id = ? AND closed_at IS NOT NULL AND closed_at > ?
     `).get(userId, sinceTimestamp);

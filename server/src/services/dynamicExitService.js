@@ -1,34 +1,42 @@
-// services/dynamicExitService.js - Arjuna V3 (FINAL SPRINT), Part 10.
-// Exit is now a DETERMINISTIC state machine (Steps 1-7 of the final
-// spec), completely replacing the previous momentum-driven "ride the
-// winner while evidence supports it" philosophy:
+// services/dynamicExitService.js - Arjuna V4 (Sprint 11), Part 3. Exit
+// stays the deterministic state machine Arjuna V3 introduced, with the
+// FINAL numbers/steps below (wholesale replacement of V3's TP1/Second-
+// Target/Profit-Protection values - the state-machine MECHANISM is
+// unchanged):
 //   1. Hard Stop Loss -20% (fixed, computed from the position's own
 //      entry_price - independent of tradePlanService's separate dynamic
 //      stop-loss band, which still governs the "AI Trade Plan" display
-//      only and is untouched by this file).
-//   2. TP1 at +25% ROI -> sell 50% unconditionally.
+//      only and is untouched by this file). Unconditional - covers both
+//      the full pre-TP1 position and the post-TP1 remainder.
+//   2. TP1 at +25% ROI -> sell 80% unconditionally (capital protection
+//      is the primary goal, not maximizing profit).
 //   3. A 5-minute timer starts the instant TP1 fires.
-//   4. Second Target: remaining position reaches +50% ROI -> sell all.
-//   5. Time Exit: timer expires (5 min since TP1) and price never
-//      reached +40% ROI -> sell the remainder.
-//   6. Profit Protection: after TP1, remaining profit drops below +15%
-//      -> sell the remainder immediately, no trailing, no waiting.
-//   7. Emergency Exit: Momentum Health (unchanged machinery, computeMomentumHealth
-//      below) is now ONLY a backstop for severe structural collapse -
-//      checked every cycle, can fire at ANY point (even pre-TP1,
-//      overriding everything else) but never drives a normal exit
-//      anymore.
+//   4/5. Free Ride Mode - the remaining 20% rides with NO intermediate
+//      profit-protection floor: TP2 at +100% sells the entire remainder;
+//      otherwise Time Exit sells the remainder unconditionally once the
+//      Step 3 timer expires (a pure timer fallback, not another profit
+//      floor - that would defeat "free ride").
+//   6. Emergency Exit: Momentum Health (unchanged machinery,
+//      computeMomentumHealth below) remains ONLY a backstop for severe
+//      structural collapse - checked every cycle, can fire at ANY point
+//      (even pre-TP1, overriding everything else) but never drives a
+//      normal exit.
 // Every number above lives in config/exitSystemConfig.js - this file
 // owns the state-machine logic only. Returns { action: "HOLD" |
 // "SELL_PARTIAL" | "SELL_ALL", sellFraction, reason, currentPrice,
 // roiPct, momentumHealth } - tradeManager.js's closeIfDue interprets
-// SELL_PARTIAL as a new partialClose() call (position stays OPEN with a
-// reduced size) and SELL_ALL as the existing finalizeClose().
+// SELL_PARTIAL as a partialClose() call (position stays OPEN with a
+// reduced size) and SELL_ALL as finalizeClose().
 
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
 const momentumHealthConfig = require("../config/momentumHealthConfig");
 const syntheticMarketFilterService = require("./syntheticMarketFilterService");
 const exitConfig = require("../config/exitSystemConfig");
+// Arjuna V4 (Sprint 11), Part 1/4: THE single ROI formula - this file's
+// own roiPct is a TRIGGER (when to sell), explicitly still allowed to
+// be snapshot-based (Part 4), but must still call the SAME shared
+// helper everything else does, never its own inline copy of the formula.
+const { computeRoiPct } = require("./roiCalculator");
 
 // tradingBotEngine.js's isInProfitProtectionTerritory reads this to
 // decide when a held position needs its on-demand realtime price
@@ -186,7 +194,7 @@ function computeMomentumHealth(token, position, trenchesEntry){
 function evaluateDynamicExit({ position, token, trenchesEntry }){
 
     const currentPrice = Number(token.price) || position.current_price || position.entry_price;
-    const roiPct = ((currentPrice / position.entry_price) - 1) * 100;
+    const roiPct = computeRoiPct(position.entry_price, currentPrice);
     const contextStale = Boolean(token.marketContextStale);
 
     // Step 7 (Emergency Exit) - computed and logged on EVERY evaluation,
@@ -222,7 +230,7 @@ function evaluateDynamicExit({ position, token, trenchesEntry }){
 
     if(!tp1Hit){
 
-        // Step 2/3 - TP1: at +25% ROI, sell 50% unconditionally and
+        // Step 2/3 - TP1: at +25% ROI, sell 80% unconditionally and
         // start the 5-minute timer (tradeManager.js's partialClose
         // stamps tp1_hit_at/tp1_price - this function only decides WHEN
         // to trigger it).
@@ -235,32 +243,26 @@ function evaluateDynamicExit({ position, token, trenchesEntry }){
 
     }
 
-    // Post-TP1 state machine - Steps 4/5/6.
+    // Free Ride Mode (post-TP1) - Steps 4/5. The remaining 20% has NO
+    // intermediate profit-protection floor - only TP2 or the timer
+    // decide its fate, deliberately, so it can genuinely "free ride".
 
-    // Step 4 - Second Target: remaining position reaches +50% ROI ->
-    // sell everything left. Checked before Step 6's profit-protection
-    // floor since it's the more decisive exit.
-    if(roiPct >= exitConfig.secondTargetPct){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=SECOND_TARGET roiPct=${roiPct.toFixed(2)}`);
-        return { action: "SELL_ALL", sellFraction: 1, reason: "SECOND_TARGET", currentPrice, roiPct, momentumHealth };
+    // Step 4 - TP2: remaining position reaches +100% ROI -> sell
+    // everything left.
+    if(roiPct >= exitConfig.tp2Pct){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=TP2 roiPct=${roiPct.toFixed(2)}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "TP2", currentPrice, roiPct, momentumHealth };
     }
 
-    // Step 6 - Profit Protection: remaining profit drops below +15% ->
-    // sell immediately. No trailing, no waiting.
-    if(roiPct < exitConfig.profitProtectionFloorPct){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=PROFIT_PROTECTION roiPct=${roiPct.toFixed(2)}`);
-        return { action: "SELL_ALL", sellFraction: 1, reason: "PROFIT_PROTECTION", currentPrice, roiPct, momentumHealth };
-    }
-
-    // Step 5 - Time Exit: 5-minute timer (since TP1) expired and price
-    // never reached +40% ROI - checked against the position's own real
-    // mfe_pct (highest ROI ever actually reached), never re-derived.
+    // Step 5 - Time Exit: the 5-minute timer (since TP1) expired and TP2
+    // hasn't fired yet - sell the remainder unconditionally, regardless
+    // of its ROI at that moment. A pure timer fallback, not another
+    // profit floor (that would defeat Free Ride Mode).
     const minutesSinceTp1 = (Date.now() - new Date(`${String(position.tp1_hit_at).replace(" ", "T")}Z`).getTime()) / 60000;
     const timerExpired = minutesSinceTp1 >= exitConfig.timerMinutes;
-    const everReached40 = (position.mfe_pct ?? roiPct) >= exitConfig.timeExitRequiredPct;
 
-    if(timerExpired && !everReached40){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=TIME_EXIT mfePct=${position.mfe_pct}`);
+    if(timerExpired){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=TIME_EXIT roiPct=${roiPct.toFixed(2)}`);
         return { action: "SELL_ALL", sellFraction: 1, reason: "TIME_EXIT", currentPrice, roiPct, momentumHealth };
     }
 

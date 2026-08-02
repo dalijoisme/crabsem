@@ -37,6 +37,13 @@ const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradi
 // "Dynamic State" label - never re-implements or re-evaluates the real
 // exit decision itself (that stays in tradeManager.js's closeIfDue).
 const { MIN_TP_PCT } = require("./dynamicExitService");
+// Arjuna V4 (Sprint 11), Part 1: THE single ROI formula - used here only
+// for an OPEN position's live unrealized-ROI display (there is no
+// "realized" ROI for a position that hasn't sold yet, by definition;
+// this is the same TRIGGER-side snapshot math dynamicExitService.js
+// itself uses, routed through the shared helper for DRY, not a second
+// implementation).
+const { computeRoiPct } = require("./roiCalculator");
 const { buildSolanaTxUrl } = require("../utils/explorerUrl");
 // Read-only constants (mismatchPenaltyPerPoint/maxCompletenessPenalty) -
 // Position Detail's Confidence Breakdown recomputes computeConfidence()'s
@@ -635,18 +642,27 @@ function computeSiblingComparison(position, siblings){
 // Self-Audit / Performance Report (Momentum Validation System sprint):
 // every real close reason ever written to trading_bot_trades.reason,
 // categorized - zero new engine logic, purely a GROUP BY of already-real
-// data. MOMENTUM_WEAKENING is CRAB's real "took profit" path (TP15 is a
-// floor, not a ceiling, so the position only closes once momentum fails
-// ABOVE the 15% floor) - classified TP when roi_pct >= 15, otherwise a
-// Dynamic-Exit reversal (momentum died before reaching the floor). The
-// `_NO_REAL_BALANCE` suffix (a different, pre-existing case: "we decided
-// to sell but there was nothing there") is stripped before categorizing,
-// so it's never double-counted as its own bucket.
+// data. MOMENTUM_WEAKENING/SECOND_TARGET/PROFIT_PROTECTION are legacy
+// reason strings from the pre-Arjuna-V4 exit philosophies (Sprint 10 and
+// earlier) - never produced by the current engine, but real historical
+// trades still carry them and must keep categorizing exactly as before
+// (Part 10/11 - old data is never reinterpreted). TP1/TP2/PARTIAL_TP1
+// (Arjuna V4, Part 3) are the current engine's own real take-profit
+// reasons; TIME_EXIT's classification depends on where the remaining
+// ROI actually landed, same "roiPct >= 15 -> TP" convention the legacy
+// MOMENTUM_WEAKENING case already used. The `_NO_REAL_BALANCE` suffix (a
+// different, pre-existing case: "we decided to sell but there was
+// nothing there") is stripped before categorizing, so it's never
+// double-counted as its own bucket. roiPct here is the OFFICIAL
+// realized_roi_pct (falling back to legacy roi_pct only for pre-Sprint-11
+// rows) - Part 1/7's single source of truth, never a second computation.
 function categorizeCloseReason(rawReason, roiPct){
     const reason = String(rawReason).replace(/_NO_REAL_BALANCE$/, "");
     if(reason === "STOP_LOSS") return "SL";
     if(reason === "REVERSAL") return "DYNAMIC_EXIT";
-    if(reason === "MOMENTUM_WEAKENING") return (roiPct ?? 0) >= 15 ? "TP" : "DYNAMIC_EXIT";
+    if(reason === "MOMENTUM_WEAKENING" || reason === "TIME_EXIT") return (roiPct ?? 0) >= 15 ? "TP" : "DYNAMIC_EXIT";
+    if(reason === "TP1" || reason === "TP2" || reason === "PARTIAL_TP1" || reason === "SECOND_TARGET" || reason === "PROFIT_PROTECTION") return "TP";
+    if(reason === "MOMENTUM_HEALTH_EMERGENCY" || reason === "MOMENTUM_HEALTH_BREAKDOWN") return "DYNAMIC_EXIT";
     if(reason === "SELL_MANUAL") return "MANUAL";
     if(reason === "SELL_EXTERNAL") return "EXTERNAL";
     if(reason.startsWith("RUG_DETECTED")) return "RUG";
@@ -700,7 +716,7 @@ function getSelfAudit(userId, hours = 24){
     const closed = trades.length;
 
     const counts = { TP: 0, SL: 0, DYNAMIC_EXIT: 0, MANUAL: 0, EXTERNAL: 0, RUG: 0, OTHER: 0 };
-    for(const t of trades) counts[categorizeCloseReason(t.reason, t.roi_pct)]++;
+    for(const t of trades) counts[categorizeCloseReason(t.reason, t.realized_roi_pct ?? t.roi_pct)]++;
 
     const durations = trades.map(t => t.duration_seconds).filter(d => d != null);
     const avgHoldingTimeSeconds = durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null;
@@ -997,7 +1013,7 @@ function getMomentumKpi(userId){
 function getOpenPositions(userId){
     const config = tradingBotRepository.getConfig(userId);
     return tradingBotRepository.findOpenPositions(userId).map(p => {
-        const roiPct = p.current_price != null ? ((p.current_price / p.entry_price) - 1) * 100 : null;
+        const roiPct = p.current_price != null ? computeRoiPct(p.entry_price, p.current_price) : null;
         const dynamicState = roiPct == null ? "AWAITING_PRICE_DATA" : (roiPct < MIN_TP_PCT ? "BELOW_TARGET" : "TRAILING_ABOVE_TARGET");
         const nextEvaluationAtEstimate = p.price_updated_at
             ? new Date(new Date(`${String(p.price_updated_at).replace(" ", "T")}Z`).getTime() + config.scan_interval_seconds * 1000).toISOString()
@@ -1130,7 +1146,7 @@ function getPositionDetail(userId, id){
         tokenSymbol: position.token_symbol,
         entryPrice: position.entry_price,
         currentPrice: position.current_price,
-        roiPct: position.current_price != null ? ((position.current_price / position.entry_price) - 1) * 100 : null,
+        roiPct: position.current_price != null ? computeRoiPct(position.entry_price, position.current_price) : null,
         sizeUsd: position.size_usd,
         confidence: position.confidence,
         exitStrategy: position.exit_strategy,
@@ -1192,11 +1208,25 @@ function getTrades(userId, limit){
         tokenSymbol: t.token_symbol,
         entryPrice: t.entry_price,
         exitPrice: t.exit_price,
-        roiPct: t.roi_pct,
+        // Arjuna V4 (Sprint 11), Part 1/7: the public `roiPct` field is
+        // UNCHANGED (Part 11 - no public API break), but its VALUE now
+        // comes from the official realized_roi_pct (real on-chain SOL for
+        // LIVE, honest simulated fallback otherwise) - falling back to
+        // the legacy snapshot roi_pct ONLY for rows written before
+        // migration 066 ever existed. realizedRoiPct/roiVersion/actual
+        // SOL fields are new, additive, for transparency/debugging.
+        roiPct: t.realized_roi_pct ?? t.roi_pct,
+        realizedRoiPct: t.realized_roi_pct,
+        roiVersion: t.roi_version,
+        actualSolSpent: t.actual_sol_spent,
+        actualSolReceived: t.actual_sol_received,
+        realizedPnlSol: t.realized_pnl_sol,
+        entryTxSignature: t.entry_tx_signature,
+        exitTxSignature: t.exit_tx_signature,
         // Section K (Trade History): real dollar PnL, not just ROI% - the
         // exact same net-of-fees formula sumClosedTrades() already uses
         // for the Portfolio's own realizedPnl, so the two can never drift.
-        profitUsd: t.size_usd != null && t.roi_pct != null ? (t.size_usd * (t.roi_pct / 100)) - t.fee_usd : null,
+        profitUsd: t.size_usd != null && (t.realized_roi_pct ?? t.roi_pct) != null ? (t.size_usd * ((t.realized_roi_pct ?? t.roi_pct) / 100)) - t.fee_usd : null,
         feeUsd: t.fee_usd,
         slippagePct: t.slippage_pct,
         durationSeconds: t.duration_seconds,
@@ -1379,7 +1409,11 @@ async function sellPosition(userId, positionId){
         closed: Boolean(result.closed),
         retrying: Boolean(result.retrying),
         reason: result.reason ?? null,
-        roiPct: result.roiPct ?? null
+        // Arjuna V4 (Sprint 11), Part 1/7: roiPct now prefers the
+        // official realized ROI (real on-chain for LIVE), falling back
+        // to the legacy snapshot figure - same convention as getTrades().
+        roiPct: result.realizedRoiPct ?? result.roiPct ?? null,
+        realizedRoiPct: result.realizedRoiPct ?? null
     };
 
 }

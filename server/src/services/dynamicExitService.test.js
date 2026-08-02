@@ -55,61 +55,53 @@ test("Below TP1 and above Stop Loss: holds", () => {
     assert.equal(result.action, "HOLD");
 });
 
-test("Step 2/3: TP1 at +25% sells 50% unconditionally, tp1_hit_at not yet set", () => {
+test("Step 2/3: TP1 at +25% sells 80% unconditionally (Arjuna V4, Part 3), tp1_hit_at not yet set", () => {
     const token = { ...healthyToken(), price: 1.25 };
     const result = evaluateDynamicExit({ position: position(), token, trenchesEntry: healthyTrenches() });
     assert.equal(result.action, "SELL_PARTIAL");
-    assert.equal(result.sellFraction, 0.5);
+    assert.equal(result.sellFraction, 0.8);
     assert.equal(result.reason, "TP1");
 });
 
-test("TP1 does not re-fire once tp1_hit_at is already set - the position moves to the post-TP1 state machine", () => {
+test("TP1 does not re-fire once tp1_hit_at is already set - the position moves to Free Ride Mode", () => {
     const token = { ...healthyToken(), price: 1.25 }; // still exactly at TP1 price
     const pos = position({ tp1_hit_at: "2026-08-02 00:00:00" });
     const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
     assert.notEqual(result.action, "SELL_PARTIAL");
 });
 
-test("Post-TP1, below profit-protection floor and below second target: holds", () => {
-    const token = { ...healthyToken(), price: 1.30 }; // +30%, above 15% floor, below 50% second target
+test("Free Ride Mode: post-TP1, below TP2 and timer not expired - holds with no intermediate profit floor", () => {
+    const token = { ...healthyToken(), price: 1.10 }; // even a real pullback to +10% must NOT force a sell - no Profit Protection step anymore
     const pos = position({ tp1_hit_at: new Date().toISOString().slice(0, 19).replace("T", " "), mfe_pct: 30 });
     const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
     assert.equal(result.action, "HOLD");
 });
 
-test("Step 4: Second Target at +50% (post-TP1) sells everything remaining", () => {
-    const token = { ...healthyToken(), price: 1.50 };
-    const pos = position({ tp1_hit_at: new Date().toISOString().slice(0, 19).replace("T", " "), mfe_pct: 50 });
+test("Step 4: TP2 at +100% (post-TP1) sells everything remaining", () => {
+    const token = { ...healthyToken(), price: 2.00 };
+    const pos = position({ tp1_hit_at: new Date().toISOString().slice(0, 19).replace("T", " "), mfe_pct: 100 });
     const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
     assert.equal(result.action, "SELL_ALL");
     assert.equal(result.sellFraction, 1);
-    assert.equal(result.reason, "SECOND_TARGET");
+    assert.equal(result.reason, "TP2");
 });
 
-test("Step 6: Profit Protection - post-TP1, remaining profit drops below +15% sells immediately, no trailing/waiting", () => {
-    const token = { ...healthyToken(), price: 1.10 }; // dropped back to +10%, below the 15% floor
-    const pos = position({ tp1_hit_at: new Date().toISOString().slice(0, 19).replace("T", " "), mfe_pct: 30 });
-    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
-    assert.equal(result.action, "SELL_ALL");
-    assert.equal(result.sellFraction, 1);
-    assert.equal(result.reason, "PROFIT_PROTECTION");
-});
-
-test("Step 5: Time Exit - timer expired (5min since TP1) and price never reached +40% sells the remainder", () => {
+test("Step 5: Time Exit - timer expired (5min since TP1) sells the remainder unconditionally, regardless of current ROI", () => {
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
-    const token = { ...healthyToken(), price: 1.20 }; // +20%, still above the 15% profit-protection floor
-    const pos = position({ tp1_hit_at: sixMinAgo, mfe_pct: 30 }); // real peak (30%) never reached 40%
+    const token = { ...healthyToken(), price: 1.20 }; // +20% remaining - well below TP2, timer alone decides
+    const pos = position({ tp1_hit_at: sixMinAgo, mfe_pct: 30 });
     const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
     assert.equal(result.action, "SELL_ALL");
     assert.equal(result.reason, "TIME_EXIT");
 });
 
-test("Step 5: Time Exit does NOT fire if price already reached +40% at some point (mfe_pct), even after the timer expires", () => {
+test("Step 5: Time Exit fires purely on the timer - even a real high mfe_pct that never quite reached TP2 does not save it", () => {
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
-    const token = { ...healthyToken(), price: 1.20 }; // currently +20%, above profit-protection floor
-    const pos = position({ tp1_hit_at: sixMinAgo, mfe_pct: 45 }); // real peak DID reach 40%+
+    const token = { ...healthyToken(), price: 1.20 };
+    const pos = position({ tp1_hit_at: sixMinAgo, mfe_pct: 95 }); // real peak got close to TP2 (100) but never reached it
     const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
-    assert.equal(result.action, "HOLD");
+    assert.equal(result.action, "SELL_ALL");
+    assert.equal(result.reason, "TIME_EXIT");
 });
 
 test("Step 5: Time Exit does NOT fire before the 5-minute timer has actually expired", () => {

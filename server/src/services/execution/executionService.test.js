@@ -118,6 +118,15 @@ function fakeLogger(){
     return { logTransition(){}, logError(id, message){ errors.push({ id, message }); }, logRpc(){}, errors };
 }
 
+// Arjuna V4 (Sprint 11), Part 1.
+function fakeBalanceReader(amounts = { solDeltaLamports: -34814000, tokenDeltaUi: 1000000, blockTime: 1785000000, slot: 42 }){
+    return { calls: 0, async readActualSwapAmounts(){ this.calls++; return amounts; } };
+}
+
+function throwingBalanceReader(message = "RPC hiccup"){
+    return { async readActualSwapAmounts(){ throw new Error(message); } };
+}
+
 function buildService(overrides = {}){
     const repository = overrides.repository ?? fakeRepository();
     return {
@@ -129,7 +138,8 @@ function buildService(overrides = {}){
             balanceService: overrides.balanceService ?? fakeBalanceService(),
             confirmationService: overrides.confirmationService ?? fakeConfirmationService(STATES.SUCCESS),
             transactionBuilder: overrides.transactionBuilder ?? fakeTransactionBuilder(),
-            logger: overrides.logger ?? fakeLogger()
+            logger: overrides.logger ?? fakeLogger(),
+            balanceReader: overrides.balanceReader
         })
     };
 }
@@ -150,6 +160,47 @@ test("full pipeline resolves SUCCESS and persists a real tx_hash", async () => {
     assert.equal(row.status, STATES.SUCCESS);
     assert.equal(row.tx_hash, "sig-abc");
     assert.equal(row.blockhash, "bh-1");
+});
+
+// =====================================
+// Arjuna V4 (Sprint 11), Part 1 - real on-chain balance-delta capture.
+// =====================================
+
+test("a real SUCCESS reads actual on-chain swap amounts via balanceReader, and returns them", async () => {
+    const reader = fakeBalanceReader();
+    const { service } = buildService({ balanceReader: reader });
+    const result = await service.execute({ userId: 1, walletPublicKey, action: "BUY", amountLamports: 1000, tokenAddress: "TokenMintABC" });
+
+    assert.equal(result.outcome, STATES.SUCCESS);
+    assert.equal(reader.calls, 1);
+    assert.deepEqual(result.actualAmounts, { solDeltaLamports: -34814000, tokenDeltaUi: 1000000, blockTime: 1785000000, slot: 42 });
+});
+
+test("a FAILED/TIMEOUT outcome never attempts a balance-delta read - there is no real settlement to read", async () => {
+    const reader = fakeBalanceReader();
+    const { service } = buildService({ balanceReader: reader, confirmationService: fakeConfirmationService(STATES.FAILED) });
+    const result = await service.execute({ userId: 1, walletPublicKey, action: "TEST_TRANSFER" });
+
+    assert.equal(result.outcome, STATES.FAILED);
+    assert.equal(reader.calls, 0);
+});
+
+test("a balance-delta read failure never turns an otherwise-successful trade into a failure - fails soft, actualAmounts comes back null", async () => {
+    const logger = fakeLogger();
+    const { service } = buildService({ balanceReader: throwingBalanceReader("RPC index lagging"), logger });
+    const result = await service.execute({ userId: 1, walletPublicKey, action: "BUY", amountLamports: 1000, tokenAddress: "TokenMintABC" });
+
+    assert.equal(result.outcome, STATES.SUCCESS, "the real trade already succeeded - a post-confirmation read error must never retroactively fail it");
+    assert.equal(result.actualAmounts, null);
+    assert.ok(logger.errors.some(e => e.message.includes("RPC index lagging")));
+});
+
+test("no balanceReader supplied (every pre-Sprint-11 caller/test-double) defaults to a safe no-op - actualAmounts is null, never throws", async () => {
+    const { service } = buildService(); // no balanceReader override at all
+    const result = await service.execute({ userId: 1, walletPublicKey, action: "TEST_TRANSFER" });
+
+    assert.equal(result.outcome, STATES.SUCCESS);
+    assert.equal(result.actualAmounts, null);
 });
 
 test("insufficient balance fails during PREPARING, before signing is ever attempted", async () => {

@@ -103,14 +103,22 @@ const closePositionStmt = db.prepare(
 const insertTradeStmt = db.prepare(`
     INSERT INTO benchmark_trades (
         run_id, run_participant_id, token_address, token_symbol, entry_price, exit_price, size_usd,
-        roi_pct, fee_usd, slippage_pct, duration_seconds, reason, opened_at, closed_at, decision_at
+        roi_pct, fee_usd, slippage_pct, duration_seconds, reason, opened_at, closed_at, decision_at,
+        realized_roi_pct, roi_version
     ) VALUES (
         @runId, @runParticipantId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
-        @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason, @openedAt, CURRENT_TIMESTAMP, @decisionAt
+        @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason, @openedAt, CURRENT_TIMESTAMP, @decisionAt,
+        @realizedRoiPct, @roiVersion
     )
 `);
 
-function closePosition(position, { exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason }){
+// Arjuna V4 (Sprint 11), Part 8: Benchmark never has a real on-chain
+// swap (it's a research/tournament simulation), so realizedRoiPct/
+// roiVersion passed in here are always tradeManager.js's own SIMULATION
+// fallback (the exact same roiCalculator.js formula every other
+// consumer uses) - defaulted to null/'v1_simulated' so any caller that
+// still doesn't pass them (a hand-built test double, say) never throws.
+function closePosition(position, { exitPrice, roiPct, feeUsd, slippagePct, durationSeconds, reason, realizedRoiPct = null, roiVersion = "v1_simulated" }){
     const tx = db.transaction(() => {
         closePositionStmt.run(position.id);
         insertTradeStmt.run({
@@ -121,7 +129,8 @@ function closePosition(position, { exitPrice, roiPct, feeUsd, slippagePct, durat
             tokenSymbol: position.token_symbol,
             entryPrice: position.entry_price,
             exitPrice, sizeUsd: position.size_usd, roiPct, feeUsd, slippagePct,
-            durationSeconds, reason, openedAt: position.opened_at
+            durationSeconds, reason, openedAt: position.opened_at,
+            realizedRoiPct: realizedRoiPct ?? roiPct, roiVersion
         });
     });
     tx();
@@ -139,16 +148,21 @@ function findTrades(runParticipantId){
 // the reference implementation this codebase already got right) -
 // totalFees is still reported separately for transparency, but must
 // never be added back into realizedPnl/availableCash/equity by a caller.
+// Arjuna V4 (Sprint 11), Part 8: reads COALESCE(realized_roi_pct,
+// roi_pct) - the official ROI (always roiVersion='v1_simulated' for
+// benchmark, since it never has a real on-chain swap) when it exists,
+// falling back to the legacy roi_pct for rows written before migration
+// 066 ever existed.
 function sumClosedTrades(runParticipantId){
     return db.prepare(`
         SELECT
             COUNT(*) as closedCount,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN 1 ELSE 0 END), 0) as winCount,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
-            COALESCE(SUM((size_usd * roi_pct / 100.0) - fee_usd), 0) as realizedPnl,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN 1 ELSE 0 END), 0) as winCount,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN 1 ELSE 0 END), 0) as lossCount,
+            COALESCE(SUM((size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) - fee_usd), 0) as realizedPnl,
             COALESCE(SUM(fee_usd), 0) as totalFees,
-            COALESCE(SUM(CASE WHEN roi_pct > 0 THEN (size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossWin,
-            COALESCE(SUM(CASE WHEN roi_pct <= 0 THEN ABS(size_usd * roi_pct / 100.0) ELSE 0 END), 0) as grossLoss
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) > 0 THEN (size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossWin,
+            COALESCE(SUM(CASE WHEN COALESCE(realized_roi_pct, roi_pct) <= 0 THEN ABS(size_usd * COALESCE(realized_roi_pct, roi_pct) / 100.0) ELSE 0 END), 0) as grossLoss
         FROM benchmark_trades
         WHERE run_participant_id = ? AND closed_at IS NOT NULL
     `).get(runParticipantId);

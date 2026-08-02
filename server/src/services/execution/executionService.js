@@ -7,25 +7,18 @@
 // just with more named collaborators since this service coordinates
 // real chain I/O, not only the database.
 //
-// Production Hotfix V1.1, Section 6 (investigated, deliberately NOT
-// implemented this pass): execute() below returns only
-// { executionId, outcome, txHash } - no real on-chain fill price is
-// captured anywhere in this file or transactionConfirmationService.js
-// (that file only polls connection.getSignatureStatus() for
-// success/fail/slot, never connection.getParsedTransaction() for the
-// confirmed transaction's own pre/post token+SOL balance deltas). Every
-// entry_price/exit_price tradeManager.js records for a real trade is
-// therefore CRAB's own off-chain estimate at decision time, never
-// reconciled against the real swap. This IS additively fixable - a new
-// post-confirmation read, no change to how transactions are built/
-// signed/submitted - but it means adding real Solana transaction-
-// balance-delta parsing to money-execution-adjacent code, unverifiable
-// against a real confirmed swap in this environment, sized well beyond
-// this hotfix's primary scope (the freshness gate). Deliberately
-// deferred rather than shipped half-verified - see the existing
-// getPortfolioReconciliation()/Sync Delta mechanism (services/tradingBotService.js)
-// for the real, already-built safety net that would surface a growing
-// discrepancy if this estimate ever drifted meaningfully from reality.
+// Arjuna V4 (Sprint 11), Part 1: the gap Production Hotfix V1.1, Section
+// 6 documented and deliberately deferred is now fixed. Once a real
+// transaction confirms SUCCESS, balanceReader.readActualSwapAmounts()
+// (transactionBalanceReader.js) reads the confirmed transaction's own
+// real pre/post SOL and SPL-token balances for the trading wallet - the
+// actual thing that moved on-chain - and execute() returns them
+// alongside txHash. tradeManager.js uses these (never token.price) as
+// the official actual_sol_spent/actual_sol_received for a LIVE trade -
+// see services/roiCalculator.js. Fails soft: if this read itself errors
+// (RPC hiccup, index lag), the real swap already succeeded regardless -
+// execute() still returns SUCCESS with actualAmounts: null, never fails
+// an otherwise-successful trade over an observability read.
 //
 // `transactionBuilder` is the Sprint 2 seam: this file never builds a
 // transaction itself, only calls transactionBuilder.build(...) and
@@ -79,12 +72,13 @@ const MIN_FEE_BUFFER_LAMPORTS = 5000;
  * @property {ReturnType<import("./transactionConfirmationService").createTransactionConfirmationService>} confirmationService
  * @property {import("./selfTransferTransactionBuilder").TransactionBuilder} transactionBuilder
  * @property {ReturnType<import("./executionLogger").createExecutionLogger>} logger
+ * @property {ReturnType<import("./transactionBalanceReader").createTransactionBalanceReader>} [balanceReader] - Arjuna V4, Part 1. Optional (defaults to a no-op reader) so every existing test-double caller that doesn't supply one keeps working unchanged.
  */
 
 /**
  * @param {ExecutionServiceDeps} deps
  */
-function createExecutionService({ repository, connectionProvider, signingService, balanceService, confirmationService, transactionBuilder, logger }){
+function createExecutionService({ repository, connectionProvider, signingService, balanceService, confirmationService, transactionBuilder, logger, balanceReader = { readActualSwapAmounts: async () => null } }){
 
     function buildMachine(executionId, initialState){
         return createExecutorStateMachine({
@@ -250,13 +244,33 @@ function createExecutionService({ repository, connectionProvider, signingService
         }
         machine.transition(STATES[confirmation.outcome], meta);
 
+        // Arjuna V4 (Sprint 11), Part 1: only on a real, confirmed
+        // SUCCESS - reads the confirmed transaction's own real pre/post
+        // SOL+token balances for the trading wallet (never for
+        // FAILED/TIMEOUT, there's no real settlement to read). Fails
+        // soft - an error here never turns an otherwise-successful trade
+        // into a failure; it only means actualAmounts comes back null,
+        // and callers (tradeManager.js) fall back honestly rather than
+        // fabricating a number.
+        let actualAmounts = null;
+        if(confirmation.outcome === STATES.SUCCESS){
+            try{
+                actualAmounts = await balanceReader.readActualSwapAmounts(signature, walletPublicKey, tokenAddress);
+            }
+            catch(err){
+                logger.logError(executionId, `post-confirmation balance read failed (trade itself still succeeded): ${err.message}`);
+            }
+        }
+
         // txHash (Trust/UX sprint): `signature` was always real and in
         // scope here - it just never left this function, so
         // tradeManager.js's own `txHash` variable stayed permanently
         // null even after a real, confirmed trade. Every existing caller
         // already destructures only {executionId, outcome}, so this is
-        // additive.
-        return { executionId, outcome: confirmation.outcome, txHash: signature };
+        // additive. actualAmounts (Arjuna V4, Part 1) is additive the
+        // same way - null for every pre-Sprint-11 caller shape/test
+        // double, real for a genuine confirmed SUCCESS.
+        return { executionId, outcome: confirmation.outcome, txHash: signature, actualAmounts };
 
     }
 

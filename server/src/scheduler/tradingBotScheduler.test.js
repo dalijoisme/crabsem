@@ -219,6 +219,69 @@ test("getTickHealth reflects a real, just-updated timestamp after every tick(), 
 
 });
 
+// Arjuna V4 Phase 1 (Engine Stability): a genuinely wedged runCycle()
+// for one user must never permanently starve that user's future cycles.
+// runUserCycle() is fire-and-forget from runTick()'s own perspective
+// (never awaited), so the outer tick() itself resolves quickly even
+// while this user's cycle is still hung - the per-user watchdog in
+// isDue() is the only thing that can ever recover it. Uses node:test's
+// built-in Date mock (no real 45s wait) to simulate the watchdog bound
+// elapsing.
+test("a user's wedged cycle is reported as stuck, then force-cleared and reusable once TICK_STUCK_AFTER_MS elapses", async (t) => {
+
+    const userId = 9001;
+    const tokens = [{ token_address: "TOKEN_WEDGED", market_cap: 1000000 }];
+
+    const restores = [
+        stub(freshUniverseService, "getBuyCandidateUniverse", () => ({
+            tokens, collectorTotalCount: tokens.length, freshUniverseCount: tokens.length, maxAgeSeconds: 120, minMarketCap: 0
+        })),
+        stub(tradingBotFreshUniverseSnapshotRepository, "insertSnapshot", () => {}),
+        stub(tradingBotRepository, "findRunningUserIds", () => [userId]),
+        stub(tradingBotRepository, "getConfig", () => ({ scan_interval_seconds: 1, ...strategyProfileConfig.resolveProfile("STABLE") })),
+        stub(liveRecommendationService, "computeStructuralExclusion", () => ({ excluded: false, reason: null, tokenStatus: null })),
+        stub(scoringWorkerPool, "scoreTokens", async (tokensArg) => tokensArg.map(() => ({ action: "HOLD", confidence: 10, risk: "LOW", participantScore: 20, marketHealth: 50 })))
+    ];
+
+    let runCycleCallCount = 0;
+    restores.push(stub(tradingBotEngine, "runCycle", async () => {
+        runCycleCallCount++;
+        return new Promise(() => {}); // never resolves - simulates a genuinely wedged cycle
+    }));
+
+    try{
+
+        // Enabled BEFORE the cycle starts (with `now` anchored to the
+        // real current time) so the in-flight entry's own startedAt is
+        // recorded on the SAME mocked clock the later tick() advances -
+        // otherwise the entry would be timestamped against the real
+        // clock while getTickHealth()'s "is this stuck" check runs
+        // against the mocked one, comparing two different timelines.
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+        await scheduler.tick(); // starts the wedged cycle for userId (fire-and-forget)
+        assert.equal(runCycleCallCount, 1);
+
+        // Not yet past the watchdog bound - must not be reported as stuck.
+        assert.deepEqual(scheduler.getTickHealth().stuckUsers, []);
+
+        t.mock.timers.tick(45001); // TICK_STUCK_AFTER_MS (3 * 15000) + 1ms
+
+        assert.deepEqual(scheduler.getTickHealth().stuckUsers, [userId], "a cycle still in flight past TICK_STUCK_AFTER_MS must be reported as stuck");
+
+        await scheduler.tick(); // isDue() must now force-clear userId's stale in-flight entry and re-run its cycle
+
+        assert.equal(runCycleCallCount, 2, "the user's slot must be force-cleared and reusable once the watchdog bound elapses, not permanently stuck");
+        assert.deepEqual(scheduler.getTickHealth().stuckUsers, [], "the freshly re-started cycle just began (at the current mocked time), so it must not be immediately reported as stuck again");
+
+    }
+    finally{
+        t.mock.timers.reset();
+        restores.forEach(restore => restore());
+    }
+
+});
+
 // A tick that genuinely throws (e.g. freshUniverseService itself
 // failing) must still leave a real, queryable heartbeat behind - the
 // whole point of putting getTickHealth() ahead of a dead process is that

@@ -445,7 +445,10 @@ const DASHBOARD_STAT_IDS = ["dashEngineStatus","dashScheduler","dashDatabase","d
 
 const AI_HEALTH_STAT_IDS = ["aiHealthTodayAccuracy","aiHealthSevenDayTrend","aiHealthConfidence","aiHealthAvgRoi","aiHealthBestCategory","aiHealthWorstCategory","aiHealthTimeToTp","aiHealthTimeToSl"];
 
-const SYSTEM_STAT_IDS = ["sysEngineStatus","sysScheduler","sysUptime","sysDb","sysDbSize","sysMigration","sysTokenCount","sysLastScan","sysNextScan"];
+const SYSTEM_STAT_IDS = ["sysEngineStatus","sysScheduler","sysUptime","sysDb","sysDbSize","sysMigration","sysTokenCount","sysLastScan","sysNextScan","sysTradingBotLoop","sysTradingBotLastTick","sysTradingBotNextTick","sysTradingBotDuration","sysExitLoop","sysExitLastTick","sysExitNextTick","sysLastExecution","sysPulseLastTick","sysPulseTokenCount","sysPulseBufferedCount","sysPulseDuration","sysDailyReviewLoop","sysDailyReviewLastGenerated"];
+
+// Arjuna V4 Phase 2 (Daily Trading Review infrastructure).
+const DAILY_REVIEW_STAT_IDS = ["drReviewDate","drTotalTrades","drWinRate","drNetProfit","drAvgRoi","drAvgMfe","drAvgMae","drAvgHolding"];
 
 async function loadAll(){
 
@@ -483,7 +486,10 @@ async function loadAll(){
 
         loadOne(adminFetch("/admin/learn/summary"), renderLearnSummary, () => { noData("learnSummary"); noData("learnHistory"); }),
 
-        loadOne(publicFetch("/validation/predictions/statistics"), renderLearnKnowledgeCenter, () => noData("learnKnowledgeCenter"))
+        loadOne(publicFetch("/validation/predictions/statistics"), renderLearnKnowledgeCenter, () => noData("learnKnowledgeCenter")),
+
+        // Arjuna V4 Phase 2 (Daily Trading Review infrastructure).
+        loadOne(adminFetch("/admin/daily-review"), renderDailyReview, () => { setElsText(DAILY_REVIEW_STAT_IDS, "N/A"); document.getElementById("drNoData").style.display = ""; })
 
     ]);
 
@@ -636,6 +642,105 @@ function renderSystem(s){
     document.getElementById("sysLastScan").textContent = s.scheduler.gmgn.lastRunAt ? `${s.scheduler.gmgn.secondsSinceLastRun}s ago` : "Never";
 
     document.getElementById("sysNextScan").textContent = s.scheduler.gmgn.nextRunEtaSeconds != null ? `~${s.scheduler.gmgn.nextRunEtaSeconds}s` : "-";
+
+    renderEngineStability(s);
+
+}
+
+// Arjuna V4 Phase 1 (Engine Stability) - the two loops that actually
+// place/close trades (research/candidate scan+entry via
+// scheduler.tradingBot, exit-evaluation via scheduler.exitEvaluation),
+// plus the execution layer. `stuck`/`stuckUsers.length` must be visually
+// obvious (not just a status string nobody notices) - a real production
+// incident had exactly this loop silently stop for ~2 hours with no
+// dashboard signal at all.
+function renderEngineStability(s){
+
+    const tb = s.scheduler.tradingBot;
+    const ex = s.scheduler.exitEvaluation;
+
+    const tbStuck = tb.stuck || tb.stuckUsers.length > 0;
+    const tbLoopEl = document.getElementById("sysTradingBotLoop");
+    tbLoopEl.textContent = tbStuck ? `STUCK${tb.stuckUsers.length ? ` (${tb.stuckUsers.length} user${tb.stuckUsers.length===1?"":"s"})` : ""}` : "ACTIVE";
+    tbLoopEl.style.color = tbStuck ? "#e5484d" : "";
+
+    document.getElementById("sysTradingBotLastTick").textContent = tb.secondsSinceLastFinish != null ? `${tb.secondsSinceLastFinish}s ago` : "Never";
+    document.getElementById("sysTradingBotNextTick").textContent = tb.nextTickEtaSeconds != null ? `~${tb.nextTickEtaSeconds}s` : "-";
+    document.getElementById("sysTradingBotDuration").textContent = tb.lastTickDurationMs != null ? `${tb.lastTickDurationMs}ms` : "-";
+
+    const exStuck = ex.stuck || ex.stuckUsers.length > 0;
+    const exLoopEl = document.getElementById("sysExitLoop");
+    exLoopEl.textContent = exStuck ? `STUCK${ex.stuckUsers.length ? ` (${ex.stuckUsers.length} user${ex.stuckUsers.length===1?"":"s"})` : ""}` : "ACTIVE";
+    exLoopEl.style.color = exStuck ? "#e5484d" : "";
+
+    document.getElementById("sysExitLastTick").textContent = ex.secondsSinceLastTick != null ? `${ex.secondsSinceLastTick}s ago` : "Never";
+    document.getElementById("sysExitNextTick").textContent = ex.nextTickEtaSeconds != null ? `~${ex.nextTickEtaSeconds}s` : "-";
+
+    const exec = s.execution;
+    if(exec?.lastSuccessfulExecutionAt){
+        // SQLite's CURRENT_TIMESTAMP is UTC "YYYY-MM-DD HH:MM:SS" (no
+        // timezone marker) - same explicit UTC conversion convention
+        // services/health.js's own getSchedulerStatus() already uses,
+        // reimplemented locally since backendApi.js's parseBackendTimestamp
+        // isn't loaded on this page.
+        const ms = Date.parse(`${exec.lastSuccessfulExecutionAt.replace(" ", "T")}Z`);
+        const secondsAgo = Math.max(0, Math.round((Date.now() - ms) / 1000));
+        document.getElementById("sysLastExecution").textContent = `${fmtDuration(secondsAgo)} ago`;
+    }
+    else{
+        document.getElementById("sysLastExecution").textContent = "Never";
+    }
+
+    // Arjuna V4 Phase 2 - Realtime Pulse tick (chained onto the GMGN
+    // collector scheduler) + Daily Trading Review scheduler liveness.
+    const pulse = s.realtimePulse;
+    if(pulse){
+        document.getElementById("sysPulseLastTick").textContent = pulse.lastPulseTickAt ? `${fmtDuration(Math.max(0, Math.round((Date.now() - Date.parse(pulse.lastPulseTickAt)) / 1000)))} ago` : "Never";
+        document.getElementById("sysPulseTokenCount").textContent = pulse.lastPulseTokenCount != null ? fmtNum(pulse.lastPulseTokenCount) : "-";
+        document.getElementById("sysPulseBufferedCount").textContent = fmtNum(pulse.bufferedTokenCount);
+        document.getElementById("sysPulseDuration").textContent = pulse.lastPulseDurationMs != null ? `${pulse.lastPulseDurationMs}ms` : "-";
+    }
+
+    const dr = s.scheduler.dailyReview;
+    if(dr){
+        const drLoopEl = document.getElementById("sysDailyReviewLoop");
+        drLoopEl.textContent = dr.stuck ? "STUCK" : "ACTIVE";
+        drLoopEl.style.color = dr.stuck ? "#e5484d" : "";
+        document.getElementById("sysDailyReviewLastGenerated").textContent = dr.lastGeneratedDate || "None yet";
+    }
+
+}
+
+// Arjuna V4 Phase 2 (Daily Trading Review infrastructure) - `data` is the
+// most recently generated report (services/dailyReviewService.js's real
+// structured output), or null when no day has been reviewed yet (a real,
+// valid state, not an error - handled honestly here rather than treated
+// as a fetch failure).
+function renderDailyReview(data){
+
+    const noDataEl = document.getElementById("drNoData");
+
+    if(!data){
+        setElsText(DAILY_REVIEW_STAT_IDS, "N/A");
+        noDataEl.style.display = "";
+        document.getElementById("drObservations").innerHTML = "";
+        return;
+    }
+
+    noDataEl.style.display = "none";
+
+    const s = data.tradingSummary;
+    document.getElementById("drReviewDate").textContent = data.reviewDate;
+    document.getElementById("drTotalTrades").textContent = fmtNum(s.totalTrades);
+    document.getElementById("drWinRate").textContent = s.winRate != null ? `${Math.round(s.winRate * 100)}%` : "-";
+    document.getElementById("drNetProfit").textContent = s.netProfitUsd != null ? fmtUsd(s.netProfitUsd) : "-";
+    document.getElementById("drAvgRoi").textContent = s.averageRoiPct != null ? `${s.averageRoiPct}%` : "-";
+    document.getElementById("drAvgMfe").textContent = s.averageMfePct != null ? `${s.averageMfePct}%` : "-";
+    document.getElementById("drAvgMae").textContent = s.averageMaePct != null ? `${s.averageMaePct}%` : "-";
+    document.getElementById("drAvgHolding").textContent = fmtDuration(s.averageHoldingSeconds);
+
+    const list = document.getElementById("drObservations");
+    list.innerHTML = (data.suggestedObservations || []).map(o => `<li>${o}</li>`).join("") || "<li>No observations for this day.</li>";
 
 }
 

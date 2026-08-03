@@ -28,6 +28,11 @@ const dexscreenerClient = require("../collectors/dexscreener/dexscreenerClient")
 const dexscreenerTransformer = require("./dexscreenerTransformer");
 
 const gmgnScheduler = require("../scheduler/gmgnTrendingScheduler");
+const tradingBotScheduler = require("../scheduler/tradingBotScheduler");
+const exitEvaluationScheduler = require("../scheduler/exitEvaluationScheduler");
+// Arjuna V4 Phase 2 (Realtime Pulse / Daily Trading Review observability).
+const dailyReviewScheduler = require("../scheduler/dailyReviewScheduler");
+const dailyReviewRepository = require("../repositories/dailyReviewRepository");
 
 const DB_FILE_PATH = path.resolve(__dirname, "../../", config.DB_PATH);
 
@@ -96,13 +101,117 @@ function getSystem(){
 
             validation: { intervalSeconds: validationConfig.intervalMs / 1000 },
 
-            wallet: { intervalSeconds: 5 * 60 }
+            wallet: { intervalSeconds: 5 * 60 },
+
+            // Arjuna V4 Phase 1 (Engine Stability) - the two loops that
+            // actually place/close trades, same shape as `gmgn` above
+            // (intervalSeconds/lastRunAt-equivalent/nextRunEtaSeconds/
+            // status), plus stuckUsers - a real production incident
+            // (2026-07-31->08-01) had this scheduler silently stop
+            // ticking with no dashboard-visible signal at all.
+            tradingBot: {
+
+                intervalSeconds: tradingBotScheduler.TICK_MS / 1000,
+
+                lastTickFinishedAt: health.tradingBotScheduler.lastTickFinishedAt,
+
+                secondsSinceLastFinish: health.tradingBotScheduler.secondsSinceLastFinish,
+
+                nextTickEtaSeconds: health.tradingBotScheduler.nextTickEtaSeconds,
+
+                lastTickDurationMs: health.tradingBotScheduler.lastTickDurationMs,
+
+                lastOutcome: health.tradingBotScheduler.lastOutcome,
+
+                lastTickError: health.tradingBotScheduler.lastTickError,
+
+                stuck: health.tradingBotScheduler.stuck,
+
+                stuckUsers: health.tradingBotScheduler.stuckUsers,
+
+                status: health.tradingBotScheduler.stuck || health.tradingBotScheduler.stuckUsers.length ? "stuck" : "active"
+
+            },
+
+            exitEvaluation: {
+
+                intervalSeconds: exitEvaluationScheduler.TICK_MS / 1000,
+
+                lastTickAt: health.exitEvaluationScheduler.lastTickAt,
+
+                secondsSinceLastTick: health.exitEvaluationScheduler.secondsSinceLastTick,
+
+                nextTickEtaSeconds: health.exitEvaluationScheduler.nextTickEtaSeconds,
+
+                stuck: health.exitEvaluationScheduler.stuck,
+
+                stuckUsers: health.exitEvaluationScheduler.stuckUsers,
+
+                status: health.exitEvaluationScheduler.stuck || health.exitEvaluationScheduler.stuckUsers.length ? "stuck" : "active"
+
+            },
+
+            // Arjuna V4 Phase 2 (Daily Trading Review infrastructure) -
+            // real liveness for the once-a-day scheduler (see
+            // scheduler/dailyReviewScheduler.js).
+            dailyReview: dailyReviewScheduler.getTickHealth()
 
         },
+
+        // Arjuna V4 Phase 2 (Realtime Pulse observability) - real,
+        // in-process liveness/cost for the Pulse tick chained onto the
+        // gmgn collector scheduler (see that file's own
+        // triggerRealtimePulseTick).
+        realtimePulse: gmgnScheduler.getPulseHealth(),
+
+        // Arjuna V4 Phase 1 (Engine Stability) - "Last Successful
+        // Execution" dashboard fact the sprint brief asks for, sourced
+        // from services/health.js's own execution block (which reads
+        // executionRepository.findLastSuccessful()/countActive()).
+        execution: health.execution,
 
         uptimeSeconds: health.uptime
 
     };
+
+}
+
+// =====================================
+// DAILY TRADING REVIEW (Arjuna V4 Phase 2)
+// =====================================
+
+// dateStr optional ("YYYY-MM-DD") - omitted defaults to the most
+// recently generated real review (never "today", which is still in
+// progress - see dailyReviewScheduler.js's own mostRecentCompletedUtcDate).
+// Returns null (never fabricated) if the requested day was never
+// reviewed - e.g. before this sprint's first full day in production.
+function getDailyReview(dateStr){
+
+    const row = dateStr ? dailyReviewRepository.findByDate(dateStr) : dailyReviewRepository.findRecent(1)[0];
+
+    if(!row) return null;
+
+    return JSON.parse(row.report_json);
+
+}
+
+// Flat summary list (not the full nested report) for a dashboard trend
+// view - same fields already duplicated as flat columns on
+// daily_trading_reviews for exactly this cheap-list-view purpose.
+function getDailyReviewRecent(limit){
+
+    return dailyReviewRepository.findRecent(limit || 30).map(row => ({
+        reviewDate: row.review_date,
+        totalTrades: row.total_trades,
+        winCount: row.win_count,
+        lossCount: row.loss_count,
+        winRate: row.win_rate,
+        netProfitUsd: row.net_profit_usd,
+        averageRoiPct: row.average_roi_pct,
+        averageMfePct: row.average_mfe_pct,
+        averageMaePct: row.average_mae_pct,
+        averageHoldingSeconds: row.average_holding_seconds
+    }));
 
 }
 
@@ -363,6 +472,10 @@ module.exports = {
 
     getPredictionThroughput,
 
-    getDashboard
+    getDashboard,
+
+    getDailyReview,
+
+    getDailyReviewRecent
 
 };

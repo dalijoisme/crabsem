@@ -64,6 +64,10 @@ const missedOpportunityOutcomeScheduler = require("./scheduler/missedOpportunity
 const abTestScheduler = require("./scheduler/abTestScheduler");
 const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
 const walletBalanceSyncScheduler = require("./scheduler/walletBalanceSyncScheduler");
+// Arjuna V4 Phase 2 - Daily Trading Review infrastructure (original
+// sprint brief Part 3). Independent of every other scheduler here - only
+// reads already-persisted trading_bot_trades/realtime_pulse_at_entry_json.
+const dailyReviewScheduler = require("./scheduler/dailyReviewScheduler");
 const engineVersionService = require("./services/engineVersionService");
 const { executionService } = require("./services/execution");
 const app = require("./app");
@@ -175,6 +179,8 @@ const benchmarkSchedulerHandle = benchmarkScheduler.start();
 
 const walletBalanceSyncSchedulerHandle = walletBalanceSyncScheduler.start();
 
+const dailyReviewSchedulerHandle = dailyReviewScheduler.start();
+
 const server = app.listen(config.PORT, () => {
 
     console.log(`[startup] API ready - CRAB AGENT server listening on port ${config.PORT}`);
@@ -212,6 +218,8 @@ function shutdown(signal){
     benchmarkSchedulerHandle.stop();
 
     walletBalanceSyncSchedulerHandle.stop();
+
+    dailyReviewSchedulerHandle.stop();
 
     // Previously never closed the shared better-sqlite3 connection,
     // relying on process exit to release the file handle - in WAL

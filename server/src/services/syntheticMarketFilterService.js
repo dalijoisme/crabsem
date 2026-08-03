@@ -72,16 +72,32 @@ function buySellClusteringScore(trenchesEntry){
 // GMGN API call) rather than threading it through the entry gate's
 // return value, keeping entryGateService.js itself untouched.
 //
-// Returns { syntheticScore, breakdown, washFlagged } - never fails open by
-// itself (caller decides pass/reject); returns an all-zero breakdown for
-// missing/unparseable data.
-function computeSyntheticBreakdown(trenchesEntry){
+// Arjuna V4 Phase 2 (Fake Pump / Wash Trading infrastructure), Section 6
+// of PHASE2_TRADING_ENGINE_OPTIMIZATION_DESIGN.md - realtimeSignal is
+// OPTIONAL and TRAILING (every existing caller, including
+// dynamicExitService.js's orderflowIntegrityScore, is byte-identical to
+// before this sprint). It is the SAME real orderflow-shaped facts this
+// module already reasons about, now also viewed as a poll-to-poll trend
+// (services/realtimePulseService.js's buyPressure/netFlow5m series for
+// this token) rather than only a single current snapshot - lets a
+// consumer distinguish a synthetic-looking pattern that's momentary
+// (present on one poll, gone the next) from one that's sustained across
+// several real polls. Attached ONLY as observability
+// (`realtimeFacts`) - syntheticScore/washFlagged/the veto decision
+// itself are completely UNCHANGED. Per FORMULA POLICY, whether/how
+// "sustained vs momentary" should change the actual veto is the Solution
+// Architect's decision, not invented here.
+//
+// Returns { syntheticScore, breakdown, washFlagged, realtimeFacts } -
+// never fails open by itself (caller decides pass/reject); returns an
+// all-zero breakdown for missing/unparseable data.
+function computeSyntheticBreakdown(trenchesEntry, realtimeSignal){
 
-    if(!trenchesEntry) return { syntheticScore: 0, breakdown: {}, washFlagged: false };
+    if(!trenchesEntry) return { syntheticScore: 0, breakdown: {}, washFlagged: false, realtimeFacts: realtimeSignal ?? null };
 
     let raw = {};
     try{ raw = JSON.parse(trenchesEntry.raw_json || "{}"); }
-    catch(e){ return { syntheticScore: 0, breakdown: {}, washFlagged: false }; }
+    catch(e){ return { syntheticScore: 0, breakdown: {}, washFlagged: false, realtimeFacts: realtimeSignal ?? null }; }
 
     const breakdown = {
         botDegenRate: normalizedField(raw, "bot_degen_rate", config.p99Ceiling.botDegenRate),
@@ -97,7 +113,7 @@ function computeSyntheticBreakdown(trenchesEntry){
     const weights = config.weights;
     const syntheticScore = Object.keys(weights).reduce((sum, key) => sum + (breakdown[key] || 0) * weights[key], 0);
 
-    return { syntheticScore, breakdown, washFlagged: raw.is_wash_trading === true };
+    return { syntheticScore, breakdown, washFlagged: raw.is_wash_trading === true, realtimeFacts: realtimeSignal ?? null };
 
 }
 

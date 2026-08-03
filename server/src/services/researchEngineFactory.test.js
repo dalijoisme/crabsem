@@ -14,6 +14,28 @@ const assert = require("node:assert/strict");
 const { analyzeTokensWithOverride, PHILOSOPHIES } = require("./researchEngineFactory");
 const strategyProfileTranslator = require("./strategyProfileTranslator");
 
+// Arjuna V4 Phase 2 (Realtime Pulse) - realtimePulse.computedAtMs is a
+// genuinely real-time wall-clock Date.now() read (see
+// realtimePulseService.js), same class of intentionally-nondeterministic
+// field this file's own tests already carve out for freshnessPenalty/
+// ageMinutes above. Strips ONLY that one field so two separate
+// invocations a few ms apart can still be compared byte-identical on
+// everything else real (bufferLength, signals, provisional votes).
+function stripComputedAtMs(realtimePulse){
+    if(!realtimePulse) return realtimePulse;
+    const { computedAtMs, ...rest } = realtimePulse;
+    return rest;
+}
+
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - syntheticMarketFilterService's
+// own breakdown now also carries the same realtimePulse object (as
+// `realtimeFacts`, see that file's own header) for the Fake Pump
+// penalty - same nondeterministic computedAtMs, one level deeper.
+function stripSyntheticBreakdown(syntheticBreakdown){
+    if(!syntheticBreakdown) return syntheticBreakdown;
+    return { ...syntheticBreakdown, realtimeFacts: stripComputedAtMs(syntheticBreakdown.realtimeFacts) };
+}
+
 function emptyCtx(){
     return {
         trenchesByAddress: new Map(),
@@ -69,14 +91,21 @@ test("omitted override reproduces the named base philosophy exactly (momentumHun
     // else (score, breakdown, reasons, risk, tiers) must still match exactly.
     const { freshnessPenalty: fp1, entryScoreBreakdown: esb1, ...rest1 } = withNoOverride;
     const { freshnessPenalty: fp2, entryScoreBreakdown: esb2, ...rest2 } = viaBuildEngines;
+    // breakdown.realtimePulse.computedAtMs is the same real-time
+    // wall-clock class of field as freshnessPenalty/ageMinutes below -
+    // stripped from both sides before the top-level deepEqual.
+    rest1.breakdown = { ...rest1.breakdown, realtimePulse: stripComputedAtMs(rest1.breakdown.realtimePulse) };
+    rest2.breakdown = { ...rest2.breakdown, realtimePulse: stripComputedAtMs(rest2.breakdown.realtimePulse) };
     assert.deepEqual(rest1, rest2);
     assert.ok(Math.abs(fp1 - fp2) < 0.01, `freshnessPenalty should match within tolerance: ${fp1} vs ${fp2}`);
     // Arjuna V3: entryScoreBreakdown.ageMinutes is the same real-time-based
     // wall-clock computation as freshnessPenalty above - same tolerance
     // treatment, everything else in the breakdown must match exactly.
-    const { ageMinutes: am1, ...esbRest1 } = esb1;
-    const { ageMinutes: am2, ...esbRest2 } = esb2;
+    const { ageMinutes: am1, realtimePulse: rp1, syntheticBreakdown: sb1, ...esbRest1 } = esb1;
+    const { ageMinutes: am2, realtimePulse: rp2, syntheticBreakdown: sb2, ...esbRest2 } = esb2;
     assert.deepEqual(esbRest1, esbRest2);
+    assert.deepEqual(stripComputedAtMs(rp1), stripComputedAtMs(rp2));
+    assert.deepEqual(stripSyntheticBreakdown(sb1), stripSyntheticBreakdown(sb2));
     assert.ok(Math.abs(am1 - am2) < 0.01, `ageMinutes should match within tolerance: ${am1} vs ${am2}`);
 });
 
@@ -336,7 +365,20 @@ test("confidence falls as risk escalates, even when participantScore/marketHealt
     assert.equal(atTrigger.risk, "HIGH");
     assert.equal(belowTrigger.participantScore, atTrigger.participantScore, "participantScore must be unaffected - isolating the risk penalty alone");
     assert.equal(belowTrigger.marketHealth, atTrigger.marketHealth, "marketHealth must be unaffected - isolating the risk penalty alone");
-    assert.equal(belowTrigger.confidence - atTrigger.confidence, 12, "HIGH's 20-point penalty minus MEDIUM's 8-point penalty must show up exactly, nothing else changed");
+    // Arjuna V4 FINAL DECISION ENGINE SPRINT: `confidence` is now
+    // Production V2's own baseConfidence further adjusted by the
+    // Architect's Realtime Pulse/Token Age/Fake Pump/KOL/Smart Money
+    // multiplier (services/realtimeConfidenceAdjustmentService.js) - the
+    // exact integer delta this test originally asserted on `confidence`
+    // is a property of computeConfidence()'s OWN risk-penalty math, which
+    // now lives on `baseConfidence` instead (the adjustment multiplier is
+    // identical for both calls here - same token, same empty Realtime
+    // Pulse buffer - so it never explains the delta itself, but rounding
+    // the already-rounded baseConfidence a second time can shift the
+    // final integer by 1, which is exactly what this test isolates
+    // baseConfidence to avoid).
+    assert.equal(belowTrigger.baseConfidence - atTrigger.baseConfidence, 12, "HIGH's 20-point penalty minus MEDIUM's 8-point penalty must show up exactly on Production V2's own baseConfidence, nothing else changed");
+    assert.ok(belowTrigger.confidence > atTrigger.confidence, "the final, Realtime-Pulse-adjusted confidence must still reflect the same real direction (MEDIUM risk keeps a real edge over HIGH risk)");
 });
 
 test("M5 regression guarantee: STABLE's translated philosophy produces byte-identical output to pre-refactor (no override at all)", () => {
@@ -349,11 +391,15 @@ test("M5 regression guarantee: STABLE's translated philosophy produces byte-iden
     // separate calls, genuinely different wall-clock instants.
     const { freshnessPenalty: fp1, entryScoreBreakdown: esb1, ...rest1 } = withStable;
     const { freshnessPenalty: fp2, entryScoreBreakdown: esb2, ...rest2 } = withNoOverrideAtAll;
+    rest1.breakdown = { ...rest1.breakdown, realtimePulse: stripComputedAtMs(rest1.breakdown.realtimePulse) };
+    rest2.breakdown = { ...rest2.breakdown, realtimePulse: stripComputedAtMs(rest2.breakdown.realtimePulse) };
     assert.deepEqual(rest1, rest2);
     assert.ok(Math.abs(fp1 - fp2) < 0.01, `freshnessPenalty should match within tolerance: ${fp1} vs ${fp2}`);
-    const { ageMinutes: am1, ...esbRest1 } = esb1;
-    const { ageMinutes: am2, ...esbRest2 } = esb2;
+    const { ageMinutes: am1, realtimePulse: rp1, syntheticBreakdown: sb1, ...esbRest1 } = esb1;
+    const { ageMinutes: am2, realtimePulse: rp2, syntheticBreakdown: sb2, ...esbRest2 } = esb2;
     assert.deepEqual(esbRest1, esbRest2);
+    assert.deepEqual(stripComputedAtMs(rp1), stripComputedAtMs(rp2));
+    assert.deepEqual(stripSyntheticBreakdown(sb1), stripSyntheticBreakdown(sb2));
     assert.ok(Math.abs(am1 - am2) < 0.01, `ageMinutes should match within tolerance: ${am1} vs ${am2}`);
 });
 
@@ -496,4 +542,54 @@ test("Part 2: high volume DOES contribute once accumulation and smartMoney are b
     const [result] = analyzeTokensWithOverride([highVolumeToken], ctx, "momentumHunter", null);
     assert.equal(result.entryScoreBreakdown.volumeValidated, true);
     assert.ok(result.entryScoreBreakdown.componentBreakdown.volume.contribution > 0);
+});
+
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - end-to-end wiring proof: a
+// real, buffered Realtime Pulse signal must adjust `confidence` (up from
+// `baseConfidence`) while leaving `participantScore`/`action`
+// (Production V2's own, dominant decision) completely untouched - the
+// Architect's own governing constraint, proven here rather than only in
+// realtimeConfidenceAdjustmentService.test.js's own isolated unit tests.
+test("a strong, consistent Realtime Pulse buffer adjusts confidence upward without touching participantScore or action", () => {
+
+    const realtimePulseBufferService = require("./realtimePulseBufferService");
+    const address = "TOKEN_PULSE_INTEGRATION";
+
+    const ctx = ctxWithAccumulation();
+    ctx.trenchesByAddress.set(address, ctx.trenchesByAddress.get("TOKEN1"));
+    const token = goodToken({ token_address: address });
+
+    // No Pulse history at all - the neutral baseline.
+    const [neutral] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
+
+    // Seed a real, consistent 3-point UP buffer for every tracked series -
+    // same shape a genuinely strong, improving token would produce.
+    const now = Date.now();
+    for(let i = 0; i < 3; i++){
+        realtimePulseBufferService.recordPoint(address, {
+            recordedAtMs: now - (2 - i) * 30000,
+            price: 1 + i, liquidity: 1000 * (i + 1), holders: 10 * (i + 1), volume1h: 100 * (i + 1),
+            buys5m: 10 * (i + 1), sells5m: 1,
+            smartMoneyBuyUsd: 100 * (i + 1), smartMoneySellUsd: 0,
+            kolBuyUsd: 50 * (i + 1), kolSellUsd: 0
+        });
+    }
+
+    try{
+
+        const [boosted] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
+
+        assert.equal(boosted.participantScore, neutral.participantScore, "Production V2's own score must never be touched by Realtime Pulse");
+        assert.equal(boosted.action, neutral.action, "the action tier must never be touched by Realtime Pulse");
+        assert.equal(boosted.entryScoreBreakdown.realtimePulseModifierPoints, 0, "the score-side integration point must stay permanently inert");
+
+        assert.ok(boosted.realtimeConfidenceAdjustment.combinedMultiplier > 1, "a consistently improving buffer must produce a real, positive combined multiplier");
+        assert.ok(boosted.confidence > boosted.baseConfidence, "the final confidence must be genuinely higher than Production V2's own baseConfidence");
+        assert.ok(boosted.confidence <= 100, "confidence must never exceed the existing [0,100] bound");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
 });

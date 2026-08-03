@@ -108,12 +108,29 @@ function buildRawFactsSnapshot(token, trenchesEntry){
 // config.min_confidence), never a new computation or a guess. Every
 // clause states a real fact the entry gate/scoring pass already
 // established before openPosition() was ever called.
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - "every BUY must explain:
+// Research, Realtime Pulse, Token Age, Smart Money, KOL, Fake Pump,
+// Confidence, Reasons" (sprint's own explicit observability requirement).
+// live.breakdown.baseConfidence/realtimeConfidenceAdjustment are the
+// same real values researchEngineFactory.js already computed and
+// persisted into breakdown_json - this only narrates them in plain
+// language, never recomputes anything.
+function buildConfidenceAdjustmentNarrative(breakdown){
+    const adj = breakdown?.realtimeConfidenceAdjustment;
+    if(!adj) return null;
+    const parts = [`Production V2 research confidence ${breakdown.baseConfidence} adjusted by Realtime Pulse/Token Age/Fake Pump/KOL/Smart Money to ${Math.round((adj.combinedMultiplier || 1) * 100) / 100}x -> final confidence.`];
+    if(adj.reasons?.length) parts.push(adj.reasons.join(" "));
+    return parts.join(" ");
+}
+
 function buildPassReason(live, config){
     const parts = [
         `Action tier ${live.action} at participantScore ${live.participantScore}/${live.participantMax}.`,
         `Confidence ${live.confidence} (floor ${config.min_confidence}).`,
         `Risk classified ${live.risk || "LOW"} (HIGH is hard-rejected before a BUY can ever reach this point).`
     ];
+    const confidenceNarrative = buildConfidenceAdjustmentNarrative(live.breakdown);
+    if(confidenceNarrative) parts.push(confidenceNarrative);
     if(live.missingEvidence?.length){
         parts.push(`Evidence not available for this token: ${live.missingEvidence.join(", ")}.`);
     }

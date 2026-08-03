@@ -27,6 +27,19 @@ module.exports = {
     // for COMPLETED/STOPPED runs older than this is pruned - the
     // distilled, permanent research record (benchmark_reports) is never
     // pruned, only the bulky row-level detail behind it.
-    benchmarkRawDataMaxAgeHours: 24 * 14
+    benchmarkRawDataMaxAgeHours: 24 * 14,
+
+    // Arjuna V4 Phase 2 (Realtime Pulse) - same retention class as
+    // tokenPriceHistoryMaxAgeHours above (a real per-token time series,
+    // append-only). The in-memory rolling buffer
+    // (services/realtimePulseBufferService.js) only ever needs the last
+    // BUFFER_SIZE (3) real points per token for live computation - this
+    // table exists for warm-start-after-restart, the Daily Trading
+    // Review (needs "yesterday"'s data, same as tokenPriceHistoryMaxAgeHours's
+    // own reasoning), and after-the-fact debugging. Set to the same 48h
+    // (comfortably covers a full UTC day plus slack for a delayed Daily
+    // Review run - this file's own established convention above, applied
+    // to a new table rather than a fresh number).
+    realtimePulseSnapshotsMaxAgeHours: 48
 
 };

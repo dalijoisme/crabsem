@@ -67,7 +67,23 @@ function walletQualityFactor(walletStatsList){
     return 1;
 }
 
-function score(activities, change1h, walletStatsList){
+// Arjuna V4 Phase 2 (Smart Money Evolution) - realtimeSignal is OPTIONAL
+// and TRAILING (every existing caller that doesn't pass a 4th argument -
+// candidateEngineV2.js's research-only path included - is byte-identical
+// to before this sprint). It is
+// services/realtimePulseService.js's computed smartMoneyNetUsd series
+// signal for this exact token (velocity/acceleration/direction/
+// consistency of REAL smart-money net USD flow across the last few real
+// polls - see that file's own header for why this is infrastructure math,
+// not a trading formula). This function's own score/reasons/riskReasons
+// computation below is completely UNCHANGED - realtimeSignal is only ever
+// attached to the returned object as `realtimeFacts`, additive
+// observability, never blended into `score`. The Solution Architect's
+// eventual formula for HOW freshness/velocity/acceleration should affect
+// this score is deliberately not invented here - see
+// researchEngineFactory.js's own integration-point comment for where
+// that will plug in once supplied.
+function score(activities, change1h, walletStatsList, realtimeSignal){
 
     if(!activities || !activities.length){
 
@@ -81,7 +97,9 @@ function score(activities, change1h, walletStatsList){
 
             reasons: [],
 
-            riskReasons: []
+            riskReasons: [],
+
+            realtimeFacts: realtimeSignal ?? null
 
         };
 
@@ -166,7 +184,11 @@ function score(activities, change1h, walletStatsList){
 
     }
 
-    return { score: Math.max(0, Math.min(MAX_SCORE, finalScore)), max: MAX_SCORE, hasData: true, reasons, riskReasons };
+    return {
+        score: Math.max(0, Math.min(MAX_SCORE, finalScore)), max: MAX_SCORE, hasData: true, reasons, riskReasons,
+        // Additive observability only - see this function's own header.
+        realtimeFacts: realtimeSignal ?? null
+    };
 
 }
 

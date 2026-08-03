@@ -11,6 +11,9 @@ const gmgnSnapshotRepository = require("../repositories/gmgnSnapshotRepository")
 const gmgnActivityFeedRepository = require("../repositories/gmgnActivityFeedRepository");
 const gmgnGasPriceRepository = require("../repositories/gmgnGasPriceRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+// Arjuna V4 Phase 2 (Realtime Pulse) - same bounded-growth guarantee
+// every other time-series table in this file already gets.
+const realtimePulseRepository = require("../repositories/realtimePulseRepository");
 
 function pruneOldData(){
 
@@ -22,7 +25,9 @@ function pruneOldData(){
 
         gasPricePruned: gmgnGasPriceRepository.pruneOlderThan(retentionConfig.gmgnGasPriceMaxAgeHours),
 
-        priceHistoryPruned: tokenPriceHistoryRepository.pruneOlderThan(retentionConfig.tokenPriceHistoryMaxAgeHours)
+        priceHistoryPruned: tokenPriceHistoryRepository.pruneOlderThan(retentionConfig.tokenPriceHistoryMaxAgeHours),
+
+        realtimePulseSnapshotsPruned: realtimePulseRepository.pruneOlderThan(retentionConfig.realtimePulseSnapshotsMaxAgeHours)
 
     };
 

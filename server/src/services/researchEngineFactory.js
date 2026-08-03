@@ -41,6 +41,19 @@ const { resolveTokenAgeMinutes } = require("./emiService");
 // and dynamicExitService.js's Momentum Health orderflow-integrity
 // component already compute - never a third implementation.
 const syntheticMarketFilterService = require("./syntheticMarketFilterService");
+// Arjuna V4 Phase 2 (Realtime Pulse) - read-only accessor, recomputed
+// fresh from the in-memory buffer services/gmgnTrendingScheduler.js's own
+// deferred tick already maintains. This module never triggers a Pulse
+// computation itself and never makes a new GMGN/DB call for it - see
+// realtimePulseService.js's own header for why this is safe to call on
+// every BUY-tick candidate.
+const realtimePulseService = require("./realtimePulseService");
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - the Architect's own explicit
+// production formulas for how Realtime Pulse/Token Age/Smart Money/KOL/
+// Fake Pump adjust CONFIDENCE ONLY (never the entry score/action tier
+// above - see resolveRealtimePulseModifier's own header for that
+// permanent boundary).
+const realtimeConfidenceAdjustmentService = require("./realtimeConfidenceAdjustmentService");
 
 const accumulation = require("./intelligence/participant/accumulation");
 const smartMoney = require("./intelligence/participant/smartMoney");
@@ -609,7 +622,28 @@ const SM_BONUS_MAX_RUG_RATIO = 0.30;
 // 2-pool numbers) are left completely intact elsewhere in this
 // function for confidence blending/display - this is purely an
 // additional, additive computation.
-function computeUnifiedEntryScore({ participantModules, marketModules, trenchesEntry, securityResult, token, ageMinutes }){
+// Arjuna V4 Phase 2 (Realtime Pulse), Section 3 Stage 5 - THE explicitly-
+// marked, currently-INERT integration point. FORMULA POLICY (per the
+// sprint brief): this function is NOT authorized to invent a weight,
+// multiplier, or threshold for how Realtime Pulse's velocity/
+// acceleration/direction/consistency facts should affect the entry
+// score - that is the Solution Architect's decision, to be made only
+// after real production data has been observed. Until that formula is
+// supplied, this ALWAYS returns 0 regardless of input, so
+// computeUnifiedEntryScore's finalScore below is byte-identical to
+// Production V2's existing behavior - Realtime Pulse is fully computed,
+// logged, and persisted (see the caller's own breakdown), but does not
+// yet influence any BUY/HOLD/AVOID decision. This is the ONE place that
+// formula will be wired in later - structurally additive-only (a single
+// number added at the same spot ageBonusPoints/momentumModifierPoints
+// already occupy), never a new pass/fail branch, per
+// PHASE2_ARCHITECTURE_REVIEW.md Section 3's explicit "Stage 5" mandate.
+function resolveRealtimePulseModifier(realtimePulse){
+    void realtimePulse; // signature kept real (not stubbed away) so the wiring below never needs to change once a real formula lands here
+    return 0;
+}
+
+function computeUnifiedEntryScore({ participantModules, marketModules, trenchesEntry, securityResult, token, ageMinutes, realtimePulse }){
 
     const e = config.entryScore;
     const allByKey = { ...participantModules, ...marketModules };
@@ -654,8 +688,15 @@ function computeUnifiedEntryScore({ participantModules, marketModules, trenchesE
 
     // Part 7 - wash trading is the LARGEST single penalty. Reuses
     // syntheticMarketFilterService's real composite (0-100, higher =
-    // more synthetic/bot/wash-shaped).
-    const { syntheticScore } = syntheticMarketFilterService.computeSyntheticBreakdown(trenchesEntry);
+    // more synthetic/bot/wash-shaped). realtimePulse passed through only
+    // for that function's own `realtimeFacts` observability field - see
+    // its header - syntheticScore/washPenalty below are unchanged. The
+    // full result is also returned below (as `syntheticBreakdown`) so
+    // the caller can feed the SAME already-computed breakdown into
+    // realtimeConfidenceAdjustmentService's Fake Pump penalty (Arjuna V4
+    // FINAL DECISION ENGINE SPRINT) instead of recomputing it a second time.
+    const syntheticBreakdown = syntheticMarketFilterService.computeSyntheticBreakdown(trenchesEntry, realtimePulse);
+    const { syntheticScore } = syntheticBreakdown;
     const washPenalty = syntheticScore >= e.washTradingPenalty.confidenceThreshold ? e.washTradingPenalty.penalty : 0;
 
     // Part 8 - age is a BONUS only, never a reject/gate. Missing age
@@ -674,7 +715,18 @@ function computeUnifiedEntryScore({ participantModules, marketModules, trenchesE
     const momentumPhase = marketModules.momentumPhase?.phase ?? null;
     const momentumModifierPoints = momentumPhase != null ? (e.momentumModifier[momentumPhase] ?? 0) : 0;
 
-    const finalScore = Math.max(0, Math.min(100, Math.round(baseScore - securityPenalty - washPenalty + ageBonusPoints + momentumModifierPoints)));
+    // Arjuna V4 FINAL DECISION ENGINE SPRINT - the Architect's own
+    // governing constraint is explicit and permanent: "Realtime Pulse
+    // ONLY adjusts confidence and ranking" - never the entry score, never
+    // the action tier. This stays hardcoded to 0 by design (not a pending
+    // placeholder anymore - a confirmed architectural boundary). The real
+    // Pulse/Token-Age/Smart-Money/KOL/Fake-Pump adjustment now lives
+    // entirely in services/realtimeConfidenceAdjustmentService.js,
+    // applied to `confidence` further down in analyzeTokenWithPhilosophy -
+    // never here.
+    const realtimePulseModifierPoints = resolveRealtimePulseModifier(realtimePulse);
+
+    const finalScore = Math.max(0, Math.min(100, Math.round(baseScore - securityPenalty - washPenalty + ageBonusPoints + momentumModifierPoints + realtimePulseModifierPoints)));
 
     return {
         score: finalScore,
@@ -686,6 +738,21 @@ function computeUnifiedEntryScore({ participantModules, marketModules, trenchesE
         ageMinutes,
         momentumPhase,
         momentumModifierPoints,
+        // Arjuna V4 Phase 2 - the real, computed Realtime Pulse facts for
+        // this candidate (velocity/acceleration/direction/consistency per
+        // tracked signal, see realtimePulseService.js), persisted here so
+        // every BUY's own breakdown_json carries them (Section 7 Token Age
+        // Evolution/self-learning dataset completeness) - independent of
+        // realtimePulseModifierPoints, which is the (currently inert)
+        // number actually added to the score above.
+        realtimePulse: realtimePulse ?? null,
+        // Arjuna V4 FINAL DECISION ENGINE SPRINT - the same real
+        // syntheticMarketFilterService result already computed above for
+        // washPenalty, returned wholesale so the caller can feed it into
+        // realtimeConfidenceAdjustmentService's Fake Pump penalty without
+        // a second, redundant computation.
+        syntheticBreakdown,
+        realtimePulseModifierPoints,
         volumeValidated,
         componentBreakdown
     };
@@ -713,9 +780,17 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const w = philosophy.weights || {};
     const effectiveChange1h = philosophy.flattenEarliness ? 0 : change1h; // factor lookup uses |value| - 0 always hits the first (1.00) bucket
 
+    // Arjuna V4 Phase 2 (Realtime Pulse) - computed once per token, read
+    // by both smartMoney/kol's new optional realtime-facts parameter
+    // (additive observability, does not change either module's score -
+    // see their own headers) and by the explicitly-marked, currently-
+    // inert integration point below. Never blocks - recomputed from
+    // whatever the in-memory buffer already holds this instant.
+    const realtimePulse = realtimePulseService.getLatestSignals(address);
+
     let smScore;
     if(philosophy.smBonus){
-        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList);
+        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList, realtimePulse.signals.smartMoneyNetUsd);
         if(smScore.hasData){
             const buys = smartMoneyActivity.filter(a => a.side === "buy").reduce((s,a) => s + Number(a.amount_usd||0), 0);
             const sells = smartMoneyActivity.filter(a => a.side === "sell").reduce((s,a) => s + Number(a.amount_usd||0), 0);
@@ -729,13 +804,13 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
             }
         }
     } else {
-        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList);
+        smScore = smartMoney.score(smartMoneyActivity, effectiveChange1h, walletStatsList, realtimePulse.signals.smartMoneyNetUsd);
     }
 
     const participantModules = {
         accumulation: scaleModule(accumulation.score(trenchesEntry, effectiveChange1h), w.accumulation ?? 1),
         smartMoney: scaleModule(smScore, w.smartMoney ?? 1),
-        kol: scaleModule(kolModule.score(kolActivity, effectiveChange1h), w.kol ?? 1),
+        kol: scaleModule(kolModule.score(kolActivity, effectiveChange1h, realtimePulse.signals.kolNetUsd), w.kol ?? 1),
         whale: scaleModule(whale.score(trenchesEntry), w.whale ?? 1),
         developer: scaleModule(developer.score(trenchesEntry), w.developer ?? 1),
         sniperQuality: scaleModule(sniper.score(trenchesEntry), w.sniperQuality ?? 1),
@@ -790,7 +865,8 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const ageMinutes = resolveTokenAgeMinutes(token, trenchesEntry);
     const entryScoreResult = computeUnifiedEntryScore({
         participantModules, marketModules, trenchesEntry,
-        securityResult: marketModules.security, token, ageMinutes
+        securityResult: marketModules.security, token, ageMinutes,
+        realtimePulse
     });
 
     const participantScore = Math.max(0, Math.min(PARTICIPANT_MAX, Math.round(entryScoreResult.score - penalty) + accelerationBonus));
@@ -825,7 +901,19 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const hardTriggers = [vetoed, change1h != null && change1h >= 500];
     const risk = computeRisk(riskReasons, hardTriggers);
     const confidenceResult = computeConfidence(participantScore, marketScore, allModules, freshnessPenalty, risk);
-    const confidence = confidenceResult.value;
+    const baseConfidence = confidenceResult.value;
+
+    // Arjuna V4 FINAL DECISION ENGINE SPRINT - Realtime Pulse/Token Age/
+    // Smart Money/KOL/Fake Pump adjust CONFIDENCE here, and ONLY here -
+    // Production V2's own action tier (`action` above) and score
+    // (`participantScore`/`entryScoreResult.score`) are already fully
+    // decided by this point and are never touched by this block. This is
+    // the Architect's own explicit, final production formula (see
+    // realtimeConfidenceAdjustmentService.js) - not a placeholder.
+    const confidenceAdjustment = realtimeConfidenceAdjustmentService.computeConfidenceAdjustment({
+        ageMinutes, realtimePulse, syntheticBreakdown: entryScoreResult.syntheticBreakdown
+    });
+    const confidence = realtimeConfidenceAdjustmentService.applyToConfidence(baseConfidence, confidenceAdjustment);
 
     // entry gate: an ADDITIONAL, philosophy-specific requirement beyond
     // the normal score/tier/veto pipeline above. If present and it
@@ -878,6 +966,16 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         // raw blended value, named individually - see computeConfidence's
         // own header comment.
         confidenceBreakdown: confidenceResult,
+        // Arjuna V4 FINAL DECISION ENGINE SPRINT - `confidence` above is
+        // ALREADY the fully-adjusted value (Production V2's baseConfidence
+        // x the Architect's Realtime Pulse/Token Age/Fake Pump/KOL/Smart
+        // Money multiplier). baseConfidence and the full breakdown are
+        // exposed separately here so every BUY can explain exactly how it
+        // got from Production V2's own number to the final one - the
+        // "every BUY must explain: Research, Realtime Pulse, Token Age,
+        // Smart Money, KOL, Fake Pump, Confidence, Reasons" sprint
+        // requirement.
+        baseConfidence, realtimeConfidenceAdjustment: confidenceAdjustment,
         // Arjuna V3 (FINAL SPRINT): the full unified-entry-score
         // breakdown (per-module contribution, volume-validator gate
         // state, security penalty, wash-trading penalty/score, age
@@ -897,7 +995,28 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         momentumPhaseFacts: marketModules.momentumPhase.facts,
         breakdown: {
             participant: Object.fromEntries(Object.entries(participantModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
-            market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }]))
+            market: Object.fromEntries(Object.entries(marketModules).map(([k,m]) => [k, { score:m.score, max:m.max, hasData:m.hasData }])),
+            // Arjuna V4 Phase 2 (Realtime Pulse) - carried through this
+            // SAME already-proven `breakdown` pipeline (scheduler ->
+            // tradeManager.openPosition -> breakdown_json ->
+            // buildTradeDatasetFields) rather than threading a brand new
+            // field through every layer - see entryScoreResult's own
+            // realtimePulse/realtimePulseModifierPoints for what these
+            // are. realtimePulseModifierPoints is always 0 today (see
+            // resolveRealtimePulseModifier) - present here purely so a
+            // persisted trade's own record shows that explicitly, not by
+            // its absence.
+            realtimePulse: entryScoreResult.realtimePulse,
+            realtimePulseModifierPoints: entryScoreResult.realtimePulseModifierPoints,
+            // Arjuna V4 FINAL DECISION ENGINE SPRINT - the real,
+            // Architect-specified confidence adjustment applied to THIS
+            // exact BUY (baseConfidence -> confidence, per component and
+            // combined multiplier) - same carry-through pipeline as
+            // realtimePulse above, so a persisted trade's own record
+            // explains exactly how its confidence was adjusted, not just
+            // its final value.
+            baseConfidence,
+            realtimeConfidenceAdjustment: confidenceAdjustment
         },
         // null for every profile except Aggressive today - see
         // computeAccelerationSignal. Exposed for observability (benchmark

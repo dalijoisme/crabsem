@@ -24,6 +24,7 @@
 const db = require("../database/connection");
 const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const gmgnSnapshotRepository = require("../repositories/gmgnSnapshotRepository");
+const executionRepository = require("../repositories/executionRepository");
 const gmgnTrendingScheduler = require("../scheduler/gmgnTrendingScheduler");
 // BUY-halt root-cause fix: a real, proven incident (2026-07-31 15:11:51
 // -> 2026-08-01) where THIS process's own tradingBotScheduler/
@@ -107,6 +108,18 @@ function checkHealth(){
     const tradingBotTick = tradingBotScheduler.getTickHealth();
     const exitEvaluationTick = exitEvaluationScheduler.getTickHealth();
 
+    // Arjuna V4 Phase 1 (Engine Stability) - execution-layer liveness:
+    // the last real execution that reached SUCCESS, and how many are
+    // currently in flight, system-wide. Read-only facts (index.js's own
+    // sweepStuckExecutions() is what actually force-releases a wedged
+    // one, on its existing 2-minute bound - this block just makes that
+    // state visible, it doesn't duplicate the recovery logic).
+    const lastSuccessfulExecution = executionRepository.findLastSuccessful();
+    const execution = {
+        lastSuccessfulExecutionAt: lastSuccessfulExecution?.created_at ?? null,
+        activeExecutionCount: executionRepository.countActive()
+    };
+
     // Previously hardcoded to "ok" regardless of scheduler.status, so
     // a monitor/orchestrator gating on this one field could never see
     // a degraded collector - see the production-readiness audit.
@@ -114,9 +127,12 @@ function checkHealth(){
     // Now ALSO degraded when a SPECIFIC collector has failed 3+ times in
     // a row (invisible before - only the "trending" collector's own
     // freshness ever showed up here), when a tick is stuck beyond what
-    // a normal batch could ever take (see TICK_STUCK_AFTER_MS), or when
+    // a normal batch could ever take (see TICK_STUCK_AFTER_MS), when
     // either the BUY-side or exit-side trading scheduler's own tick has
-    // gone stuck/stale.
+    // gone stuck/stale, or (Arjuna V4 Phase 1) when either scheduler has
+    // a specific user's cycle wedged past its own watchdog bound - a
+    // single stuck user is a real, visible degradation even while the
+    // scheduler's own outer tick still looks healthy.
 
     const status = (
         scheduler.status === "active"
@@ -124,6 +140,8 @@ function checkHealth(){
         && !tick.stuck
         && !tradingBotTick.stuck
         && !exitEvaluationTick.stuck
+        && !tradingBotTick.stuckUsers.length
+        && !exitEvaluationTick.stuckUsers.length
     ) ? "ok" : "degraded";
 
     return {
@@ -147,6 +165,8 @@ function checkHealth(){
         tradingBotScheduler: tradingBotTick,
 
         exitEvaluationScheduler: exitEvaluationTick,
+
+        execution,
 
         uptime: process.uptime()
 

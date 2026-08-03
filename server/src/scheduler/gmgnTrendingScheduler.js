@@ -16,6 +16,17 @@ const { collectKolActivity, collectSmartMoneyActivity } = require("../collectors
 const { collectGasPrice } = require("../collectors/gmgn/gasPriceCollector");
 const { collectLaunchpadStats } = require("../collectors/gmgn/launchpadStatsCollector");
 const { createLockGuard } = require("../services/schedulerLockGuard");
+// Arjuna V4 Phase 2 (Realtime Pulse) - chained onto THIS scheduler's own
+// tick rather than an independently-scheduled timer, specifically to
+// avoid the "duplicate polling" class of bug two independently-drifting
+// timers could cause (PHASE2_ARCHITECTURE_REVIEW.md Section 8). Consumes
+// only data this tick's own collectors already fetched - zero new GMGN
+// calls.
+const freshUniverseService = require("../services/freshUniverseService");
+const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
+const gmgnActivityFeedRepository = require("../repositories/gmgnActivityFeedRepository");
+const realtimePulseService = require("../services/realtimePulseService");
+const realtimePulseBufferService = require("../services/realtimePulseBufferService");
 
 const INTERVAL_MS = 30000;
 
@@ -184,6 +195,78 @@ async function runCollector({ name, run }){
 
 }
 
+// Arjuna V4 Phase 2 (Realtime Pulse) - own liveness/cost tracking,
+// separate from the collector batch's own getTickHealth() above, so a
+// slow/failed Pulse tick is a real, independently-visible fact (same
+// "every important signal must be observable" requirement the rest of
+// this sprint follows) without conflating it with collector health.
+let lastPulseTickAt = null;
+let lastPulseDurationMs = null;
+let lastPulseTokenCount = null;
+let lastPulseEvictedCount = null;
+let lastPulseError = null;
+
+function getPulseHealth(){
+    return {
+        lastPulseTickAt, lastPulseDurationMs, lastPulseTokenCount, lastPulseEvictedCount, lastPulseError,
+        bufferedTokenCount: realtimePulseBufferService.size()
+    };
+}
+
+// Deferred via setImmediate - runs AFTER this collector tick's own lock
+// has already been released and its own duration/health already
+// recorded, so Pulse's cost can never count against or delay the
+// collector batch's own health signal, and yields to any pending I/O
+// callback first (PHASE2_ARCHITECTURE_REVIEW.md Section 3/8's "scheduler
+// starvation" mitigation). Scoped strictly to the fresh-universe
+// population already computed for scoring - never the full gmgn_tokens
+// table. Measured cost (durationMs, logged every tick) is expected to
+// stay in the low milliseconds for a fresh-universe population of a few
+// hundred tokens (see PHASE2_ARCHITECTURE_REVIEW.md Section 7's
+// estimate); if production data ever shows this growing large, the
+// documented next step is offloading to a worker thread the same way
+// services/scoringWorkerPool.js already does for scoring - not
+// implemented here since there is no evidence yet that it's needed
+// ("don't design for hypothetical future requirements").
+function triggerRealtimePulseTick(){
+
+    setImmediate(() => {
+
+        const tickStartedAt = Date.now();
+
+        try{
+
+            const { tokens } = freshUniverseService.getBuyCandidateUniverse();
+            const tokenAddresses = tokens.map(t => t.token_address);
+
+            const trenchesByAddress = gmgnTrenchesRepository.findManyByTokenAddresses(tokenAddresses);
+            const smartMoneyRows = gmgnActivityFeedRepository.findAllByType("smart_money");
+            const kolRows = gmgnActivityFeedRepository.findAllByType("kol");
+
+            const result = realtimePulseService.runPulseTick({
+                tokens, trenchesByAddress, smartMoneyRows, kolRows, nominalIntervalMs: INTERVAL_MS
+            });
+
+            lastPulseTickAt = new Date().toISOString();
+            lastPulseDurationMs = result.durationMs;
+            lastPulseTokenCount = result.tokenCount;
+            lastPulseEvictedCount = result.evictedCount;
+            lastPulseError = null;
+
+            console.log(`[realtime-pulse] tick complete: tokens=${result.tokenCount} evicted=${result.evictedCount} duration=${result.durationMs}ms (own overhead: ${Date.now() - tickStartedAt}ms)`);
+
+        }
+        catch(err){
+
+            lastPulseError = err.message;
+            console.error("[realtime-pulse] tick FAILED (collector data itself unaffected):", err.message, err);
+
+        }
+
+    });
+
+}
+
 async function runOnce(){
 
     if(!lockGuard.tryAcquire()){
@@ -214,6 +297,11 @@ async function runOnce(){
         console.log(`[gmgn-scheduler] Batch finished in ${durationMs}ms - ${okCount}/${results.length} collectors OK`);
 
         lockGuard.release("FINISHED");
+
+        // Deliberately AFTER release() (this batch's own duration/health
+        // is already finalized above) and deliberately NOT awaited - see
+        // triggerRealtimePulseTick's own header comment.
+        triggerRealtimePulseTick();
 
         return { ok: okCount === results.length, durationMs, results };
 
@@ -248,4 +336,4 @@ function start(){
 
 }
 
-module.exports = { start, runOnce, INTERVAL_MS, COLLECTORS, getCollectorHealth, getTickHealth };
+module.exports = { start, runOnce, INTERVAL_MS, COLLECTORS, getCollectorHealth, getTickHealth, getPulseHealth };

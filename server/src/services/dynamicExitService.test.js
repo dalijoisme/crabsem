@@ -7,9 +7,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { evaluateDynamicExit, MIN_TP_PCT, computeMomentumHealth } = require("./dynamicExitService");
+const {
+    evaluateDynamicExit, MIN_TP_PCT, computeMomentumHealth,
+    resolveEffectiveStopLossPct, resolveEffectiveTp1TriggerPct, resolveEffectiveTp2Pct, resolveEffectiveTimerMinutes
+} = require("./dynamicExitService");
 const exitConfig = require("../config/exitSystemConfig");
 const momentumHealthConfig = require("../config/momentumHealthConfig");
+const realtimePulseBufferService = require("./realtimePulseBufferService");
 
 function position(overrides = {}){
     return {
@@ -161,4 +165,233 @@ test("A genuinely healthy position well above every floor, pre-TP1, just holds -
 test("computeMomentumHealth is unchanged machinery - still returns a neutral score when no real component data exists", () => {
     const health = computeMomentumHealth({ token_address: "TEST_NO_DATA" }, position(), null);
     assert.equal(health.score, 50);
+});
+
+// Arjuna V4 Phase 2 (Momentum Weakening Evolution) - proves the new
+// optional realtimeSignal parameter is purely additive: score/components
+// are byte-identical with or without it, and it's only ever attached as
+// realtimeFacts.
+test("computeMomentumHealth attaches realtimeSignal as realtimeFacts without changing score/components at all", () => {
+
+    const withoutSignal = computeMomentumHealth(healthyToken(), position(), healthyTrenches());
+    const fakeSignal = { tokenAddress: "TEST_HEALTHY", bufferLength: 3, signals: {}, flowDirectionVoteProvisional: "UP" };
+    const withSignal = computeMomentumHealth(healthyToken(), position(), healthyTrenches(), fakeSignal);
+
+    assert.equal(withSignal.score, withoutSignal.score);
+    assert.deepEqual(withSignal.components, withoutSignal.components);
+    assert.equal(withoutSignal.realtimeFacts, null, "omitted realtimeSignal must fail open to null, never fabricated");
+    assert.deepEqual(withSignal.realtimeFacts, fakeSignal);
+
+});
+
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - Dynamic TP/SL/Adaptive Time
+// Exit are now real. Every resolver reuses the SAME ±15% Realtime Pulse
+// figure the Architect specified for the entry side (see
+// REALTIME_EXIT_ADJUSTMENT_PCT's own header) - proven exactly here.
+test("resolveEffective* TP/SL/Timer hooks are neutral (exitConfig's baseline) with no realtime signal at all", () => {
+
+    const pos = position();
+    const token = healthyToken();
+
+    assert.equal(resolveEffectiveStopLossPct(pos, token, undefined), exitConfig.hardStopLossPct);
+    assert.equal(resolveEffectiveTp1TriggerPct(pos, token, null), exitConfig.tp1.triggerPct);
+    assert.equal(resolveEffectiveTp2Pct(pos, token, {}), exitConfig.tp2Pct);
+    assert.equal(resolveEffectiveTimerMinutes(pos, token, { flowDirectionVoteProvisional: "MIXED" }), exitConfig.timerMinutes);
+
+});
+
+test("weakening momentum tightens Stop Loss/TP1/TP2/Timer by exactly the Architect's ±15% figure", () => {
+
+    const pos = position();
+    const token = healthyToken();
+    const weakening = { flowDirectionVoteProvisional: "DOWN", consistencyVoteProvisional: "MOSTLY_CONSISTENT" };
+
+    assert.equal(resolveEffectiveStopLossPct(pos, token, weakening), exitConfig.hardStopLossPct * 0.85);
+    assert.equal(resolveEffectiveTp1TriggerPct(pos, token, weakening), exitConfig.tp1.triggerPct * 0.85);
+    assert.equal(resolveEffectiveTp2Pct(pos, token, weakening), exitConfig.tp2Pct * 0.85);
+    assert.equal(resolveEffectiveTimerMinutes(pos, token, weakening), exitConfig.timerMinutes * 0.85);
+
+});
+
+test("improving momentum widens TP1/TP2/Timer, but NEVER loosens Stop Loss - capital protection is never traded away for a marginal upside", () => {
+
+    const pos = position();
+    const token = healthyToken();
+    const improving = { flowDirectionVoteProvisional: "UP", consistencyVoteProvisional: "MOSTLY_CONSISTENT" };
+
+    assert.equal(resolveEffectiveStopLossPct(pos, token, improving), exitConfig.hardStopLossPct, "Stop Loss must stay at the full baseline under improving momentum, never loosened");
+    assert.equal(resolveEffectiveTp1TriggerPct(pos, token, improving), exitConfig.tp1.triggerPct * 1.15);
+    assert.equal(resolveEffectiveTp2Pct(pos, token, improving), exitConfig.tp2Pct * 1.15);
+    assert.equal(resolveEffectiveTimerMinutes(pos, token, improving), exitConfig.timerMinutes * 1.15);
+
+});
+
+test("an UP direction WITHOUT consistent agreement is not 'improving' - TP1/TP2/Timer stay at baseline, not widened on a noisy single reading", () => {
+
+    const pos = position();
+    const token = healthyToken();
+    const noisyUp = { flowDirectionVoteProvisional: "UP", consistencyVoteProvisional: "MOSTLY_MIXED" };
+
+    assert.equal(resolveEffectiveTp1TriggerPct(pos, token, noisyUp), exitConfig.tp1.triggerPct);
+    assert.equal(resolveEffectiveTimerMinutes(pos, token, noisyUp), exitConfig.timerMinutes);
+
+});
+
+test("resolveEffectiveTimerMinutes never collapses below the floor even under repeated weakening", () => {
+    const pos = position();
+    const token = healthyToken();
+    const weakening = { flowDirectionVoteProvisional: "DOWN" };
+    assert.ok(resolveEffectiveTimerMinutes(pos, token, weakening) >= 1);
+});
+
+// Arjuna V4 Phase 2 (Realtime position monitoring improvements) - proves
+// evaluateDynamicExit reads a real, buffered Realtime Pulse signal for
+// the held position's own token (not a hardcoded neutral), and that its
+// presence changes only observability (momentumHealth.realtimeFacts),
+// never the actual exit decision for an otherwise-healthy position.
+test("evaluateDynamicExit reads the token's own real Realtime Pulse buffer into momentumHealth.realtimeFacts, without changing the HOLD decision", () => {
+
+    const token = { ...healthyToken(), token_address: "TEST_PULSE_WIRING", price: 1.15 };
+
+    realtimePulseBufferService.recordPoint("TEST_PULSE_WIRING", { recordedAtMs: Date.now() - 30000, liquidity: 1000 });
+    realtimePulseBufferService.recordPoint("TEST_PULSE_WIRING", { recordedAtMs: Date.now(), liquidity: 2000 });
+
+    try{
+
+        const result = evaluateDynamicExit({ position: position(), token, trenchesEntry: healthyTrenches() });
+
+        assert.equal(result.action, "HOLD", "a neutral/single-series-only buffer (mfe_pct:0, mae_pct:0) must not itself trigger any of the new momentum-aware exit rules");
+        assert.ok(result.momentumHealth.realtimeFacts, "the real buffer must have been read, not skipped");
+        assert.equal(result.momentumHealth.realtimeFacts.bufferLength, 2);
+        assert.equal(result.momentumHealth.realtimeFacts.signals.liquidity.direction, "UP");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - Architect's own explicit
+// rule: "If Momentum weakens AND MFE >15%: Exit earlier." Uses the
+// position's own real, already-tracked mfe_pct (not the current roiPct),
+// per this file's own header comment on why.
+test("MOMENTUM_WEAKENING_EARLY_EXIT fires when a real MFE >15% was reached and momentum is now weakening", () => {
+
+    const address = "TEST_MOMENTUM_EARLY_EXIT";
+    const token = { ...healthyToken(), token_address: address, price: 1.10 }; // currently only +10%, well below TP1
+
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 }); // real, consistent DOWN
+
+    try{
+
+        const pos = position({ mfe_pct: 20 }); // a real, already-recorded peak of +20%, well above the 15% bar
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.equal(result.action, "SELL_ALL");
+        assert.equal(result.reason, "MOMENTUM_WEAKENING_EARLY_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+test("MOMENTUM_WEAKENING_EARLY_EXIT does NOT fire when MFE never exceeded 15%, even with weakening momentum", () => {
+
+    const address = "TEST_MOMENTUM_EARLY_EXIT_LOW_MFE";
+    const token = { ...healthyToken(), token_address: address, price: 1.05 };
+
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 });
+
+    try{
+
+        const pos = position({ mfe_pct: 10 }); // real peak, but below the 15% bar
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.notEqual(result.reason, "MOMENTUM_WEAKENING_EARLY_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+// Arjuna V4 FINAL DECISION ENGINE SPRINT - Architect's own explicit
+// rule: "If MAE expands AND Realtime momentum weakens: Accelerate exit."
+// "Expands" = a real, already-existing drawdown (mae_pct < 0) getting
+// WORSE this exact cycle (a new low), per this file's own header.
+test("MAE_ACCELERATED_EXIT fires when a real, already-existing drawdown gets worse this cycle while momentum weakens", () => {
+
+    const address = "TEST_MAE_ACCELERATED";
+    // roiPct at this price is worse than the position's own prior mae_pct below - a genuine new low this cycle.
+    const token = { ...healthyToken(), token_address: address, price: 0.92 }; // -8% this cycle
+
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 });
+
+    try{
+
+        const pos = position({ mae_pct: -5 }); // prior worst was -5%; this cycle's -8% is a real new low
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.equal(result.action, "SELL_ALL");
+        assert.equal(result.reason, "MAE_ACCELERATED_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+test("MAE_ACCELERATED_EXIT does NOT fire when mae_pct has never gone negative - there is nothing real to 'expand'", () => {
+
+    const address = "TEST_MAE_NO_PRIOR_DRAWDOWN";
+    const token = { ...healthyToken(), token_address: address, price: 0.99 };
+
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 });
+
+    try{
+
+        const pos = position({ mae_pct: 0 }); // never dipped negative
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.notEqual(result.reason, "MAE_ACCELERATED_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+test("MAE_ACCELERATED_EXIT does NOT fire on a real new low WITHOUT weakening momentum confirming it", () => {
+
+    const address = "TEST_MAE_NO_WEAKENING_CONFIRM";
+    const token = { ...healthyToken(), token_address: address, price: 0.92 };
+
+    // Consistent UP buffer - a real new ROI low without any real-time
+    // weakening signal to confirm it (e.g. a single bad price tick amid
+    // otherwise-improving flow) must not accelerate the exit.
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+
+    try{
+
+        const pos = position({ mae_pct: -5 });
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.notEqual(result.reason, "MAE_ACCELERATED_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
 });

@@ -102,6 +102,28 @@ function findStuckWithoutTxHash(olderThanMs){
     ).all(Math.round(olderThanMs / 1000));
 }
 
+// Arjuna V4 Phase 1 (Engine Stability) - global (not user-scoped), same
+// convention as findPendingWithTxHash()/findStuckWithoutTxHash() above:
+// the most recent execution that actually reached SUCCESS, across every
+// user. Feeds services/health.js's "Last Successful Execution" dashboard
+// fact - the sprint brief's own requirement to make the execution loop's
+// liveness a real, provable fact rather than something inferred.
+function findLastSuccessful(){
+    return db.prepare(
+        "SELECT * FROM executions WHERE status = 'SUCCESS' ORDER BY created_at DESC LIMIT 1"
+    ).get() ?? null;
+}
+
+// Global count of every execution currently NOT in a terminal state -
+// same status set findActiveByUser()/findStuckWithoutTxHash() already
+// use, just system-wide instead of per-user. Feeds the same execution
+// health block as findLastSuccessful() above.
+function countActive(){
+    return db.prepare(
+        "SELECT COUNT(*) as count FROM executions WHERE status NOT IN ('SUCCESS', 'FAILED', 'TIMEOUT')"
+    ).get().count;
+}
+
 // Single generic transition writer - the repository doesn't have a
 // dedicated statement per state (PREPARING/SIGNING/...) because each
 // transition only ever touches a handful of the same optional columns;
@@ -177,6 +199,7 @@ function forUser(userId){
 
 module.exports = {
     insertExecution, findById, findByUser, findActiveByUser, findPendingWithTxHash, findStuckWithoutTxHash, findFailedBuysSince,
+    findLastSuccessful, countActive,
     transitionExecution,
     insertLog, findLogByExecutionId,
     forUser

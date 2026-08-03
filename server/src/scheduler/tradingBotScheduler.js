@@ -47,11 +47,25 @@ const scoringWorkerPool = require("../services/scoringWorkerPool");
 // the one stage that had zero observability before this sprint.
 const freshUniverseService = require("../services/freshUniverseService");
 const tradingBotFreshUniverseSnapshotRepository = require("../repositories/tradingBotFreshUniverseSnapshotRepository");
+// Arjuna V4 Phase 1 (Engine Stability): the shared watchdog primitive
+// already used by 7 of 9 schedulers (gmgnTrendingScheduler.js etc) -
+// this scheduler and exitEvaluationScheduler.js were the two that
+// actually place/close trades and had NOT adopted it yet. See below for
+// why that mattered.
+const { createLockGuard } = require("../services/schedulerLockGuard");
 
 const TICK_MS = 15000;
 
 const lastCycleAtByUser = new Map(); // userId -> ms epoch of that user's last cycle
-const userCycleInFlight = new Set(); // userId currently mid-cycle - so one user's slow cycle can't overlap ITSELF; never blocks another user's
+// userId -> ms epoch when that user's CURRENT cycle began (present only
+// while a cycle is genuinely in flight). Was a bare Set before Arjuna V4
+// Phase 1 - a wedged runCycle() for one user left that user permanently
+// stuck in the set with no timeout, silently starving just that user's
+// future cycles forever (never globally visible as "stuck"). Now a Map
+// so isDue() can watchdog-clear an entry that's been in flight longer
+// than TICK_STUCK_AFTER_MS, same bound used for the outer-tick watchdog
+// below.
+const userCycleStartedAt = new Map();
 
 // BUY-halt root-cause fix (real production incident, 2026-07-31 15:11:51
 // -> 2026-08-01: this exact scheduler's own tick() stopped running
@@ -64,41 +78,96 @@ const userCycleInFlight = new Set(); // userId currently mid-cycle - so one user
 // whether a cycle is actually still happening - so nothing anywhere
 // could tell "BUY stopped because every coin was rejected" apart from
 // "BUY stopped because this scheduler's own tick() silently died",
-// exactly the ambiguity the bug report asked to close. Same
-// currentTickStartedAt/lastTickFinishedAt/lastTickDurationMs shape
-// scheduler/gmgnTrendingScheduler.js already proved for this - getTickHealth()
+// exactly the ambiguity the bug report asked to close. getTickHealth()
 // below is read by services/health.js so a dead tick is a real, provable
 // /health fact within one tick interval, not something that can only be
 // discovered hours later by manually diffing timestamps across tables.
-let currentTickStartedAt = null;
-let lastTickFinishedAt = null;
-let lastTickDurationMs = null;
+//
+// Arjuna V4 Phase 1 (Engine Stability): detection alone wasn't enough -
+// audited production behavior showed a genuinely wedged tick's own
+// currentTickStartedAt got silently RESET every 15s by the next
+// setInterval firing (this scheduler had no reentrancy guard at the
+// outer-tick level), masking the original hang indefinitely instead of
+// ever surfacing as `stuck`. Replacing the hand-rolled bookkeeping with
+// the shared lock guard fixes this: tryAcquire() returning false on an
+// overlapping fire means a wedged tick's clock is never reset by a later
+// one, AND its own watchdog force-releases the lock past maxDurationMs
+// so a new tick can start again without a manual restart.
 let lastTickError = null;
 
 // Generous relative to a real tick (scoring + fan-out for every due
 // user) - same "generous multiple of an established real cadence"
 // convention health.js's own STALE_AFTER_SECONDS already uses (3x the
-// producer's own interval).
+// producer's own interval). Reused below as BOTH the outer-tick lock
+// guard's watchdog ceiling AND the per-user cycle watchdog bound - one
+// traceable number, comfortably under the <60s auto-recovery ceiling.
 const TICK_STUCK_AFTER_MS = 3 * TICK_MS;
 
+const lockGuard = createLockGuard("trading-bot-scheduler", { maxDurationMs: TICK_STUCK_AFTER_MS });
+
 function getTickHealth(){
-    const stuck = currentTickStartedAt != null && (Date.now() - currentTickStartedAt) > TICK_STUCK_AFTER_MS;
-    const secondsSinceLastFinish = lastTickFinishedAt != null ? Math.round((Date.now() - lastTickFinishedAt) / 1000) : null;
+    const health = lockGuard.getHealth();
+    const secondsSinceLastFinish = health.lastFinishedAt != null ? Math.round((Date.now() - Date.parse(health.lastFinishedAt)) / 1000) : null;
+    const nextTickEtaSeconds = (!health.isRunning && secondsSinceLastFinish != null)
+        ? Math.max(0, Math.round(TICK_MS / 1000 - secondsSinceLastFinish))
+        : null;
     return {
-        currentTickStartedAt,
-        lastTickFinishedAt: lastTickFinishedAt != null ? new Date(lastTickFinishedAt).toISOString() : null,
-        lastTickDurationMs,
+        currentTickStartedAt: health.startedAt,
+        lastTickFinishedAt: health.lastFinishedAt,
+        lastTickDurationMs: health.lastDurationMs,
         lastTickError,
+        // "FINISHED" | "ERROR" | "WATCHDOG_RELEASED" | null (never ticked
+        // yet) - same field gmgnTrendingScheduler.js's own getTickHealth()
+        // already exposes, so a tick that had to be force-released by the
+        // watchdog (as opposed to finishing or throwing normally) is a
+        // real, visible fact on the dashboard, not indistinguishable from
+        // a clean finish.
+        lastOutcome: health.lastOutcome,
         secondsSinceLastFinish,
         // Never having finished a tick yet (fresh process start) is not
         // itself "stuck" - only a tick that started and never returned
         // within TICK_STUCK_AFTER_MS is.
-        stuck
+        stuck: health.stuck,
+        nextTickEtaSeconds,
+        // userIds whose OWN cycle has been in flight longer than
+        // TICK_STUCK_AFTER_MS right now - real-time, not force-cleared
+        // by this read-only getter (the actual clear happens the next
+        // time isDue() checks that user, at most one tick interval away).
+        stuckUsers: getStuckUserIds()
     };
 }
 
+function getStuckUserIds(){
+    const now = Date.now();
+    const stuck = [];
+    for(const [userId, startedAt] of userCycleStartedAt){
+        if(now - startedAt > TICK_STUCK_AFTER_MS) stuck.push(userId);
+    }
+    return stuck;
+}
+
 function isDue(userId, now){
-    if(userCycleInFlight.has(userId)) return false;
+
+    const inFlightSince = userCycleStartedAt.get(userId);
+
+    if(inFlightSince != null){
+
+        // Arjuna V4 Phase 1 (Engine Stability): previously an unconditional
+        // `return false` forever while this user was "in flight" - a
+        // genuinely wedged runCycle() (never-resolving await) permanently
+        // starved just that one user's future cycles, with no bound and
+        // no visible signal. Same TICK_STUCK_AFTER_MS bound as the outer
+        // tick's own lock guard watchdog.
+        if((now - inFlightSince) > TICK_STUCK_AFTER_MS){
+            console.error(`[trading-bot-scheduler] user=${userId} WATCHDOG: cycle in-flight for longer than ${TICK_STUCK_AFTER_MS}ms - force-clearing so this user is never permanently stuck`);
+            userCycleStartedAt.delete(userId);
+        }
+        else{
+            return false;
+        }
+
+    }
+
     const config = tradingBotRepository.getConfig(userId);
     const lastCycleAt = lastCycleAtByUser.get(userId) || 0;
     return (now - lastCycleAt) >= config.scan_interval_seconds * 1000;
@@ -106,12 +175,13 @@ function isDue(userId, now){
 
 // ASYNC (Sprint 2): tradingBotEngine.runCycle() now performs real
 // execution I/O for the Founder wallet in LIVE mode, so it returns a
-// Promise. userCycleInFlight is added/deleted around the awaited call
-// exactly as before - the only change is that "in flight" now correctly
-// spans the real network round-trip too, not just the synchronous scan.
+// Promise. userCycleStartedAt is set/deleted around the awaited call
+// exactly as before (previously a bare Set) - the only change is that
+// "in flight" now correctly spans the real network round-trip too, not
+// just the synchronous scan.
 async function runUserCycle(userId, tokens, liveByAddress){
 
-    userCycleInFlight.add(userId);
+    userCycleStartedAt.set(userId, Date.now());
     lastCycleAtByUser.set(userId, Date.now());
 
     try{
@@ -144,7 +214,7 @@ async function runUserCycle(userId, tokens, liveByAddress){
     }
     finally{
 
-        userCycleInFlight.delete(userId);
+        userCycleStartedAt.delete(userId);
 
     }
 
@@ -310,33 +380,41 @@ async function runTick(){
 
 // BUY-halt root-cause fix: thin wrapper around runTick() (the actual,
 // unchanged scan/score/fan-out logic above) whose only job is to make
-// this scheduler's own liveness a real, always-updated fact -
-// currentTickStartedAt is set BEFORE runTick() does anything, so even a
+// this scheduler's own liveness a real, always-updated fact - the lock
+// guard's startedAt is set BEFORE runTick() does anything, so even a
 // runTick() that throws or never resolves still leaves a real,
 // queryable "this is when it last started" behind for getTickHealth()/
 // services/health.js to report. See this file's own header comment on
-// currentTickStartedAt above for the incident this closes.
+// TICK_STUCK_AFTER_MS above for the incident this closes.
+//
+// Arjuna V4 Phase 1 (Engine Stability): tryAcquire() returning false
+// means a PREVIOUS tick is still genuinely in flight - this tick is
+// skipped outright (never calls runTick(), never resets any clock),
+// which is what actually fixes the original masking bug. If the
+// previous tick really is wedged, the lock guard's own watchdog
+// force-releases it after TICK_STUCK_AFTER_MS regardless, so a future
+// tick can always acquire again without a manual restart.
 async function tick(){
 
-    currentTickStartedAt = Date.now();
+    if(!lockGuard.tryAcquire()){
+
+        console.warn(`[trading-bot-scheduler] Skipped: previous tick still in progress (${new Date().toISOString()})`);
+        return;
+
+    }
 
     try{
 
         await runTick();
         lastTickError = null;
+        lockGuard.release("FINISHED");
 
     }
     catch(err){
 
         lastTickError = err.message;
+        lockGuard.release("ERROR");
         throw err; // unchanged behavior - start()'s own .catch() still logs it
-
-    }
-    finally{
-
-        lastTickDurationMs = Date.now() - currentTickStartedAt;
-        lastTickFinishedAt = Date.now();
-        currentTickStartedAt = null;
 
     }
 
@@ -364,4 +442,4 @@ function start(){
 // getTickHealth is exported for services/health.js - see this file's own
 // header comment on currentTickStartedAt for why this scheduler's own
 // liveness needed to become a real, externally-checkable fact.
-module.exports = { start, tick, getTickHealth };
+module.exports = { start, tick, getTickHealth, TICK_MS };

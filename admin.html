@@ -269,6 +269,82 @@ Loading real data from the backend...
 
 </div>
 
+<!-- ENGINE STABILITY (Arjuna V4 Phase 1) - the two loops that actually
+     place/close trades (research/candidate scan+entry, and the
+     independent exit-evaluation loop), plus the execution layer -
+     previously only the GMGN collector scheduler above had any
+     dashboard-visible heartbeat at all. A real production incident
+     (2026-07-31 -> 08-01) had the loop below silently stop for ~2 hours
+     with nothing here to show it. Fed by GET /admin/system's new
+     scheduler.tradingBot / scheduler.exitEvaluation / execution blocks. -->
+
+<p class="adminNote" style="margin-top:14px;">Engine Stability - Research/Candidate &amp; Exit Loops</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Research/Candidate Loop</span><strong id="sysTradingBotLoop">-</strong></div>
+<div class="adminStat"><span>Last Tick</span><strong id="sysTradingBotLastTick">-</strong></div>
+<div class="adminStat"><span>Next Tick</span><strong id="sysTradingBotNextTick">-</strong></div>
+<div class="adminStat"><span>Loop Duration</span><strong id="sysTradingBotDuration">-</strong></div>
+
+<div class="adminStat"><span>Exit Loop</span><strong id="sysExitLoop">-</strong></div>
+<div class="adminStat"><span>Last Tick</span><strong id="sysExitLastTick">-</strong></div>
+<div class="adminStat"><span>Next Tick</span><strong id="sysExitNextTick">-</strong></div>
+<div class="adminStat"><span>Last Successful Execution</span><strong id="sysLastExecution">-</strong></div>
+
+</div>
+
+<!-- REALTIME PULSE (Arjuna V4 Phase 2) - the Pulse tick chained onto the
+     GMGN collector scheduler (see gmgnTrendingScheduler.js's own
+     triggerRealtimePulseTick) plus the Daily Trading Review scheduler
+     (once-a-day trigger) - fed by GET /admin/system's new
+     realtimePulse / scheduler.dailyReview blocks. -->
+
+<p class="adminNote" style="margin-top:14px;">Realtime Pulse &amp; Daily Review (Arjuna V4 Phase 2 - observation mode, does not yet influence entry/exit decisions)</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Pulse Last Tick</span><strong id="sysPulseLastTick">-</strong></div>
+<div class="adminStat"><span>Pulse Tokens Tracked</span><strong id="sysPulseTokenCount">-</strong></div>
+<div class="adminStat"><span>Pulse Buffered Tokens</span><strong id="sysPulseBufferedCount">-</strong></div>
+<div class="adminStat"><span>Pulse Tick Duration</span><strong id="sysPulseDuration">-</strong></div>
+
+<div class="adminStat"><span>Daily Review Loop</span><strong id="sysDailyReviewLoop">-</strong></div>
+<div class="adminStat"><span>Last Generated</span><strong id="sysDailyReviewLastGenerated">-</strong></div>
+
+</div>
+
+</section>
+
+<!-- DAILY TRADING REVIEW (Arjuna V4 Phase 2) - the most recently
+     generated automatic daily report (never "today", which is still in
+     progress). Fed by GET /admin/daily-review. Research-only - never
+     auto-applied to production formulas. -->
+
+<section class="adminSection" id="secDailyReview">
+
+<h3>Daily Trading Review</h3>
+
+<p class="adminNote">Most recently generated automatic daily report. Research-only - never automatically changes production formulas.</p>
+
+<div class="adminGrid4">
+
+<div class="adminStat"><span>Review Date</span><strong id="drReviewDate">-</strong></div>
+<div class="adminStat"><span>Total Trades</span><strong id="drTotalTrades">-</strong></div>
+<div class="adminStat"><span>Win Rate</span><strong id="drWinRate">-</strong></div>
+<div class="adminStat"><span>Net Profit</span><strong id="drNetProfit">-</strong></div>
+<div class="adminStat"><span>Avg ROI</span><strong id="drAvgRoi">-</strong></div>
+<div class="adminStat"><span>Avg MFE</span><strong id="drAvgMfe">-</strong></div>
+<div class="adminStat"><span>Avg MAE</span><strong id="drAvgMae">-</strong></div>
+<div class="adminStat"><span>Avg Holding Time</span><strong id="drAvgHolding">-</strong></div>
+
+</div>
+
+<div id="drNoData" class="adminNote" style="display:none;">No review generated yet.</div>
+
+<p class="adminNote" style="margin-top:14px;">Suggested Observations (plain facts, not directives)</p>
+<ul id="drObservations" class="adminBarList"></ul>
+
 </section>
 
 <!-- WALLET -->

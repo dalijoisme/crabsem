@@ -149,6 +149,70 @@ test("no RUNNING users - tick() is a cheap no-op, never calls getConfig at all",
 
 });
 
+// Arjuna V4 Phase 1 (Engine Stability): a genuinely wedged
+// runExitCycle() for one user must never permanently block that user's
+// future exit checks - the exact blind spot the audit found here (this
+// scheduler's outer tick is synchronous/fire-and-forget, so lastTickAt
+// always looks fresh regardless of whether any user's exit cycle ever
+// finishes). Uses node:test's built-in Date mock (no real 45s wait) to
+// simulate the watchdog bound elapsing.
+test("a user's wedged exit cycle is reported as stuck, then force-cleared and reusable once USER_CYCLE_WATCHDOG_MS elapses", async (t) => {
+
+    const userId = 9001;
+    const configsByUser = { [userId]: { exit_evaluation_interval_seconds: 1 } };
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => [userId]),
+        stub(tradingBotRepository, "getConfig", (id) => configsByUser[id])
+    ];
+
+    let runExitCycleCallCount = 0;
+    restores.push(stub(tradingBotEngine, "runExitCycle", async () => {
+        runExitCycleCallCount++;
+        return new Promise(() => {}); // never resolves - simulates a genuinely wedged exit cycle
+    }));
+
+    try{
+
+        // Enabled BEFORE the cycle starts (with `now` anchored to the
+        // real current time, only the Date API mocked so setImmediate
+        // below still runs on the real event loop) so the in-flight
+        // entry's own startedAt is recorded on the SAME clock the later
+        // tick() advances.
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+        scheduler.tick(); // starts the wedged cycle for userId (fire-and-forget)
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(runExitCycleCallCount, 1);
+
+        // Not yet past the watchdog bound - must not be reported as stuck.
+        // Checked with .includes() rather than a full deepEqual: userId
+        // 2001's own permanently-wedged cycle from the earlier "mid-cycle"
+        // test above (line 66) legitimately leaks into this same
+        // module-level Map for the rest of this file's process, by that
+        // test's own deliberate design (see this file's own header
+        // comment on why each test uses a fresh userId range) - this
+        // test only needs to prove things about ITS OWN userId 9001.
+        assert.equal(scheduler.getTickHealth().stuckUsers.includes(userId), false);
+
+        t.mock.timers.tick(45001); // USER_CYCLE_WATCHDOG_MS + 1ms
+
+        assert.equal(scheduler.getTickHealth().stuckUsers.includes(userId), true, "an exit cycle still in flight past USER_CYCLE_WATCHDOG_MS must be reported as stuck");
+
+        scheduler.tick(); // isDue() must now force-clear userId's stale in-flight entry and re-run its exit cycle
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.equal(runExitCycleCallCount, 2, "the user's slot must be force-cleared and reusable once the watchdog bound elapses, not permanently stuck");
+        assert.equal(scheduler.getTickHealth().stuckUsers.includes(userId), false, "the freshly re-started cycle just began (at the current mocked time), so it must not be immediately reported as stuck again");
+
+    }
+    finally{
+        t.mock.timers.reset();
+        restores.forEach(restore => restore());
+    }
+
+});
+
 // BUY-halt root-cause fix: a real production incident where this exact
 // scheduler's own tick() (and every other scheduler in the same process)
 // silently stopped running for hours, with trading_bot_state.status

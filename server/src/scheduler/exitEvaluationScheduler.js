@@ -24,8 +24,28 @@ const TICK_MS = 1000;
 // against a real trading_bot_config row.
 const DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS = 5;
 
+// Arjuna V4 Phase 1 (Engine Stability): the same bound
+// scheduler/tradingBotScheduler.js uses for its own outer-tick lock
+// guard AND its per-user cycle watchdog (3x its 15s tick) - reused here
+// rather than invented fresh, so both critical BUY/SELL loops share one
+// traceable "this is definitely wedged" number, comfortably under the
+// sprint's <60s auto-recovery ceiling. This scheduler's own outer tick
+// is a fixed 1s, so that same 3x-of-outer-tick formula would be far too
+// tight for a real exit cycle (RPC/confirmation round-trips) - the
+// absolute value is shared instead of the formula.
+const USER_CYCLE_WATCHDOG_MS = 45000;
+
 const lastCycleAtByUser = new Map(); // userId -> ms epoch of that user's last exit-evaluation cycle
-const userCycleInFlight = new Set(); // userId currently mid-cycle - so one user's slow cycle can't overlap ITSELF; never blocks another user's
+// userId -> ms epoch when that user's CURRENT exit cycle began (present
+// only while a cycle is genuinely in flight). Was a bare Set before
+// Arjuna V4 Phase 1 - a wedged runExitCycle() for one user left that
+// user's SELL checks permanently stuck with no timeout, and (per the
+// audit) the outer tick's own lastTickAt is stamped fresh every 1s
+// regardless, so this was invisible to getTickHealth() even if it
+// happened for EVERY running user. Now a Map so isDue() can
+// watchdog-clear an entry stuck past USER_CYCLE_WATCHDOG_MS, and
+// getTickHealth() can report it as a real, visible fact.
+const userCycleStartedAt = new Map();
 
 // BUY-halt root-cause fix (see scheduler/tradingBotScheduler.js's own
 // header comment on currentTickStartedAt for the real incident this
@@ -43,11 +63,52 @@ function getTickHealth(){
     // established real cadence" convention used throughout this codebase
     // (see health.js's own STALE_AFTER_SECONDS).
     const stuck = secondsSinceLastTick != null && secondsSinceLastTick > (10 * TICK_MS / 1000);
-    return { lastTickAt: lastTickAt != null ? new Date(lastTickAt).toISOString() : null, secondsSinceLastTick, stuck };
+    const nextTickEtaSeconds = lastTickAt != null
+        ? Math.max(0, Math.round((TICK_MS - (Date.now() - lastTickAt)) / 1000))
+        : null;
+    return {
+        lastTickAt: lastTickAt != null ? new Date(lastTickAt).toISOString() : null,
+        secondsSinceLastTick,
+        // The outer tick's own staleness above proves this scheduler's
+        // JS event loop is alive, but (per the audit) says nothing about
+        // whether any user's actual exit cycle is progressing - a
+        // hung-for-every-user exit cycle looked identical to a healthy
+        // tick before Arjuna V4 Phase 1. This is that missing signal.
+        stuckUsers: getStuckUserIds(),
+        stuck,
+        nextTickEtaSeconds
+    };
+}
+
+function getStuckUserIds(){
+    const now = Date.now();
+    const stuck = [];
+    for(const [userId, startedAt] of userCycleStartedAt){
+        if(now - startedAt > USER_CYCLE_WATCHDOG_MS) stuck.push(userId);
+    }
+    return stuck;
 }
 
 function isDue(userId, now){
-    if(userCycleInFlight.has(userId)) return false;
+
+    const inFlightSince = userCycleStartedAt.get(userId);
+
+    if(inFlightSince != null){
+
+        // Arjuna V4 Phase 1 (Engine Stability): previously an unconditional
+        // `return false` forever while this user was "in flight" - a
+        // genuinely wedged runExitCycle() permanently blocked just that
+        // user's future SELL checks, with no bound and no visible signal.
+        if((now - inFlightSince) > USER_CYCLE_WATCHDOG_MS){
+            console.error(`[exit-evaluation-scheduler] user=${userId} WATCHDOG: exit cycle in-flight for longer than ${USER_CYCLE_WATCHDOG_MS}ms - force-clearing so this user's exits are never permanently stuck`);
+            userCycleStartedAt.delete(userId);
+        }
+        else{
+            return false;
+        }
+
+    }
+
     const config = tradingBotRepository.getConfig(userId);
     const intervalSeconds = config.exit_evaluation_interval_seconds ?? DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS;
     const lastCycleAt = lastCycleAtByUser.get(userId) || 0;
@@ -59,7 +120,7 @@ function isDue(userId, now){
 // another user's, and never blocks this scheduler's own next tick either.
 async function runUserExitCycle(userId){
 
-    userCycleInFlight.add(userId);
+    userCycleStartedAt.set(userId, Date.now());
     lastCycleAtByUser.set(userId, Date.now());
 
     try{
@@ -78,7 +139,7 @@ async function runUserExitCycle(userId){
     }
     finally{
 
-        userCycleInFlight.delete(userId);
+        userCycleStartedAt.delete(userId);
 
     }
 
@@ -115,4 +176,4 @@ function start(){
 // tick is exported alongside start purely for this file's own regression
 // test, same convention scheduler/tradingBotScheduler.js already uses.
 // getTickHealth is exported for services/health.js.
-module.exports = { start, tick, DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS, getTickHealth };
+module.exports = { start, tick, DEFAULT_EXIT_EVALUATION_INTERVAL_SECONDS, getTickHealth, TICK_MS };

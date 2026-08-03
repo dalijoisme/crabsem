@@ -55,6 +55,25 @@ async function getWalletsSummary(req, res, next){
 
 }
 
+// Arjuna V4 Phase 2 (Daily Trading Review infrastructure) - ?date=YYYY-MM-DD
+// optional, omitted defaults to the most recently generated real review.
+// A day that was never reviewed returns success with data:null (never a
+// fabricated report, never a 404 - "no review exists yet" is a real,
+// valid state e.g. before this sprint's first full day in production).
+async function getDailyReview(req, res, next){
+
+    try{ sendSuccess(res, adminService.getDailyReview(req.query.date)); }
+    catch(err){ next(err); }
+
+}
+
+async function getDailyReviewRecent(req, res, next){
+
+    try{ sendSuccess(res, adminService.getDailyReviewRecent(Number(req.query.limit) || undefined)); }
+    catch(err){ next(err); }
+
+}
+
 async function getEngineConfig(req, res, next){
 
     try{ sendSuccess(res, adminService.getEngineConfig()); }
@@ -134,6 +153,10 @@ module.exports = {
     getSystem,
 
     getWalletsSummary,
+
+    getDailyReview,
+
+    getDailyReviewRecent,
 
     getEngineConfig,
 

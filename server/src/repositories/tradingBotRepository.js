@@ -447,7 +447,7 @@ const insertTradeStmt = db.prepare(`
         entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification,
         actual_sol_spent, actual_sol_received, realized_pnl_sol, realized_roi_pct,
         entry_tx_signature, exit_tx_signature, entry_block_time, exit_block_time,
-        roi_version, dataset_version, actual_exit_price
+        roi_version, dataset_version, actual_exit_price, realtime_pulse_at_entry_json, confidence_adjustment_at_entry_json
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
         @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason,
@@ -457,7 +457,7 @@ const insertTradeStmt = db.prepare(`
         @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification,
         @actualSolSpent, @actualSolReceived, @realizedPnlSol, @realizedRoiPct,
         @entryTxSignature, @exitTxSignature, @entryBlockTime, @exitBlockTime,
-        @roiVersion, @datasetVersion, @actualExitPrice
+        @roiVersion, @datasetVersion, @actualExitPrice, @realtimePulseAtEntryJson, @confidenceAdjustmentAtEntryJson
     )
 `);
 
@@ -510,6 +510,22 @@ function buildTradeDatasetFields(position){
         entryReasonsJson: breakdown.reasons ? JSON.stringify(breakdown.reasons) : null,
         riskReasonsJson: breakdown.riskReasons ? JSON.stringify(breakdown.riskReasons) : null,
         moduleScoresJson: breakdown.breakdown ? JSON.stringify(breakdown.breakdown) : null,
+        // Arjuna V4 Phase 2 (Realtime Pulse) - already present inside
+        // moduleScoresJson above (breakdown.breakdown.realtimePulse), but
+        // projected onto its own dedicated column too so a future self-
+        // learning/Daily Review query never has to reach into a nested
+        // JSON blob to find it - same "project once, read cheaply later"
+        // reasoning every other field in this function already follows.
+        realtimePulseAtEntryJson: breakdown.breakdown?.realtimePulse ? JSON.stringify(breakdown.breakdown.realtimePulse) : null,
+        // Arjuna V4 FINAL DECISION ENGINE SPRINT - the real, Architect-
+        // specified confidence adjustment applied to THIS exact BUY
+        // (Token Age/Realtime Pulse/Smart Money/KOL/Fake Pump components
+        // + the combined multiplier - see
+        // services/realtimeConfidenceAdjustmentService.js), projected
+        // onto its own dedicated column for the same reason
+        // realtimePulseAtEntryJson is - the Daily Trading Review measures
+        // each component's real effectiveness without re-deriving it.
+        confidenceAdjustmentAtEntryJson: breakdown.breakdown?.realtimeConfidenceAdjustment ? JSON.stringify(breakdown.breakdown.realtimeConfidenceAdjustment) : null,
         datasetVersion: DATASET_VERSION
     };
 }

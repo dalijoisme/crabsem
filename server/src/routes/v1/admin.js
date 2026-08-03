@@ -29,6 +29,10 @@ router.use("/admin", adminAuth);
 router.get("/admin/dashboard", controller.getDashboard);
 router.get("/admin/system", controller.getSystem);
 router.get("/admin/wallets/summary", controller.getWalletsSummary);
+
+// Arjuna V4 Phase 2 (Daily Trading Review infrastructure).
+router.get("/admin/daily-review", controller.getDailyReview);
+router.get("/admin/daily-review/recent", controller.getDailyReviewRecent);
 router.get("/admin/engine/config", controller.getEngineConfig);
 router.get("/admin/predictions/summary", controller.getPredictionSummary);
 router.get("/admin/predictions/throughput", controller.getPredictionThroughput);

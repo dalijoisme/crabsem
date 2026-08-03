@@ -10,7 +10,13 @@ const MAX_SCORE = config.participant.weights.kol;
 
 const MIN_VOLUME = config.participant.minSignificantVolumeUsd.kol;
 
-function score(activities, change1h){
+// Arjuna V4 Phase 2 (KOL Evolution) - realtimeSignal is OPTIONAL and
+// TRAILING, same contract as smartMoney.js's own identical addition (see
+// that file's header for the full reasoning). Every existing caller that
+// doesn't pass a 3rd argument is byte-identical to before this sprint;
+// this function's score/reasons/riskReasons logic is completely
+// unchanged - realtimeSignal is only ever attached as `realtimeFacts`.
+function score(activities, change1h, realtimeSignal){
 
     if(!activities || !activities.length){
 
@@ -24,7 +30,9 @@ function score(activities, change1h){
 
             reasons: [],
 
-            riskReasons: []
+            riskReasons: [],
+
+            realtimeFacts: realtimeSignal ?? null
 
         };
 
@@ -94,7 +102,11 @@ function score(activities, change1h){
 
     }
 
-    return { score: finalScore, max: MAX_SCORE, hasData: true, reasons, riskReasons };
+    return {
+        score: finalScore, max: MAX_SCORE, hasData: true, reasons, riskReasons,
+        // Additive observability only - see this function's own header.
+        realtimeFacts: realtimeSignal ?? null
+    };
 
 }
 

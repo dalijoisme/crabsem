@@ -623,6 +623,14 @@ function renderStrategyProfile(c){
 
 function fmtSol(n){ return n == null ? "—" : `${Number(n).toFixed(4)} SOL`; }
 
+// Production hotfix - walletBalanceUnavailableReason now carries a real,
+// specific diagnostic string (an RPC error message, etc.) into markup
+// built via innerHTML. Minimal, local escaping so that text is always
+// treated as plain text, never markup.
+function escapeHtml(str){
+    return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
+}
+
 function renderTradingConfigurationPreview(tc){
     const modeEl = document.getElementById("tcSizingMode");
     const pctEl = document.getElementById("tcPositionSizePct");
@@ -696,7 +704,7 @@ function renderTradingConfiguration(tc){
             <div class="adminStat"><span>Available Cash</span><strong>${fmtUsd(tc.availableCashUsd)}</strong></div>
         </div>
         <div class="tbDecisionMeta">
-            Wallet source: ${tc.walletBalanceSource === "REAL" ? "real on-chain balance" : "unavailable - generate a Trading Wallet and fund it to see real balances"}${tc.solUsdPrice ? ` · SOL/USD ${fmtUsd(tc.solUsdPrice)}` : ""}
+            Wallet source: ${tc.walletBalanceSource === "REAL" ? "real on-chain balance" : `unavailable${tc.walletBalanceUnavailableReason ? ` - ${escapeHtml(tc.walletBalanceUnavailableReason)}` : " - generate a Trading Wallet and fund it to see real balances"}`}${tc.solUsdPrice ? ` · SOL/USD ${fmtUsd(tc.solUsdPrice)}` : ""}
         </div>
 
         <div class="tbConfigSaveRow">
@@ -780,7 +788,9 @@ function renderTradingConfiguration(tc){
         const walletUsd = tc.walletBalanceUsd;
         const currentCapitalUsd = tc.availableCashUsd;
         if(walletUsd == null){
-            msgEl.textContent = "Real wallet balance is unavailable right now - cannot reset.";
+            msgEl.textContent = tc.walletBalanceUnavailableReason
+                ? `Real wallet balance is unavailable right now - cannot reset. (${tc.walletBalanceUnavailableReason})`
+                : "Real wallet balance is unavailable right now - cannot reset.";
             msgEl.className = "tbControlMsg tbMsgError";
             return;
         }

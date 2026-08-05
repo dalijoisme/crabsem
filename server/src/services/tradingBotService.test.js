@@ -312,6 +312,7 @@ test("getTradingConfiguration reports honest unavailable wallet state and real s
         const tc = await tradingBotService.getTradingConfiguration(tcUserId);
         assert.equal(tc.walletBalanceUsd, null);
         assert.equal(tc.walletBalanceSource, "UNAVAILABLE");
+        assert.equal(tc.walletBalanceUnavailableReason, "No Trading Wallet is configured for this account yet", "production hotfix: the real, specific reason must reach the API caller, not just the fact that it's unavailable");
         assert.equal(tc.reservedUsd, null, "reserved must be honestly unavailable, never computed from a missing wallet balance");
         assert.equal(tc.tradingAllocationUsd, 100); // real default initial_capital
         assert.equal(tc.sizing.mode, "PERCENT");
@@ -324,6 +325,41 @@ test("getTradingConfiguration reports honest unavailable wallet state and real s
 
     }
     finally{
+        deleteTestUser(tcUserId);
+    }
+
+});
+
+// Production hotfix: a Trading Wallet DOES exist, but the real balance
+// read itself failed (RPC timeout, RPC misconfigured, etc.) -
+// walletService.js already computes a real, specific unavailableReason
+// for this exact case; this proves it now survives all the way to the
+// API response instead of being silently discarded, so a stuck "Wallet
+// Balance: Unavailable" is diagnosable instead of a dead end.
+test("getTradingConfiguration surfaces the real reason when a Trading Wallet exists but the RPC balance read failed", async () => {
+
+    const testEmail = `tradingbotservice.test.tcreason.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const tcUserId = registerResult.userId;
+
+    tradingWalletRepository.insertWallet({ userId: tcUserId, publicKey: `FakeReasonWallet${crypto.randomBytes(4).toString("hex")}`, encryptedPrivateKey: "unused" });
+
+    const restore = stub(walletService, "getRealWalletBalance", async () => ({
+        publicKey: "FakeReasonWallet", solLamports: null, solAmount: null, solUsdPrice: null, solUsd: null,
+        unavailableReason: "RPC balance read failed: connect ETIMEDOUT (simulated)"
+    }));
+
+    try{
+
+        const tc = await tradingBotService.getTradingConfiguration(tcUserId);
+        assert.equal(tc.walletBalanceUsd, null);
+        assert.equal(tc.walletBalanceSource, "UNAVAILABLE");
+        assert.equal(tc.walletBalanceUnavailableReason, "RPC balance read failed: connect ETIMEDOUT (simulated)");
+
+    }
+    finally{
+        restore();
         deleteTestUser(tcUserId);
     }
 

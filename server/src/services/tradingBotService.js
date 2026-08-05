@@ -300,6 +300,18 @@ async function getTradingConfiguration(userId){
     let walletBalanceUsd = null, walletBalanceSol = null, walletBalanceSource = "UNAVAILABLE";
     const solUsdPrice = real?.solUsdPrice ?? null;
 
+    // Production hotfix - "Wallet Balance: Unavailable" with no visible
+    // reason: walletService.getRealWalletBalance() already computes a
+    // real, specific unavailableReason (no Trading Wallet row, RPC read
+    // failure with the real error message, SOLANA_RPC_URL not
+    // configured) but this function was discarding it before returning -
+    // the API caller (and therefore the dashboard) had no way to tell
+    // WHY, only THAT. Surfaced honestly below, never fabricated: null
+    // when a real balance was actually read (walletBalanceSource=REAL).
+    const walletBalanceUnavailableReason = real
+        ? (real.solUsd != null ? null : (real.unavailableReason ?? "Wallet balance read returned no data"))
+        : "No Trading Wallet is configured for this account yet";
+
     if(real && real.solUsd != null){
         walletBalanceUsd = real.solUsd;
         walletBalanceSol = real.solAmount;
@@ -321,7 +333,7 @@ async function getTradingConfiguration(userId){
     const portfolio = getPortfolio(userId);
 
     return {
-        walletBalanceUsd, walletBalanceSol, walletBalanceSource,
+        walletBalanceUsd, walletBalanceSol, walletBalanceSource, walletBalanceUnavailableReason,
         tradingAllocationUsd, tradingAllocationSol,
         reservedUsd, reservedSol,
         availableCashUsd: portfolio.availableCash,

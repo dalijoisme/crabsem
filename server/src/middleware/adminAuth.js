@@ -24,7 +24,13 @@ function adminAuth(req, res, next){
 
     }
 
-    const provided = req.headers["x-admin-key"];
+    // Admin-auth bug fix: trims the header value before comparing -
+    // config.ADMIN_PASSWORD is already trimmed at its one canonical read
+    // point (config/env.js). A session token (adminAuthService.isValidToken)
+    // is a crypto.randomBytes hex string and never has meaningful
+    // whitespace, so trimming it here is a harmless no-op for that path.
+    const rawProvided = req.headers["x-admin-key"];
+    const provided = typeof rawProvided === "string" ? rawProvided.trim() : rawProvided;
 
     if(!provided || (provided !== config.ADMIN_PASSWORD && !adminAuthService.isValidToken(provided))){
 

@@ -33,7 +33,16 @@ const config = Object.freeze({
     // no role system yet (explicitly out of scope for this sprint).
     // null (unset) means the admin API is fully disabled rather than
     // silently open - see middleware/adminAuth.js.
-    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || null,
+    //
+    // Admin-auth bug fix: trimmed here, once, at the single canonical
+    // read point - a trailing newline/space in server/.env's
+    // ADMIN_PASSWORD line (invisible in an editor, common from a
+    // pasted/edited .env file) previously made every comparison in
+    // middleware/adminAuth.js and services/adminAuthService.js fail
+    // even when the "real" password looked identical. An all-whitespace
+    // value trims to "" and falls through to null - never treated as a
+    // real, non-empty password.
+    ADMIN_PASSWORD: (process.env.ADMIN_PASSWORD || "").trim() || null,
 
     // Auth + Onboarding sprint - where the frontend is actually served
     // from, used only to build verification/password-reset links (see

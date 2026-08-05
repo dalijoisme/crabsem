@@ -25,7 +25,15 @@ function login(password){
 
     }
 
-    if(!password || password !== config.ADMIN_PASSWORD){
+    // Admin-auth bug fix: trims the SUBMITTED password before comparing -
+    // config.ADMIN_PASSWORD is already trimmed at its one canonical read
+    // point (config/env.js). Without this, a password pasted/typed with
+    // an incidental leading/trailing space or newline (easy to pick up
+    // copying out of a terminal or .env file) would never match, even
+    // though it looks identical.
+    const submitted = typeof password === "string" ? password.trim() : password;
+
+    if(!submitted || submitted !== config.ADMIN_PASSWORD){
 
         return { ok: false, status: 401, error: "Unauthorized", details: "Incorrect password" };
 

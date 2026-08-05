@@ -3,7 +3,7 @@
 // upserts them into gmgn_hot_searches.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const { transformResponse } = require("../../services/hotSearchesTransformer");
 const gmgnHotSearchesRepository = require("../../repositories/gmgnHotSearchesRepository");
 
@@ -18,17 +18,7 @@ async function collectHotSearches(){
 
     }
 
-    const client = createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
-    const result = await client.getHotSearches([
+    const result = await marketDataGateway.getHotSearches([
 
         { label: "hot-search", chain: CHAIN, interval: INTERVAL }
 

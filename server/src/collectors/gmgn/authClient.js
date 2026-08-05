@@ -110,7 +110,7 @@ class GmgnAuthError extends Error {
 
 }
 
-function createGmgnClient({ apiKey, privateKeyPem, host }){
+function createGmgnClient({ apiKey, privateKeyPem, host, coalesceRequests = false }){
 
     if(!apiKey){
 
@@ -119,6 +119,56 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
     }
 
     const baseHost = host.replace(/\/$/, "");
+
+    // Request coalescing (Held-Position Refresh Architecture, Design 2):
+    // when two callers ask for the exact same logical request (method +
+    // subPath + queryExtra + body) while one is already in flight on
+    // THIS client instance, the second caller shares the first's Promise
+    // instead of issuing a second HTTP call. Keyed BEFORE buildAuthQuery()
+    // runs (see signer.js - timestamp/client_id are fresh, random per
+    // call) so two truly-identical requests coalesce regardless of the
+    // auth nonce each would otherwise get - keying on the final signed
+    // URL would never match. Purely an in-flight dedup, not a cache: the
+    // entry is removed as soon as the shared promise settles (success or
+    // failure) in the `finally` below, so the very next call always goes
+    // live again. Scoped to this client instance only.
+    //
+    // OFF by default (coalesceRequests: false) - deliberately opt-in.
+    // services/marketDataGateway.js's single shared instance is the only
+    // caller that turns it on, for read-only market-data GETs. A trade
+    // submission (POST /v1/trade/swap, services/execution/index.js's own
+    // separate client instance) must never be silently merged with
+    // another in-flight one - two positions could legitimately submit
+    // byte-identical swap params moments apart, and each must produce
+    // its own real, independent trade. Never touching that instance's
+    // behavior is the whole reason this is a constructor flag, not a
+    // hardcoded default.
+    const inFlightRequests = coalesceRequests ? new Map() : null;
+
+    function buildCoalesceKey(method, subPath, queryExtra, body){
+        return `${method} ${subPath} ${JSON.stringify(queryExtra)} ${body !== null ? JSON.stringify(body) : ""}`;
+    }
+
+    async function coalesce(method, subPath, queryExtra, body, run){
+
+        if(!inFlightRequests) return run();
+
+        const key = buildCoalesceKey(method, subPath, queryExtra, body);
+        const existing = inFlightRequests.get(key);
+
+        if(existing) return existing;
+
+        const promise = run();
+        inFlightRequests.set(key, promise);
+
+        try{
+            return await promise;
+        }
+        finally{
+            inFlightRequests.delete(key);
+        }
+
+    }
 
     async function parseResponse(method, subPath, res){
 
@@ -158,27 +208,31 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
 
     async function authExistRequest(method, subPath, queryExtra = {}, body = null){
 
-        const { timestamp, client_id } = buildAuthQuery();
+        return coalesce(method, subPath, queryExtra, body, async () => {
 
-        const query = { ...queryExtra, timestamp, client_id };
+            const { timestamp, client_id } = buildAuthQuery();
 
-        const url = buildUrl(`${baseHost}${subPath}`, query);
+            const query = { ...queryExtra, timestamp, client_id };
 
-        const headers = {
+            const url = buildUrl(`${baseHost}${subPath}`, query);
 
-            "X-APIKEY": apiKey,
+            const headers = {
 
-            "Content-Type": "application/json",
+                "X-APIKEY": apiKey,
 
-            "User-Agent": "crabsem-server/0.1.0"
+                "Content-Type": "application/json",
 
-        };
+                "User-Agent": "crabsem-server/0.1.0"
 
-        const bodyStr = body !== null ? JSON.stringify(body) : undefined;
+            };
 
-        const res = await fetchWithTimeout(url, { method, headers, body: bodyStr }, method, subPath);
+            const bodyStr = body !== null ? JSON.stringify(body) : undefined;
 
-        return parseResponse(method, subPath, res);
+            const res = await fetchWithTimeout(url, { method, headers, body: bodyStr }, method, subPath);
+
+            return parseResponse(method, subPath, res);
+
+        });
 
     }
 
@@ -190,33 +244,37 @@ function createGmgnClient({ apiKey, privateKeyPem, host }){
 
         }
 
-        const { timestamp, client_id } = buildAuthQuery();
+        return coalesce(method, subPath, queryExtra, body, async () => {
 
-        const query = { ...queryExtra, timestamp, client_id };
+            const { timestamp, client_id } = buildAuthQuery();
 
-        const bodyStr = body !== null ? JSON.stringify(body) : "";
+            const query = { ...queryExtra, timestamp, client_id };
 
-        const message = buildMessage(subPath, query, bodyStr, timestamp);
+            const bodyStr = body !== null ? JSON.stringify(body) : "";
 
-        const signature = sign(message, privateKeyPem, detectAlgorithm(privateKeyPem));
+            const message = buildMessage(subPath, query, bodyStr, timestamp);
 
-        const url = buildUrl(`${baseHost}${subPath}`, query);
+            const signature = sign(message, privateKeyPem, detectAlgorithm(privateKeyPem));
 
-        const headers = {
+            const url = buildUrl(`${baseHost}${subPath}`, query);
 
-            "X-APIKEY": apiKey,
+            const headers = {
 
-            "X-Signature": signature,
+                "X-APIKEY": apiKey,
 
-            "Content-Type": "application/json",
+                "X-Signature": signature,
 
-            "User-Agent": "crabsem-server/0.1.0"
+                "Content-Type": "application/json",
 
-        };
+                "User-Agent": "crabsem-server/0.1.0"
 
-        const res = await fetchWithTimeout(url, { method, headers, body: bodyStr || undefined }, method, subPath);
+            };
 
-        return parseResponse(method, subPath, res);
+            const res = await fetchWithTimeout(url, { method, headers, body: bodyStr || undefined }, method, subPath);
+
+            return parseResponse(method, subPath, res);
+
+        });
 
     }
 

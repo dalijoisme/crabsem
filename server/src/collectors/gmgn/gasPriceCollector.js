@@ -2,7 +2,7 @@
 // Solana network fee snapshot from GET /v1/trade/gas_price.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const { transformResponse } = require("../../services/gasPriceTransformer");
 const gmgnGasPriceRepository = require("../../repositories/gmgnGasPriceRepository");
 
@@ -16,17 +16,7 @@ async function collectGasPrice(){
 
     }
 
-    const client = createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
-    const result = await client.getGasPrice(CHAIN);
+    const result = await marketDataGateway.getGasPrice(CHAIN);
 
     const entry = transformResponse(CHAIN, result.data);
 

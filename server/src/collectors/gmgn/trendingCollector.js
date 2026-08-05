@@ -8,7 +8,7 @@
 // never Collector -> Dashboard.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const gmgnSnapshotRepository = require("../../repositories/gmgnSnapshotRepository");
 const gmgnTokenRepository = require("../../repositories/gmgnTokenRepository");
 const tokenPriceHistoryRepository = require("../../repositories/tokenPriceHistoryRepository");
@@ -57,16 +57,6 @@ async function collectTrending(){
 
     }
 
-    const client = createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
     // 1 & 2: fetch each interval, saving every raw response as-is
     // (one gmgn_raw_snapshots row per interval per tick - still fully
     // auditable, just more rows than the single-interval version).
@@ -82,7 +72,7 @@ async function collectTrending(){
 
         const requestParams = { chain: CHAIN, interval, limit: REQUEST_LIMIT };
 
-        const result = await client.getTrendingSwaps(CHAIN, interval, { limit: REQUEST_LIMIT });
+        const result = await marketDataGateway.getTrendingSwaps(CHAIN, interval, { limit: REQUEST_LIMIT });
 
         lastSnapshotId = gmgnSnapshotRepository.insertSnapshot({
 

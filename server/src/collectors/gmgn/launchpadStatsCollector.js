@@ -2,7 +2,7 @@
 // per launchpad platform from GET /v1/cooking/statistics.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const { transformResponse } = require("../../services/launchpadStatsTransformer");
 const gmgnLaunchpadStatsRepository = require("../../repositories/gmgnLaunchpadStatsRepository");
 
@@ -14,17 +14,7 @@ async function collectLaunchpadStats(){
 
     }
 
-    const client = createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
-    const result = await client.getCookingStatistics();
+    const result = await marketDataGateway.getCookingStatistics();
 
     const entries = transformResponse(result.data);
 

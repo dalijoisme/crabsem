@@ -19,6 +19,7 @@ const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
 const researchEngineFactory = require("./researchEngineFactory");
 const strategyProfileTranslator = require("./strategyProfileTranslator");
+const heldPositionMarketStore = require("./heldPositionMarketStore");
 const db = require("../database/connection");
 
 // Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
@@ -685,6 +686,84 @@ test("refreshStaleHeldToken honors markContextStale=false for the profit-protect
     assert.equal(result.price, 1.22, "the refreshed price must win over the shared snapshot's own (potentially up to 30s stale) price");
     assert.equal(result.marketContextStale, false, "a still-fresh token's momentum evidence must never be marked stale just because its price was re-verified early");
     assert.deepEqual(seenTtlSeconds, [REALTIME_EXIT_REFRESH_TTL_SECONDS, REALTIME_EXIT_REFRESH_TTL_SECONDS], "both on-demand calls must use the short profit-protection TTL, never the 60s default");
+
+});
+
+// Held-Position Refresh Architecture, Phase 1 (Design 1: Centralized
+// Refresh Loop): the actual root-cause fix's own wiring proof - when
+// scheduler/heldPositionRefreshScheduler.js's loop has already fetched a
+// token this cycle, refreshStaleHeldToken() must serve that shared
+// result and skip its own direct network call entirely, never call
+// ondemandService at all.
+test("refreshStaleHeldToken serves a fresh heldPositionMarketStore entry and skips the network call entirely", async () => {
+
+    heldPositionMarketStore.clear();
+
+    try{
+
+        const freshToken = { token_address: "TestSharedStoreToken111", symbol: "SHARED", price: 1.0, price_change_5m: 5, market_cap: 5000 };
+        const position = { token_address: "TestSharedStoreToken111", token_symbol: "SHARED", id: 555, entry_price: 1.0 };
+
+        heldPositionMarketStore.set("TestSharedStoreToken111", { price: 9.99, liquidity: 12345 });
+
+        const neverCallOndemand = {
+            async getTokenPoolInfo(){ throw new Error("must never be called - a fresh store entry already exists"); },
+            async getTokenKline(){ throw new Error("must never be called - a fresh store entry already exists"); }
+        };
+
+        const result = await refreshStaleHeldToken(1, position, freshToken, neverCallOndemand, {
+            markContextStale: false,
+            ttlSeconds: REALTIME_EXIT_REFRESH_TTL_SECONDS
+        });
+
+        assert.equal(result.price, 9.99, "the shared store's own real price must be used");
+        assert.equal(result.liquidity, 12345);
+        assert.equal(result.marketContextStale, false);
+
+    }
+    finally{
+        heldPositionMarketStore.clear();
+    }
+
+});
+
+// A store entry OLDER than this call's own ttlSeconds requirement must
+// be treated as a real miss (never accepted as "close enough") - proves
+// this can only ever make a check faster/shared, never staler than the
+// direct-fetch behavior it replaces.
+test("refreshStaleHeldToken ignores a heldPositionMarketStore entry older than its own ttlSeconds and falls back to a direct fetch", async (t) => {
+
+    heldPositionMarketStore.clear();
+    t.mock.timers.enable({ apis: ["Date"] });
+
+    try{
+
+        const freshToken = { token_address: "TestStaleStoreToken111", symbol: "STALESTORE", price: 1.0 };
+        const position = { token_address: "TestStaleStoreToken111", token_symbol: "STALESTORE", id: 556, entry_price: 1.0 };
+
+        heldPositionMarketStore.set("TestStaleStoreToken111", { price: 1.11, liquidity: 100 });
+
+        t.mock.timers.tick((REALTIME_EXIT_REFRESH_TTL_SECONDS * 1000) + 1); // just past the P0 branch's own 5s freshness requirement
+
+        let fallbackCalled = false;
+        const fallbackOndemand = {
+            async getTokenPoolInfo(){ fallbackCalled = true; return { data: { liquidity: "777" } }; },
+            async getTokenKline(){ return { data: { list: [{ close: "2.22" }] } }; }
+        };
+
+        const result = await refreshStaleHeldToken(1, position, freshToken, fallbackOndemand, {
+            markContextStale: false,
+            ttlSeconds: REALTIME_EXIT_REFRESH_TTL_SECONDS
+        });
+
+        assert.equal(fallbackCalled, true, "an entry older than the caller's own ttlSeconds must be an honest miss - the direct fetch fallback must run");
+        assert.equal(result.price, 2.22, "the freshly, directly-fetched price must be used, never the stale store value");
+
+    }
+    finally{
+        t.mock.timers.reset();
+        heldPositionMarketStore.clear();
+    }
 
 });
 

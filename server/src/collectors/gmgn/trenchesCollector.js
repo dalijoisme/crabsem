@@ -3,7 +3,7 @@
 // POST /v1/trenches and upserts them into gmgn_trenches.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const { buildTrenchesBody } = require("./trenchesRequestBuilder");
 const { transformResponse } = require("../../services/trenchesTransformer");
 const gmgnTrenchesRepository = require("../../repositories/gmgnTrenchesRepository");
@@ -18,19 +18,9 @@ async function collectTrenches(){
 
     }
 
-    const client = createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
     const body = buildTrenchesBody(CHAIN, { limit: 30 });
 
-    const result = await client.getTrenches(CHAIN, body);
+    const result = await marketDataGateway.getTrenches(CHAIN, body);
 
     const entries = transformResponse(result.data);
 

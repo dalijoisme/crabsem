@@ -60,6 +60,11 @@ const walletScheduler = require("./scheduler/walletScheduler");
 const predictionValidationScheduler = require("./scheduler/predictionValidationScheduler");
 const tradingBotScheduler = require("./scheduler/tradingBotScheduler");
 const exitEvaluationScheduler = require("./scheduler/exitEvaluationScheduler");
+// Held-Position Refresh Architecture, Phase 1: must start alongside the
+// two schedulers above, not before/instead of either - it only ever
+// SUPPLIES data they read (services/heldPositionMarketStore.js), never
+// replaces their own manageOpenPositions()/exit-decision wiring.
+const heldPositionRefreshScheduler = require("./scheduler/heldPositionRefreshScheduler");
 const missedOpportunityOutcomeScheduler = require("./scheduler/missedOpportunityOutcomeScheduler");
 const abTestScheduler = require("./scheduler/abTestScheduler");
 const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
@@ -170,6 +175,8 @@ const predictionValidationSchedulerHandle = predictionValidationScheduler.start(
 const tradingBotSchedulerHandle = tradingBotScheduler.start();
 
 const exitEvaluationSchedulerHandle = exitEvaluationScheduler.start();
+
+const heldPositionRefreshSchedulerHandle = heldPositionRefreshScheduler.start();
 
 const missedOpportunityOutcomeSchedulerHandle = missedOpportunityOutcomeScheduler.start();
 

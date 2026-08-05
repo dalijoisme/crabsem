@@ -4,13 +4,13 @@
 // by transaction_hash) into gmgn_activity_feed.
 
 const config = require("../../config/env");
-const { createGmgnClient } = require("./authClient");
+const marketDataGateway = require("../../services/marketDataGateway");
 const { transformResponse } = require("../../services/activityFeedTransformer");
 const gmgnActivityFeedRepository = require("../../repositories/gmgnActivityFeedRepository");
 
 const CHAIN = "sol";
 
-function getClient(){
+function assertConfigured(){
 
     if(!config.GMGN_API_KEY){
 
@@ -18,23 +18,13 @@ function getClient(){
 
     }
 
-    return createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
 }
 
 async function collectKolActivity(){
 
-    const client = getClient();
+    assertConfigured();
 
-    const result = await client.getKolActivity(CHAIN, 50);
+    const result = await marketDataGateway.getKolActivity(CHAIN, 50);
 
     const entries = transformResponse("kol", result.data);
 
@@ -46,9 +36,9 @@ async function collectKolActivity(){
 
 async function collectSmartMoneyActivity(){
 
-    const client = getClient();
+    assertConfigured();
 
-    const result = await client.getSmartMoneyActivity(CHAIN, 50);
+    const result = await marketDataGateway.getSmartMoneyActivity(CHAIN, 50);
 
     const entries = transformResponse("smart_money", result.data);
 

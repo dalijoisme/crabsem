@@ -51,6 +51,12 @@ const { marketAgeSecondsFor } = entryGateService;
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
 const gmgnOndemandService = require("./gmgnOndemandService");
+// Held-Position Refresh Architecture, Phase 1 (Design 1): the shared,
+// in-memory store scheduler/heldPositionRefreshScheduler.js's own
+// centralized loop keeps populated - see refreshStaleHeldToken below for
+// how it's used (store-first, direct-fetch fallback, never a widened
+// staleness window).
+const heldPositionMarketStore = require("./heldPositionMarketStore");
 // Arjuna vNext sprint, Priority 1 (Synthetic Market Filter): a local
 // SQLite read, not a GMGN API call - the same gmgn_trenches row
 // entryGateService.js's own MISSING_QUALITY_DATA gate already required
@@ -97,6 +103,16 @@ const productionEngineResolver = require("./productionEngineResolver");
 // bot cycles for every existing scan_interval_seconds default.
 const HELD_POSITION_CHAIN = "sol";
 const HELD_POSITION_STALE_AFTER_MS = 90 * 1000;
+
+// Held-Position Refresh Architecture, Phase 1: mirrors
+// gmgnOndemandService.js's own DEFAULT_TTL_SECONDS - the effective
+// freshness window refreshStaleHeldToken's stale-branch call always had
+// (via that service's own on-demand DB cache) before this sprint, now
+// used as the store-freshness acceptance window for that same branch
+// when no explicit ttlSeconds is passed. Never widens what was already
+// accepted as "fresh enough" - only changes where the number can come
+// from.
+const DEFAULT_ONDEMAND_TTL_SECONDS = 60;
 
 // Exit Engine realtime-latency fix, ORIGINAL scope (Aug 2026 profit-
 // protection incident: a position peaked well past its own take-profit
@@ -199,6 +215,26 @@ function extractFreshPriceAndLiquidity(poolResult, klineResult){
 // profit-protection path needs a much shorter one.
 async function refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale = true, ttlSeconds } = {}){
 
+    // Held-Position Refresh Architecture, Phase 1 (Design 1): a store hit
+    // skips the network call entirely. "Fresh enough" is judged against
+    // THIS call's own ttlSeconds requirement (or the 60s default the
+    // stale-branch always effectively had) - never a wider window than
+    // this call would have accepted before this sprint, so this can only
+    // ever make a check faster/shared, never staler.
+    const maxAgeMs = (ttlSeconds ?? DEFAULT_ONDEMAND_TTL_SECONDS) * 1000;
+    const cached = heldPositionMarketStore.getFresh(position.token_address, maxAgeMs);
+
+    if(cached){
+
+        return {
+            ...(token || { token_address: position.token_address, symbol: position.token_symbol }),
+            price: cached.price,
+            liquidity: cached.liquidity ?? token?.liquidity ?? null,
+            marketContextStale: markContextStale
+        };
+
+    }
+
     try{
 
         const [poolResult, klineResult] = await Promise.all([
@@ -208,6 +244,13 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
         if(!fresh) return token;
+
+        // Written back so the next reader within this same freshness
+        // window - another position sharing this token, or
+        // scheduler/heldPositionRefreshScheduler.js's own next tick -
+        // doesn't need to refetch either. Plain last-write-wins; never
+        // read back within this same call.
+        heldPositionMarketStore.set(position.token_address, { price: fresh.price, liquidity: fresh.liquidity ?? null });
 
         return {
             ...(token || { token_address: position.token_address, symbol: position.token_symbol }),
@@ -995,6 +1038,6 @@ module.exports = {
     runCycle, orderCandidates, buildLiveExecutionOptions,
     msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
     isInProfitProtectionTerritory,
-    HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS,
+    HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, HELD_POSITION_CHAIN,
     manageOpenPositions, runExitCycle
 };

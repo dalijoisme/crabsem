@@ -5,32 +5,20 @@
 // fabricates a response - a cache miss always means a real live
 // GMGN call, and a failure is surfaced as a real error, not a
 // silent fallback.
+//
+// Held-Position Refresh Architecture, Phase 1: the live GMGN call on a
+// cache miss now goes through services/marketDataGateway.js - the one
+// and only door to GMGN market data - instead of building its own
+// collectors/gmgn/authClient.js client. This file's own DB-backed TTL
+// cache (gmgnOndemandCacheRepository) is unchanged; the gateway adds
+// in-flight request coalescing underneath it for the case this cache
+// doesn't already catch - two callers racing a cache miss for the same
+// token/wallet at nearly the same instant.
 
-const config = require("../config/env");
-const { createGmgnClient } = require("../collectors/gmgn/authClient");
 const gmgnOndemandCacheRepository = require("../repositories/gmgnOndemandCacheRepository");
+const marketDataGateway = require("./marketDataGateway");
 
 const DEFAULT_TTL_SECONDS = 60;
-
-function getClient(){
-
-    if(!config.GMGN_API_KEY){
-
-        throw Object.assign(new Error("GMGN_API_KEY is not set in server/.env."), { status: 503 });
-
-    }
-
-    return createGmgnClient({
-
-        apiKey: config.GMGN_API_KEY,
-
-        privateKeyPem: config.GMGN_PRIVATE_KEY,
-
-        host: config.GMGN_HOST
-
-    });
-
-}
 
 async function fetchCached({ endpoint, params, ttlSeconds = DEFAULT_TTL_SECONDS, fetcher }){
 
@@ -40,9 +28,7 @@ async function fetchCached({ endpoint, params, ttlSeconds = DEFAULT_TTL_SECONDS,
 
     if(cached) return cached;
 
-    const client = getClient();
-
-    const result = await fetcher(client);
+    const result = await fetcher(marketDataGateway);
 
     gmgnOndemandCacheRepository.set({
 

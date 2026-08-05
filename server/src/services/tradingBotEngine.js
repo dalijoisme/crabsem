@@ -56,6 +56,11 @@ const gmgnOndemandService = require("./gmgnOndemandService");
 // entryGateService.js's own MISSING_QUALITY_DATA gate already required
 // to exist before a candidate could reach this point.
 const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
+// Sprint 15 (Scientific Decision Framework), Phase 5: piggybacks on this
+// file's own existing exit-management tick (manageOpenPositions below) -
+// never a new poll. Never allowed to affect exit handling - see that
+// service's own header for why calling it here, unguarded, is safe.
+const decisionTimelineService = require("./decisionTimelineService");
 const syntheticMarketFilterService = require("./syntheticMarketFilterService");
 // Section H (Candidate Card): read-only reuse of buildRiskBands for a
 // real "if bought now" Target price on qualified/watch candidates -
@@ -461,6 +466,13 @@ async function manageOpenPositions(userId, tradeManagerForUser, botConfig, token
         }
         if(!token) continue; // never seen even once, and the on-demand refresh also found nothing real - leave position, next cycle may resolve it
 
+        // Sprint 15, Phase 5 (Decision Timeline) - sampled from the SAME
+        // freshly-refreshed token this exit check is about to use, never a
+        // second fetch. Always called (its own decaying-cadence check
+        // decides whether this particular call actually writes a sample) -
+        // never throws, never affects the real close decision right below.
+        decisionTimelineService.maybeSampleForPosition(position, token, gmgnTrenchesRepository.findByTokenAddress(position.token_address));
+
         const result = await tradeManagerForUser.closeIfDue(position, token, botConfig);
         if(result.closed) closed++;
 
@@ -681,6 +693,29 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
                     rank: rankInfoByAddress.get(t.token_address).rank,
                     priorityScore: rankInfoByAddress.get(t.token_address).priorityScore
                 }));
+            // Sprint 15 (Scientific Decision Framework), Phase 4 (Candidate
+            // Snapshot) - a SEPARATE, new field, deliberately not folded
+            // into live.siblings above: that array is already persisted
+            // verbatim as trading_bot_positions.siblings_json, and
+            // "production behaviour must remain identical" means that
+            // existing column's real content must not change shape. This
+            // carries each sibling's own real derived-tier signal (already
+            // computed this exact cycle, in liveByAddress - never
+            // re-scored) for decisionEvidenceService's Candidate Snapshot
+            // only.
+            live.candidateSnapshot = buyTierCandidates
+                .filter(t => t.token_address !== token.token_address)
+                .map(t => {
+                    const siblingLive = liveByAddress.get(t.token_address) || {};
+                    const rank = rankInfoByAddress.get(t.token_address);
+                    return {
+                        tokenAddress: t.token_address, tokenSymbol: t.symbol,
+                        rank: rank.rank, priorityScore: rank.priorityScore,
+                        action: siblingLive.action ?? null, confidence: siblingLive.confidence ?? null,
+                        risk: siblingLive.risk ?? null, participantScore: siblingLive.participantScore ?? null,
+                        marketHealth: siblingLive.marketHealth ?? null, breakdown: siblingLive.breakdown ?? null
+                    };
+                });
         }
 
         // Production Stabilization Final, Section G/H: `evaluation` itself
@@ -761,7 +796,7 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
             syntheticReasons: syntheticCheck.reasons
         };
 
-        const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash);
+        const result = await tradeManagerForUser.openPosition(token, evaluation.live, botConfig, availableCash, userId);
 
         if(result.opened){
             opened++;

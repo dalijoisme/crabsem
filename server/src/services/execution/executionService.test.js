@@ -83,13 +83,14 @@ function fakeTransactionBuilder(){
 // build() returns a marker + submit() closure instead of a signable
 // Transaction. Tracks call counts so tests can prove the local signing
 // path is never touched and submit() only ever fires during SUBMITTING.
-function fakeCustodialTransactionBuilder({ submitTxHash = "gmgn-real-hash", submitError = null } = {}){
+function fakeCustodialTransactionBuilder({ submitTxHash = "gmgn-real-hash", submitError = null, executionTier = null } = {}){
     let submitCalls = 0;
     return {
         get submitCalls(){ return submitCalls; },
         async build(){
             return {
                 __custodialExecution: true,
+                executionTier,
                 async submit(){
                     submitCalls++;
                     if(submitError) throw submitError;
@@ -128,7 +129,8 @@ function fakeConfirmationService(outcome){
 
 function fakeLogger(){
     const errors = [];
-    return { logTransition(){}, logError(id, message){ errors.push({ id, message }); }, logRpc(){}, errors };
+    const rpcCalls = [];
+    return { logTransition(){}, logError(id, message){ errors.push({ id, message }); }, logRpc(id, entry){ rpcCalls.push({ id, ...entry }); }, errors, rpcCalls };
 }
 
 // Arjuna V4 (Sprint 11), Part 1.
@@ -457,6 +459,24 @@ test("custodial execution: build() itself throwing (e.g. Execution Guard rejecti
     assert.equal(transactionBuilder.submitCalls, 0);
     const row = repository.rows.get(result.executionId);
     assert.ok(row.error_message.includes("price impact too high"));
+});
+
+// Release Validation, checklist item 6/7 (logging/metrics): whichever
+// SELL execution tier gmgnSwapTransactionBuilder.js resolved at must
+// reach the real, persisted RPC log - the same log call this file
+// already made before the Execution Safety Project, one field richer.
+test("custodial execution: the builder's executionTier is folded into the existing SUBMITTING RPC log, not a new log call", async () => {
+    const logger = fakeLogger();
+    const { service } = buildService({
+        transactionBuilder: fakeCustodialTransactionBuilder({ executionTier: "TIER_2" }),
+        logger
+    });
+
+    await service.execute({ userId: 1, walletPublicKey, action: "SELL", amountLamports: 500000, tokenAddress: "SomeToken111" });
+
+    const submitLog = logger.rpcCalls.find(c => c.rpcEndpoint === "gmgn:/v1/trade/swap");
+    assert.ok(submitLog, "the existing GMGN submit RPC log must still fire");
+    assert.equal(submitLog.meta.executionTier, "TIER_2");
 });
 
 test("custodial execution: a locally-signed builder (selfTransferTransactionBuilder shape) is completely unaffected", async () => {

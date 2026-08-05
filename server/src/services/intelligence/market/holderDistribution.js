@@ -4,6 +4,16 @@
 // money composition). This is purely about the DISTRIBUTION shape -
 // count always real (gmgn_tokens.holders); concentration only real
 // when this token appears in gmgn_trenches.
+//
+// Final Engine Evolution Specification - a Sprint 16 discount here
+// (genuineParticipationFactor, keyed on fresh_wallet_rate) was removed.
+// It assumed fresh-wallet-driven holder growth predicts worse real
+// outcomes; Sprint 23's revalidation against realized_roi_pct (the
+// correct, on-chain ground truth) found holderDistribution's own
+// correlation with real outcome is strongly POSITIVE (+0.531, the
+// strongest of any weighted module) - the opposite of what the discount
+// assumed. Removing invalidated conservative-biasing logic, not adding
+// new logic - this restores full conviction on real holder-count evidence.
 
 const config = require("../../../config/scoringConfig");
 

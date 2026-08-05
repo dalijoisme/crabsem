@@ -124,15 +124,13 @@ test("an unsafe quote (excessive price impact) is rejected by the Execution Guar
     assert.equal(gmgnClient.swapCallCount(), 0); // guard rejection must never reach the state-changing call
 });
 
-// FINAL PRODUCTION SPRINT P0: proves the fix for the real production
-// incident where Stop Loss correctly decided to sell but the position
-// stayed OPEN anyway (real evidence: -43.8%/-81%) - every retry rebuilt
-// the exact same quote against the same crashed liquidity and
-// executionGuard rejected it identically forever. A SELL must never be
-// blocked by the same price-impact/slippage/route-hop ceilings BUY is
-// held to - the risk is already owned; any completed exit beats a
-// blocked one.
-test("a SELL with excessive price impact/slippage/route hops is NOT rejected - a decided exit must never be blocked by an entry-oriented risk ceiling", async () => {
+// Execution Safety Project: a SELL whose first (tier 1, 15%) quote
+// exceeds tier 1's own real ceiling escalates exactly once to tier 2
+// (50%, the same tolerance every SELL used unconditionally before this
+// project) and accepts there - never blocked by an entry-oriented risk
+// ceiling, but no longer unconditionally accepting the FIRST quote
+// either. Route-hop count is still never a reason to block a SELL.
+test("a SELL exceeding tier 1's real ceiling escalates exactly once to tier 2 and accepts there - never blocked, but no longer accepting the first quote unconditionally", async () => {
     const gmgnClient = fakeGmgnClient({
         quoteResponse: realShapedQuote({
             slippage: 40,
@@ -143,8 +141,71 @@ test("a SELL with excessive price impact/slippage/route hops is NOT rejected - a
 
     const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
 
-    assert.equal(result.__custodialExecution, true, "a SELL this far outside BUY's own risk ceilings must still build successfully");
-    assert.equal(gmgnClient.quoteCallCount(), 1);
+    assert.equal(result.__custodialExecution, true, "35% price impact clears tier 2's 50% ceiling, so this SELL must still build successfully");
+    assert.equal(gmgnClient.quoteCallCount(), 2, "tier 1 must be tried and rejected before tier 2 is attempted - not accepted on the first quote");
+    assert.equal(gmgnClient.lastQuoteParams().slippage, 50, "the accepted attempt was tier 2's wider tolerance");
+});
+
+// A quote so far outside the market that even tier 2 (50%) rejects it
+// must still never permanently block the exit (Incident A) - falls
+// through to unconditional acceptance, bounded to exactly the two real
+// tiers first (never a 3rd, unbounded retry).
+test("a SELL exceeding even tier 2 falls through to unconditional acceptance after exactly two real tiers - Incident A never regresses", async () => {
+    const gmgnClient = fakeGmgnClient({
+        quoteResponse: realShapedQuote({
+            slippage: 90,
+            tx: { quote: { priceImpactPct: "90", routePlan: [{}] }, raw_tx: {} }
+        })
+    });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+
+    assert.equal(result.__custodialExecution, true, "even a catastrophic 90% price impact must still build - a completed exit beats a permanently blocked one");
+    assert.equal(gmgnClient.quoteCallCount(), 2, "exactly two real tiers, never an unbounded retry loop");
+});
+
+// The common case - the vast majority of real exits shouldn't need
+// anything close to the old unconditional tolerance. Tier 1 alone must
+// be sufficient, with no wasted second quote fetch.
+test("a SELL within tier 1's real ceiling accepts on the first attempt - no escalation, no wasted quote fetch", async () => {
+    const gmgnClient = fakeGmgnClient(); // default: priceImpactPct "0", well within tier 1
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+
+    assert.equal(result.__custodialExecution, true);
+    assert.equal(gmgnClient.quoteCallCount(), 1, "tier 1 alone must be enough for an ordinary quote");
+    assert.equal(gmgnClient.lastQuoteParams().slippage, 15, "tier 1's own, real, protective tolerance - not the old unconditional 50%");
+    assert.equal(result.executionTier, "TIER_1", "Release Validation, checklist item 6/7: which real tier resolved this SELL must be observable");
+});
+
+// Release Validation, checklist item 6/7 - executionTier must correctly
+// report TIER_2 and FALLBACK too (not just the common TIER_1 case), and
+// must be null for BUY (never tiered).
+test("executionTier reports TIER_2 when tier 1 is exceeded but tier 2 accepts", async () => {
+    const gmgnClient = fakeGmgnClient({
+        quoteResponse: realShapedQuote({ slippage: 40, tx: { quote: { priceImpactPct: "35", routePlan: [{}] }, raw_tx: {} } })
+    });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+    assert.equal(result.executionTier, "TIER_2");
+});
+
+test("executionTier reports FALLBACK when both real tiers are exceeded", async () => {
+    const gmgnClient = fakeGmgnClient({
+        quoteResponse: realShapedQuote({ slippage: 90, tx: { quote: { priceImpactPct: "90", routePlan: [{}] }, raw_tx: {} } })
+    });
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
+    assert.equal(result.executionTier, "FALLBACK");
+});
+
+test("executionTier is null for BUY - never tiered", async () => {
+    const gmgnClient = fakeGmgnClient();
+    const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
+    const result = await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "BUY", amountLamports: 1000000, tokenAddress: TOKEN });
+    assert.equal(result.executionTier, null);
 });
 
 // The exact same shape rejected for BUY (line above) must still be
@@ -172,19 +233,17 @@ test("a SELL quote with literally no route is still rejected - the hard sanity c
     );
 });
 
-// A SELL requests a much wider slippage tolerance FROM GMGN itself
-// (not just our own guard) - so the real on-chain swap doesn't revert
-// on a fast-crashing token for exceeding a tight tolerance negotiated at
-// quote time. BUY's own tolerance (10%, unchanged) is untouched.
-test("a SELL requests a wide slippage tolerance from GMGN; BUY keeps the existing 10% default", async () => {
+// BUY's own tolerance (10%, unchanged) is untouched by the Execution
+// Safety Project. SELL's requested tolerance now depends on which real
+// tier accepted the quote - see the tier-specific tests above for the
+// 15%-first/50%-escalated/unconditional-fallback cases.
+test("BUY keeps the existing 10% default slippage request, untouched by the Execution Safety Project", async () => {
     const gmgnClient = fakeGmgnClient();
     const builder = createGmgnSwapTransactionBuilder({ gmgnClient, config });
 
     await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "BUY", amountLamports: 1000000, tokenAddress: TOKEN });
     assert.equal(gmgnClient.lastQuoteParams().slippage, 10);
-
-    await builder.build({ userId: 1, walletPublicKey: FOUNDER_WALLET, action: "SELL", amountLamports: 500000, tokenAddress: TOKEN });
-    assert.equal(gmgnClient.lastQuoteParams().slippage, 50);
+    assert.equal(gmgnClient.quoteCallCount(), 1, "BUY is never tiered - one quote, one check");
 });
 
 test("build() with a safe quote returns a custodial-execution marker and performs NO irreversible action yet", async () => {

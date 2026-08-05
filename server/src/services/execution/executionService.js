@@ -207,7 +207,15 @@ function createExecutionService({ repository, connectionProvider, signingService
                     message: "GMGN swap submitted (server-side sign + broadcast)",
                     rpcEndpoint: "gmgn:/v1/trade/swap",
                     latencyMs: Date.now() - rpcStartedAt,
-                    meta: { orderId: result.orderId, providerStatus: result.providerStatus }
+                    // Release Validation, checklist item 6/7: which SELL
+                    // execution tier (TIER_1/TIER_2/FALLBACK) actually
+                    // resolved this swap - undefined for BUY (never
+                    // tiered), a real signal for how often the escalation
+                    // path and the unconditional fallback are actually
+                    // used in production. No new log call - the same RPC
+                    // log this file already wrote before the Execution
+                    // Safety Project, one field richer.
+                    meta: { orderId: result.orderId, providerStatus: result.providerStatus, executionTier: preparedTransaction.executionTier ?? null }
                 });
             }
             else{

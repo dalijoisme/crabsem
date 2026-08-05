@@ -30,36 +30,54 @@
 
 const { assertFounderWallet } = require("./founderModeGuard");
 const { assertQuoteIsSafeToExecute } = require("./executionGuard");
+const executionSafetyConfig = require("../../config/executionSafetyConfig");
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const CHAIN = "sol";
-const DEFAULT_SLIPPAGE_PCT = 10;
+const DEFAULT_SLIPPAGE_PCT = executionSafetyConfig.buyDefaultSlippagePct;
 
-// FINAL PRODUCTION SPRINT P0 - root cause of "Stop Loss identified the
-// exit but the position stayed OPEN". executionGuard.js's price-impact/
-// slippage/route-hop ceilings exist to protect a BUY from being tricked
-// into thin/fake liquidity - a genuinely discretionary decision about
-// whether to take on NEW risk. A SELL triggered by Dynamic Exit
-// (dynamicExitService.js's Stop Loss/TP/Emergency Exit) is the opposite
-// kind of decision: the risk is already owned, already decided against,
-// and the ONLY question left is what price the position exits at - ANY
-// completed exit is strictly better than a blocked one, because a
-// blocked exit doesn't reduce risk, it just prolongs exposure while the
-// position keeps bleeding. Confirmed in production: a token that
-// crashed enough to trigger Stop Loss almost always ALSO has price
-// impact past the entry-oriented 5% ceiling by then - every retry (as
-// often as the exit-evaluation interval, down to 1s) rebuilt the exact
-// same quote against the exact same thin liquidity and got rejected by
-// executionGuard identically, forever, while the position kept falling
-// further past -20% with no way out. Fix: SELL swaps skip the three
-// risk-TOLERANCE ceilings (price impact, requested slippage, route
-// hops) entirely - executionGuard's hard sanity checks (a real route
-// exists, output amount is positive - i.e. "can this swap even execute
-// at all") still apply unconditionally, since those aren't a judgment
-// call, a quote with literally no route truly cannot be submitted
-// either way. BUY is completely untouched - same 5%/15%/3-hop ceilings
-// as before, Arjuna's entry risk posture is not part of this fix.
-const EXIT_SLIPPAGE_REQUEST_PCT = 50; // requested tolerance sent to GMGN's own quote/swap for a SELL - wide enough that a fast-moving exit doesn't itself get rejected on-chain for exceeding a tight tolerance; unrelated to (and much wider than) executionGuard's own now-bypassed-for-SELL ceiling.
+// FINAL PRODUCTION SPRINT P0 (superseded below, history kept for
+// context) - root cause of "Stop Loss identified the exit but the
+// position stayed OPEN". executionGuard.js's price-impact/slippage/
+// route-hop ceilings exist to protect a BUY from being tricked into
+// thin/fake liquidity - a genuinely discretionary decision about
+// whether to take on NEW risk. A SELL triggered by Dynamic Exit is the
+// opposite kind of decision: the risk is already owned, and a blocked
+// exit doesn't reduce risk, it just prolongs exposure (Incident A).
+// The original P0 fix solved this by skipping all three ceilings
+// entirely (Infinity) for SELL - but that traded Incident A for
+// Incident B: a real, on-chain-measured production finding (realized
+// settlement 98.7-99.3% worse than quoted, worst at TP1/TP2) showing an
+// unlimited tolerance accepts catastrophic fills the market didn't
+// actually require.
+//
+// Execution Safety Project - replaces the single Infinity override with
+// a bounded, ESCALATING tolerance (EXIT_TOLERANCE_TIERS below), not a
+// single fixed ceiling. Tier 1 gives a real, protective price-impact
+// ceiling for the ordinary case - and catches exactly the failure modes
+// where a second, fresh quote has a real chance of being meaningfully
+// better than the first (a momentarily stale quote, a transient MEV/
+// sandwich dislocation, a large-but-recoverable spread). If tier 1's
+// quote is outside that ceiling, exactly ONE more attempt is made at a
+// wider tolerance (tier 2, using the same EXIT_SLIPPAGE_REQUEST_PCT
+// this file already used for every SELL before this project - reused,
+// not reinvented). If BOTH real tiers fail, execution falls through to
+// unconditional acceptance - the exact behaviour this file had before
+// this project - so a genuine, sustained collapse can never leave a
+// position permanently stuck. Incident A never regresses; Incident B is
+// bounded rather than unlimited for the common case. The hard sanity
+// checks inside assertQuoteIsSafeToExecute (a real route exists, output
+// amount positive) are never bypassed at any tier - a quote with
+// literally no route cannot be submitted regardless. BUY is completely
+// untouched - same 5%/15%/3-hop ceilings as before, single quote
+// attempt, no tiering; Arjuna's entry risk posture is not part of this
+// project.
+// Release Validation project - the tier numbers themselves now live in
+// config/executionSafetyConfig.js (checklist item 9: no production
+// tuning value hardcoded inside business logic). Escalation is bounded
+// to exactly these real tiers, then falls through - never a blind/
+// unbounded retry loop.
+const EXIT_TOLERANCE_TIERS = executionSafetyConfig.exitToleranceTiers;
 
 /**
  * @typedef {object} GmgnSwapTransactionBuilderDeps
@@ -101,28 +119,72 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
 
         const inputToken = isBuy ? SOL_MINT : tokenAddress;
         const outputToken = isBuy ? tokenAddress : SOL_MINT;
-        const slippage = isSell ? EXIT_SLIPPAGE_REQUEST_PCT : (guardLimits.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT);
 
-        // 2. Real GMGN quote - read-only, confirmed live, API-key-only auth.
-        const { data: quote } = await gmgnClient.getSwapQuote(CHAIN, {
-            inputToken,
-            outputToken,
-            fromAddress: walletPublicKey,
-            inputAmount: String(amountLamports),
-            slippage
-        });
+        let quote, slippage;
+        // Release Validation project, checklist item 6/7 (logging/metrics):
+        // which tier a SELL actually resolved at is now surfaced on the
+        // returned object (executionTier below) so executionService.js
+        // can log it through the SAME real RPC-log call it already makes
+        // at the SUBMITTING step - no new logging plumbing, no new
+        // trading logic, purely observability.
+        let executionTier = isBuy ? null : "FALLBACK";
 
-        // 3. Execution Guard - price impact / slippage / route quality,
-        // facts about THIS specific quote, checked before anything real
-        // happens. SELL (a decided exit, not a discretionary entry) skips
-        // the three risk-TOLERANCE ceilings - see this file's header
-        // comment (EXIT_SLIPPAGE_REQUEST_PCT) for the real production
-        // incident this closes. The hard sanity checks inside
-        // assertQuoteIsSafeToExecute (route exists, output amount > 0)
-        // still apply either way - unconditional regardless of limits.
-        assertQuoteIsSafeToExecute(quote, isSell
-            ? { ...guardLimits, maxPriceImpactPct: Infinity, maxSlippagePct: Infinity, maxRouteHops: Infinity }
-            : guardLimits);
+        if(isBuy){
+
+            // BUY - completely untouched: one quote, one check, BUY's own
+            // existing guardLimits (default 5%/15%/3-hop), never bypassed.
+            slippage = guardLimits.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT;
+            const { data } = await gmgnClient.getSwapQuote(CHAIN, {
+                inputToken, outputToken, fromAddress: walletPublicKey,
+                inputAmount: String(amountLamports), slippage
+            });
+            assertQuoteIsSafeToExecute(data, guardLimits);
+            quote = data;
+
+        }
+        else{
+
+            // SELL - bounded, escalating tiers (see EXIT_TOLERANCE_TIERS'
+            // own header for the full reasoning). Real route-hop bypass
+            // (Infinity) is unchanged from before this project - Sprint
+            // 22's finding was about price, not route complexity, and the
+            // hard sanity check (a real route exists at all) is never
+            // bypassed at any tier regardless.
+            let lastQuote = null, accepted = false;
+
+            for(let i = 0; i < EXIT_TOLERANCE_TIERS.length; i++){
+                const tier = EXIT_TOLERANCE_TIERS[i];
+                const { data } = await gmgnClient.getSwapQuote(CHAIN, {
+                    inputToken, outputToken, fromAddress: walletPublicKey,
+                    inputAmount: String(amountLamports), slippage: tier.slippagePct
+                });
+                lastQuote = data;
+                slippage = tier.slippagePct;
+                try{
+                    assertQuoteIsSafeToExecute(data, { maxPriceImpactPct: tier.maxPriceImpactPct, maxSlippagePct: tier.slippagePct, maxRouteHops: Infinity });
+                    accepted = true;
+                    executionTier = `TIER_${i + 1}`;
+                    break;
+                }
+                catch(err){ void err; } // this tier's tolerance wasn't enough - escalate to the next one
+            }
+
+            if(!accepted){
+                // Both real tiers failed on price-impact/slippage tolerance -
+                // fall through to unconditional acceptance, the exact
+                // behaviour this file had before this project, so a
+                // genuine, sustained collapse can never leave the position
+                // stuck. Hard sanity checks (route exists, output positive)
+                // still apply unconditionally - if even THOSE fail, this
+                // throws for real, same as always. executionTier stays
+                // "FALLBACK" (set above) - a real, queryable signal for how
+                // often the widest, unconditional path is actually needed.
+                assertQuoteIsSafeToExecute(lastQuote, { maxPriceImpactPct: Infinity, maxSlippagePct: Infinity, maxRouteHops: Infinity });
+            }
+
+            quote = lastQuote;
+
+        }
 
         // 4. Nothing irreversible has happened yet - build() only
         // validates. The actual state-changing POST /v1/trade/swap call
@@ -135,6 +197,13 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
         return {
 
             __custodialExecution: true,
+
+            // Observability only (Release Validation, checklist item 6/7) -
+            // null for BUY (never tiered), "TIER_1"/"TIER_2"/"FALLBACK" for
+            // SELL. executionService.js reads this and folds it into the
+            // SAME real RPC log it already writes at the SUBMITTING step -
+            // no new log call, no new trading logic.
+            executionTier,
 
             async submit(){
 

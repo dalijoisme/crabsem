@@ -21,6 +21,13 @@
 
 const config = require("../config/scoringConfig");
 const { lookupFactor } = require("./intelligence/curveHelper");
+// Sprint 15 (Scientific Decision Framework), Phase 2 - Repository
+// Boundary Migration: preloadContext() is the LIVE Context Builder: the
+// only place in the whole scoring path allowed to touch a repository.
+// It self-validates its own output before returning (Context Contract
+// rule 5) rather than trusting every field-population line above it to
+// have been written correctly.
+const { assertValidContext } = require("./contextContract");
 
 const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository");
 const gmgnActivityFeedRepository = require("../repositories/gmgnActivityFeedRepository");
@@ -125,6 +132,32 @@ function gatherCachedWalletStats(addresses, ctx){
     return results;
 }
 
+// Sprint 15, Phase 2 - matches computeAccelerationSignal's own existing
+// fallback (`accel.recentWindowMinutes ?? 15`) exactly. This is the ONLY
+// value ever set by any real Strategy Profile today (AGGRESSIVE's
+// acceleration_overrides.recentWindowMinutes: 15 - config/strategyProfileConfig.js;
+// every other profile leaves acceleration_overrides null and never
+// reaches this path at all). preloadContext pre-fetches
+// liquidityAtWindowStartByAddress using this single, fixed window rather
+// than one window per distinct philosophy, since no real philosophy uses
+// a different value today. If a future philosophy ever sets a different
+// recentWindowMinutes, the pre-fetched window will not match it - a real,
+// deliberate limitation, not a silent gap: computeAccelerationSignal
+// keeps its own `accel.recentWindowMinutes ?? 15` fallback so this
+// mismatch would produce a wrong-window (not a crashing) result, and
+// must be revisited if that ever happens.
+const DEFAULT_ACCELERATION_WINDOW_MINUTES = 15;
+
+function accelerationWindowCutoffIso(windowMinutes){
+    return new Date(Date.now() - windowMinutes * 60000).toISOString().slice(0, 19).replace("T", " ");
+}
+
+// THE live Context Builder (Sprint 15 Context Contract). Every repository
+// read this scoring path ever needs happens exactly once, here - nothing
+// downstream of this function's return value may read a repository
+// directly (see computeStructuralRedFlags/momentumPhase.js/
+// computeAccelerationSignal/analyzeTokenWithPhilosophy below, all
+// refactored this phase to consume ctx instead).
 function preloadContext(tokens){
     const addresses = tokens.map(t => t.token_address);
     const trenchesByAddress = gmgnTrenchesRepository.findManyByTokenAddresses(addresses);
@@ -148,7 +181,28 @@ function preloadContext(tokens){
     const walletsByAddress = walletRepository.findManyByAddresses([...walletAddresses]);
     const launchpadNames = [...new Set([...trenchesByAddress.values()].map(t => t.launchpad).filter(Boolean))];
     const launchpadStatsByName = new Map(launchpadNames.map(name => [name, gmgnLaunchpadStatsRepository.findByLaunchpad(name)]));
-    return { trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, walletsByAddress, launchpadStatsByName };
+
+    // Sprint 15, Phase 2 additions - each replaces a repository/service
+    // call previously made directly inside computeStructuralRedFlags,
+    // momentumPhase.js's classifyMomentumPhase, computeAccelerationSignal,
+    // and analyzeTokenWithPhilosophy itself (see this file's own
+    // PLANNED_CONTEXT_ADDITIONS entry in contextContract.js for the exact
+    // call sites this replaced). realtimePulseService.getLatestSignals
+    // reads an in-memory buffer, not SQL - not a "repository" in the
+    // literal sense, but the same live/external-state boundary the
+    // Context Contract exists to police, and the ONLY source with zero
+    // persistence of its own (see contextContract.js).
+    const peakPriceByAddress = new Map(addresses.map(address => [address, tokenPriceHistoryRepository.findPeakPrice(address)]));
+    const accelerationCutoffIso = accelerationWindowCutoffIso(DEFAULT_ACCELERATION_WINDOW_MINUTES);
+    const liquidityAtWindowStartByAddress = new Map(addresses.map(address => [address, tokenPriceHistoryRepository.findPriceAtOrAfter(address, accelerationCutoffIso)]));
+    const realtimePulseByAddress = new Map(addresses.map(address => [address, realtimePulseService.getLatestSignals(address)]));
+
+    const ctx = {
+        trenchesByAddress, hotSearchByAddress, smartMoneyByAddress, kolByAddress, cacheMap, walletsByAddress, launchpadStatsByName,
+        peakPriceByAddress, liquidityAtWindowStartByAddress, realtimePulseByAddress
+    };
+
+    return assertValidContext(ctx, "preloadContext");
 }
 
 // canBlacklist: Arjuna V3 (FINAL), Part 6. gmgn_trenches' own raw
@@ -178,14 +232,17 @@ function ageSecondsSince(timestamp){
     return Math.max(0, (Date.now() - then) / 1000);
 }
 
-function computeStructuralRedFlags(token, trenchesEntry, participantModules){
+// Sprint 15, Phase 2: `peak` is now a required parameter (this token's
+// real historical peak price, ctx.peakPriceByAddress.get(address)) -
+// this function no longer reads tokenPriceHistoryRepository itself. Same
+// real value, same formula; only where it comes from changed.
+function computeStructuralRedFlags(token, trenchesEntry, participantModules, peak){
     const s = config.structuralValidation;
     const flags = [];
     const change1h = token.price_change_1h != null ? Number(token.price_change_1h) : null;
     const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
     if(change1h != null && change1h <= s.downtrend1hPct) flags.push("downtrend1h");
     if(change5m != null && change5m <= s.recentDump5mPct) flags.push("dump5m");
-    const peak = tokenPriceHistoryRepository.findPeakPrice(token.token_address);
     if(peak != null && peak > 0 && token.price != null){
         const drawdown = (peak - Number(token.price)) / peak;
         if(drawdown >= s.structuralBreakdownDrawdown) flags.push("structuralBreakdown");
@@ -318,7 +375,15 @@ function scaleModule(m, factor){
 // retained). Returns null when `accel` (philosophy.acceleration) is
 // absent - Baseline/Stable/Balanced never set it, so this is skipped
 // entirely for them.
-function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, accel){
+// Sprint 15, Phase 2: `liquidityThen` is now a required 6th parameter
+// (this token's real liquidity at the acceleration window boundary,
+// ctx.liquidityAtWindowStartByAddress.get(address)) - this function no
+// longer reads tokenPriceHistoryRepository itself. Pre-fetched by
+// preloadContext using DEFAULT_ACCELERATION_WINDOW_MINUTES (15), the
+// exact same value `accel.recentWindowMinutes ?? 15` already resolves to
+// for every real philosophy today - see that constant's own comment for
+// what happens if a future philosophy ever sets a different window.
+function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, accel, liquidityThen){
 
     if(!accel) return null;
 
@@ -379,10 +444,6 @@ function computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kol
 
     let liquidityAccel = 0;
     const currentLiquidity = Number(token.liquidity) || null;
-    const liquidityThen = tokenPriceHistoryRepository.findPriceAtOrAfter(
-        token.token_address,
-        new Date(Date.now() - recentWindowMin * 60000).toISOString().slice(0, 19).replace("T", " ")
-    );
     if(currentLiquidity != null && liquidityThen?.liquidity > 0){
         const growth = (currentLiquidity - liquidityThen.liquidity) / liquidityThen.liquidity;
         if(growth > 0) liquidityAccel = Math.min(1, growth / 0.25); // +25% liquidity growth in the window = full credit
@@ -780,13 +841,15 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     const w = philosophy.weights || {};
     const effectiveChange1h = philosophy.flattenEarliness ? 0 : change1h; // factor lookup uses |value| - 0 always hits the first (1.00) bucket
 
-    // Arjuna V4 Phase 2 (Realtime Pulse) - computed once per token, read
-    // by both smartMoney/kol's new optional realtime-facts parameter
-    // (additive observability, does not change either module's score -
-    // see their own headers) and by the explicitly-marked, currently-
-    // inert integration point below. Never blocks - recomputed from
-    // whatever the in-memory buffer already holds this instant.
-    const realtimePulse = realtimePulseService.getLatestSignals(address);
+    // Arjuna V4 Phase 2 (Realtime Pulse) - read by both smartMoney/kol's
+    // new optional realtime-facts parameter (additive observability, does
+    // not change either module's score - see their own headers) and by
+    // the explicitly-marked, currently-inert integration point below.
+    // Sprint 15, Phase 2: sourced from ctx (preloadContext already called
+    // realtimePulseService.getLatestSignals once per token) rather than
+    // called directly here - same real, freshly-computed-this-tick value,
+    // this function no longer reaches into the live buffer itself.
+    const realtimePulse = ctx.realtimePulseByAddress.get(address);
 
     let smScore;
     if(philosophy.smBonus){
@@ -821,13 +884,15 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
     };
 
     const participantScoreRaw = combineScore(participantModules, PARTICIPANT_MAX, config.participant.neutralFraction);
-    const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules);
+    const peak = ctx.peakPriceByAddress.get(address);
+    const structuralRedFlags = computeStructuralRedFlags(token, trenchesEntry, participantModules, peak);
     const penalty = Math.min(config.structuralValidation.maxPenalty, structuralRedFlags.length * config.structuralValidation.penaltyPerFlag);
 
     // Early Momentum Hunter refactor: absent for every profile except
     // Aggressive today (philosophy.acceleration undefined -> accelSignal
     // null -> accelerationBonus 0 -> byte-identical to pre-refactor math).
-    const accelSignal = computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, philosophy.acceleration);
+    const liquidityThen = ctx.liquidityAtWindowStartByAddress.get(address);
+    const accelSignal = computeAccelerationSignal(token, trenchesEntry, smartMoneyActivity, kolActivity, philosophy.acceleration, liquidityThen);
     const accelerationBonus = accelSignal ? Math.round(PARTICIPANT_MAX * (philosophy.acceleration.maxBonusFraction ?? 0) * accelSignal.compositeScore) : 0;
 
     const reasons = Object.values(participantModules).flatMap(m => m.reasons || []);
@@ -848,7 +913,7 @@ function analyzeTokenWithPhilosophy(token, ctx, philosophy){
         // unaffected. Not wrapped in scaleModule - a philosophy weight
         // multiplying 0 is still 0, and this is observability/risk-signal
         // only, never a scored module.
-        momentumPhase: momentumPhase.score(token, trenchesEntry)
+        momentumPhase: momentumPhase.score(token, trenchesEntry, peak)
     };
 
     const marketScore = combineScore(marketModules, MARKET_MAX, config.market.neutralFraction);

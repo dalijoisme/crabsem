@@ -9,6 +9,19 @@
 // large one just because the sign is the same, and real net buying
 // on a token that hasn't moved yet is worth more than the same
 // buying after a big run.
+//
+// Final Engine Evolution Specification - a Sprint 16 discount here
+// (orderflowAuthenticityFactor, keyed on bot_degen_rate/rat_trader_amount_rate)
+// was removed. It was built on the hypothesis that bot/coordinated-looking
+// orderflow predicts worse real outcomes - Sprint 18's own direct causal
+// test found the opposite (tokens with high bot_degen_rate real-outcome
+// OUTPERFORMED low-bot_degen_rate tokens), and Sprint 23's revalidation
+// against realized_roi_pct (the correct, on-chain ground truth) showed
+// accumulation's own correlation with real outcome is ~0 (was reported as
+// -0.338 under the wrong, quoted-price outcome label) - the problem this
+// discount existed to fix does not survive contact with the real ground
+// truth. Removing invalidated conservative-biasing logic, not adding new
+// logic - this restores full conviction on real net-buy evidence.
 
 const config = require("../../../config/scoringConfig");
 const { lookupFactor } = require("../curveHelper");

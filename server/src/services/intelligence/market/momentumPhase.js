@@ -59,13 +59,18 @@
 // The POINT VALUES themselves are the CTO's own fixed decision
 // (config/scoringConfig.js), not this file's to choose.
 
-const tokenPriceHistoryRepository = require("../../../repositories/tokenPriceHistoryRepository");
-
 const DEAD_BOUNCE_MIN_DRAWDOWN = 0.50;
 const POST_RUG_RECOVERY_MIN_DRAWDOWN = 0.70;
 const EARLY_MOMENTUM_MAX_DRAWDOWN = 0.15;
 
-function classifyMomentumPhase(token, trenchesEntry){
+// Sprint 15 (Scientific Decision Framework), Phase 2 - Repository
+// Boundary Migration: `peak` is now a required 3rd parameter (this
+// token's real historical peak price, ctx.peakPriceByAddress.get(address) -
+// see researchEngineFactory.js's preloadContext) instead of this module
+// calling tokenPriceHistoryRepository itself. This file no longer reads
+// any repository at all - only researchEngineFactory.js's Context
+// Builder does, per the Sprint 15 Context Contract.
+function classifyMomentumPhase(token, trenchesEntry, rawPeak){
 
     const price = token.price != null ? Number(token.price) : null;
     const change5m = token.price_change_5m != null ? Number(token.price_change_5m) : null;
@@ -74,7 +79,12 @@ function classifyMomentumPhase(token, trenchesEntry){
     const buys5m = token.buys_5m != null ? Number(token.buys_5m) : null;
     const sells5m = token.sells_5m != null ? Number(token.sells_5m) : null;
 
-    const peak = price != null ? tokenPriceHistoryRepository.findPeakPrice(token.token_address) : null;
+    // Preserves the original guard exactly: peak was previously never
+    // even looked up when price was null - now that the caller always
+    // pre-fetches it regardless of price, this keeps that same "never
+    // consider a peak without a current price" behavior instead of
+    // silently starting to use rawPeak in a case that used to be null.
+    const peak = price != null ? rawPeak : null;
     // Real drawdown from this token's own observed peak - null when
     // there's no price history yet (a genuinely new token, or the
     // collector hasn't ticked for it yet) - never treated as "already
@@ -132,9 +142,9 @@ function classifyMomentumPhase(token, trenchesEntry){
 // HIGH-risk hard-gate aggregation. facts.momentumPhase is threaded
 // through so it can be persisted onto the Decision Snapshot regardless
 // of phase.
-function score(token, trenchesEntry){
+function score(token, trenchesEntry, peak){
 
-    const classification = classifyMomentumPhase(token, trenchesEntry);
+    const classification = classifyMomentumPhase(token, trenchesEntry, peak);
 
     return {
         score: 0,

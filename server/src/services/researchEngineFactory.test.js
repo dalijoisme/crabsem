@@ -13,6 +13,14 @@ const assert = require("node:assert/strict");
 
 const { analyzeTokensWithOverride, PHILOSOPHIES } = require("./researchEngineFactory");
 const strategyProfileTranslator = require("./strategyProfileTranslator");
+// Sprint 15, Phase 2 - Repository Boundary Migration: analyzeTokenWithPhilosophy
+// now reads realtimePulse from ctx.realtimePulseByAddress (populated once
+// per tick by preloadContext) instead of calling
+// realtimePulseService.getLatestSignals(address) itself. This file's
+// hand-built ctx must populate that same container for every address it
+// uses, real getLatestSignals() calls (never a fabricated shape) - see
+// withRealtimePulse below.
+const realtimePulseService = require("./realtimePulseService");
 
 // Arjuna V4 Phase 2 (Realtime Pulse) - realtimePulse.computedAtMs is a
 // genuinely real-time wall-clock Date.now() read (see
@@ -39,11 +47,32 @@ function stripSyntheticBreakdown(syntheticBreakdown){
 function emptyCtx(){
     return {
         trenchesByAddress: new Map(),
+        hotSearchByAddress: new Map(),
         smartMoneyByAddress: new Map(),
         kolByAddress: new Map(),
         cacheMap: new Map(),
-        walletsByAddress: new Map()
+        walletsByAddress: new Map(),
+        launchpadStatsByName: new Map(),
+        // Sprint 15, Phase 2 additions - peakPriceByAddress/
+        // liquidityAtWindowStartByAddress are safe to leave sparse (every
+        // real call site treats a missing entry exactly like null/undefined
+        // via `!= null` checks or optional chaining); realtimePulseByAddress
+        // is NOT safe to leave sparse - see withRealtimePulse below, called
+        // explicitly for every address a test actually uses.
+        peakPriceByAddress: new Map(),
+        liquidityAtWindowStartByAddress: new Map(),
+        realtimePulseByAddress: new Map()
     };
+}
+
+// Populates a real (never fabricated) realtimePulseByAddress entry for
+// one address, by calling the exact same realtimePulseService.getLatestSignals
+// preloadContext() itself calls in production - mirrors an unseeded
+// buffer's real default shape (bufferLength: 0, every signal null)
+// exactly when nothing has been recorded for that address yet.
+function withRealtimePulse(ctx, address){
+    ctx.realtimePulseByAddress.set(address, realtimePulseService.getLatestSignals(address));
+    return ctx;
 }
 
 function goodToken(overrides = {}){
@@ -64,6 +93,7 @@ function goodToken(overrides = {}){
 
 function ctxWithAccumulation(){
     const ctx = emptyCtx();
+    withRealtimePulse(ctx, "TOKEN1");
     ctx.trenchesByAddress.set("TOKEN1", {
         net_buy_24h: 5000, buys_24h: 80, sells_24h: 20, rug_ratio: 0.1, top_10_holder_rate: 0.2,
         is_honeypot: 0, renounced_mint: 1, renounced_freeze_account: 1, creator: null,
@@ -177,6 +207,7 @@ test("weights override still reweights the OLD participant pool (breakdown/confi
 // neutral overall, not close to a maxed-out single-module score.
 test("a module with no real data drags the aggregate toward neutral, never gets excluded from the average", () => {
     const ctx = emptyCtx();
+    withRealtimePulse(ctx, "TOKEN1");
     // Only accumulation has real (maxed-out) data - net_buy_24h strongly
     // positive, high buy dominance, well above the significance floor.
     // smart_degen_count/creator/sniper_count/bundler/insider fields are
@@ -222,6 +253,8 @@ test("a module with no real data drags the aggregate toward neutral, never gets 
 // assumptions if this test needs to change again.
 test("real replay: MOON and Fukuruto's own real trenches data, under Arjuna V3's unified entry score", () => {
     const ctx = emptyCtx();
+    withRealtimePulse(ctx, "FUKURUTO");
+    withRealtimePulse(ctx, "MOON");
     ctx.trenchesByAddress.set("FUKURUTO", {
         net_buy_24h: 1331.56320724565, buys_24h: 75, sells_24h: 15, rug_ratio: 0, top_10_holder_rate: 0.2788,
         smart_degen_count: 0, sniper_count: 0, is_honeypot: 0, creator: "SomeCreator1",
@@ -356,6 +389,7 @@ test("Part 12 (Sprint 12): momentum scoring modifier is applied directly into th
 // sprint's fix, confidence.
 test("confidence falls as risk escalates, even when participantScore/marketHealth are unchanged", () => {
     const ctx = emptyCtx();
+    withRealtimePulse(ctx, "TOKEN1");
     ctx.trenchesByAddress.set("TOKEN1", { net_buy_24h: 5000, buys_24h: 80, sells_24h: 20, rug_ratio: 0.1, top_10_holder_rate: 0.2, is_honeypot: 0, smart_degen_count: 0 });
 
     const [belowTrigger] = analyzeTokensWithOverride([goodToken({ price_change_1h: 499, price_change_5m: 1 })], ctx, "momentumHunter", null);
@@ -462,6 +496,34 @@ test("Part 4: holder distribution buckets match the final spec exactly (0/6/10/1
     }
 });
 
+test("Final Engine Evolution Spec: holderDistribution's score depends only on real holder count - raw_json orderflow fields (e.g. fresh_wallet_rate) no longer discount it, since Sprint 23 revalidation found holderDistribution's real-outcome correlation is strongly positive (+0.531), not negative", () => {
+    const ctx = ctxWithAccumulation();
+    const [cleanResult] = analyzeTokensWithOverride([goodToken({ holders: 150 })], ctx, "momentumHunter", null);
+    assert.equal(cleanResult.breakdown.market.holderDistribution.score, 15);
+
+    ctx.trenchesByAddress.set("TOKEN1", {
+        ...ctx.trenchesByAddress.get("TOKEN1"),
+        raw_json: JSON.stringify({ fresh_wallet_rate: 0.6 })
+    });
+    const [freshResult] = analyzeTokensWithOverride([goodToken({ holders: 150 })], ctx, "momentumHunter", null);
+    assert.equal(freshResult.breakdown.market.holderDistribution.score, 15, "fresh_wallet_rate must no longer discount holderDistribution's score - the Sprint 16 mechanism that did this was removed");
+});
+
+test("Final Engine Evolution Spec: accumulation's score depends only on real net-buy flow - raw_json orderflow fields (e.g. bot_degen_rate) no longer discount it, since Sprint 18's causal test directly contradicted the mechanism that used to apply this discount", () => {
+    const ctx = ctxWithAccumulation(); // TOKEN1: net_buy_24h=5000, buys_24h=80, sells_24h=20, no raw_json
+    const [cleanResult] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
+    const cleanContribution = cleanResult.entryScoreBreakdown.componentBreakdown.accumulation.contribution;
+
+    ctx.trenchesByAddress.set("TOKEN1", {
+        ...ctx.trenchesByAddress.get("TOKEN1"),
+        raw_json: JSON.stringify({ bot_degen_rate: 0.6, rat_trader_amount_rate: 0.08 })
+    });
+    const [botResult] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
+    const botContribution = botResult.entryScoreBreakdown.componentBreakdown.accumulation.contribution;
+
+    assert.equal(botContribution, cleanContribution, "bot_degen_rate/rat_trader_amount_rate must no longer discount accumulation's score - the Sprint 16 mechanism that did this was removed");
+});
+
 test("Part 5: liquidity hybrid - a good ratio on tiny absolute liquidity does NOT get full score", () => {
     const ctx = ctxWithAccumulation();
     // Same real shape the audit's own ANGELBULL/SUKI example used: a
@@ -526,6 +588,7 @@ test("Part 7: wash-trading confidence >=70 applies a real -15 penalty; below 70 
 
 test("Part 2: high volume alone (accumulation/smartMoney NOT healthy) contributes nothing to the entry score", () => {
     const ctx = emptyCtx(); // no trenches at all - accumulation defaults to neutral 0.4 fraction, well below the 0.5 health bar
+    withRealtimePulse(ctx, "TOKEN1");
     const highVolumeToken = goodToken({ volume_1h: 500000, liquidity: 50000 }); // huge volume/liquidity ratio
     const [result] = analyzeTokensWithOverride([highVolumeToken], ctx, "momentumHunter", null);
     assert.equal(result.entryScoreBreakdown.volumeValidated, false);
@@ -559,7 +622,12 @@ test("a strong, consistent Realtime Pulse buffer adjusts confidence upward witho
     ctx.trenchesByAddress.set(address, ctx.trenchesByAddress.get("TOKEN1"));
     const token = goodToken({ token_address: address });
 
-    // No Pulse history at all - the neutral baseline.
+    // No Pulse history at all yet - the neutral baseline. Sprint 15,
+    // Phase 2: realtimePulse now comes from ctx (built once, like a real
+    // preloadContext() call would for one tick), so it must be fetched
+    // explicitly here rather than relying on analyzeTokenWithPhilosophy to
+    // read the live buffer itself.
+    withRealtimePulse(ctx, address);
     const [neutral] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
 
     // Seed a real, consistent 3-point UP buffer for every tracked series -
@@ -577,6 +645,11 @@ test("a strong, consistent Realtime Pulse buffer adjusts confidence upward witho
 
     try{
 
+        // Re-fetch: ctx is a frozen snapshot (matches a real tick's own
+        // preloadContext() call), so it must be refreshed to see the
+        // buffer we just seeded - the same way a genuinely later tick's
+        // own fresh preloadContext() call would.
+        withRealtimePulse(ctx, address);
         const [boosted] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
 
         assert.equal(boosted.participantScore, neutral.participantScore, "Production V2's own score must never be touched by Realtime Pulse");

@@ -46,6 +46,12 @@ const { resolveTokenAgeMinutes } = require("./emiService");
 // spec's Part 4); computeRealizedRoi is the OFFICIAL, recorded ROI for a
 // completed trade.
 const { computeRoiPct, computeRealizedRoi } = require("./roiCalculator");
+// Sprint 15 (Scientific Decision Framework), Phase 3/4: captures the
+// frozen evidence behind this exact real BUY. Never allowed to affect
+// whether/how this function opens a position - see
+// decisionEvidenceService.js's own header for why calling it here,
+// unguarded, is safe (it never throws past its own boundary).
+const decisionEvidenceService = require("./decisionEvidenceService");
 
 const FEE_PCT_DEFAULT = 1;
 
@@ -158,7 +164,13 @@ function buildPassReason(live, config){
 // every simulated/benchmark/ab-test context.
 function createTradeManager(repository, liveOptions = null){
 
-    async function openPosition(token, live, config, availableCash){
+    // userId (Sprint 15, Phase 3, optional/trailing): omitted by every
+    // pre-existing caller (benchmarkRunner.js, abTestEngine.js) -
+    // Decision Evidence capture below simply records user_id: null for
+    // those, same "never fabricate" convention as everything else here.
+    // tradingBotEngine.js (the only real-BUY caller) passes its own real
+    // userId, already in scope there.
+    async function openPosition(token, live, config, availableCash, userId = null){
 
         // Trading Configuration sprint: position sizing is now a Founder-
         // controlled money-management choice, independent of strategy
@@ -376,6 +388,22 @@ function createTradeManager(repository, liveOptions = null){
             // serializes the same way, honestly reflecting what it really
             // used.
             configSnapshotJson: JSON.stringify(config)
+        });
+
+        // Sprint 15 (Scientific Decision Framework), Phase 3/4: called
+        // AFTER the real position row above already exists, and never
+        // guarded here - decisionEvidenceService.captureDecisionEvidence
+        // itself never throws past its own boundary (log-and-swallow),
+        // exactly so a capture bug can cost an audit trail, never a real
+        // trade. live.siblings (Phase 4) is the same real, already-
+        // computed Top-N ranked candidate list tradingBotEngine.js
+        // already attaches for the pre-existing siblingsJson column above -
+        // reused verbatim, never a second computation.
+        decisionEvidenceService.captureDecisionEvidence({
+            token, trenchesEntry: trenchesEntryAtEntry, live, config, riskBands,
+            userId, engineVersion: activeVersion, positionId,
+            tokenAgeMinutesAtEntry, rawFactsAtEntry, passReason: buildPassReason(live, config),
+            siblings: live.candidateSnapshot
         });
 
         const kind = executionId ? "Real" : "Virtual";

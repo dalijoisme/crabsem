@@ -385,6 +385,32 @@ function findTradingTierInWindow(fromTimestamp, toTimestamp){
     `).all(fromTimestamp, toTimestamp);
 }
 
+// Retention (RATE_LIMIT_BANNED incident, 2026-08-05): this table had NO
+// pruning at all since it was introduced (2026-07-20) - real evidence
+// (see config/retentionConfig.js's predictionHistoryMaxAgeHours) traced
+// an unbounded 135.8GB database, a 93%-full VPS disk, and a 139-second
+// single synchronous query blocking the Node.js event loop long enough
+// to cascade into the GMGN IP ban that stopped gmgn_tokens from ever
+// refreshing. Excludes any row still referenced by trade_positions.
+// opened_by_prediction_id (migration 017's real FK, foreign_keys=ON in
+// database/connection.js) - a decision row that actually opened a real
+// trade is permanent trade-audit history, never pruned by age alone,
+// and deleting it while still referenced would throw a constraint
+// violation anyway. Caller MUST prune predictionTimelineRepository's
+// children for the same maxAgeHours FIRST (see that function's own
+// comment) - this repository never reaches across tables itself.
+function pruneOlderThan(maxAgeHours){
+
+    const info = db.prepare(`
+        DELETE FROM prediction_history
+        WHERE datetime(prediction_time) < datetime('now', '-' || ? || ' hours')
+          AND id NOT IN (SELECT opened_by_prediction_id FROM trade_positions)
+    `).run(maxAgeHours);
+
+    return info.changes;
+
+}
+
 module.exports = {
 
     insertPrediction,
@@ -417,6 +443,8 @@ module.exports = {
 
     findRecentByTokens,
 
-    findTradingTierInWindow
+    findTradingTierInWindow,
+
+    pruneOlderThan
 
 };

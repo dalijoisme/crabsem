@@ -41,4 +41,31 @@ function findByPrediction(predictionId){
 
 }
 
-module.exports = { insertSnapshot, findExistingHorizons, findByPrediction };
+// Retention (RATE_LIMIT_BANNED incident, 2026-08-05 - see
+// config/retentionConfig.js's predictionHistoryMaxAgeHours for the full
+// real-production root-cause writeup): MUST run before
+// predictionHistoryRepository.pruneOlderThan() with the SAME
+// maxAgeHours - prediction_timeline.prediction_id is a real FK to
+// prediction_history(id) and this database runs with
+// foreign_keys=ON (database/connection.js), so a parent row can never
+// be deleted while a child here still references it. Targets the exact
+// same row-set predictionHistoryRepository.pruneOlderThan() is about to
+// delete (by the PARENT's own prediction_time, not this table's own
+// recorded_at - a 24h-horizon snapshot can be recorded up to a day
+// after its parent, so pruning by this table's own timestamp could
+// leave a fresh-looking child pointing at an already-deleted parent).
+function pruneForPredictionsOlderThan(maxAgeHours){
+
+    const info = db.prepare(`
+        DELETE FROM prediction_timeline
+        WHERE prediction_id IN (
+            SELECT id FROM prediction_history
+            WHERE datetime(prediction_time) < datetime('now', '-' || ? || ' hours')
+        )
+    `).run(maxAgeHours);
+
+    return info.changes;
+
+}
+
+module.exports = { insertSnapshot, findExistingHorizons, findByPrediction, pruneForPredictionsOlderThan };

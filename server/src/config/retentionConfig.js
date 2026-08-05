@@ -40,6 +40,36 @@ module.exports = {
     // (comfortably covers a full UTC day plus slack for a delayed Daily
     // Review run - this file's own established convention above, applied
     // to a new table rather than a fresh number).
-    realtimePulseSnapshotsMaxAgeHours: 48
+    realtimePulseSnapshotsMaxAgeHours: 48,
+
+    // RATE_LIMIT_BANNED incident (2026-08-05), real root cause: this
+    // pair of tables (prediction_history - the AI Validation Framework's
+    // append-only decision log, migration 017 - and its child
+    // prediction_timeline) had NO retention at all since introduction
+    // (2026-07-20), despite this file's own header already flagging
+    // "nothing ever prunes" as the exact failure mode to guard against.
+    // Real production evidence: evaluateAndRecordDecisions() created
+    // 19,835 new prediction_history rows in a SINGLE ~1-minute cycle;
+    // the live database grew from ~20GB to 135.8GB in 2 days and filled
+    // the VPS disk to 93%. Once the table got that large, a single
+    // synchronous better-sqlite3 call (recordTimelineSnapshots) took
+    // 139 seconds, blocking the Node.js event loop long enough that
+    // gmgn-scheduler's own 15s HTTP timeout fired 24s late (38988ms)
+    // and its watchdog force-released a still in-flight lock -
+    // overlapping/duplicate collector batches this produced are the
+    // most likely reason GMGN's "IP is temporarily banned due to
+    // repeated rate limit violations" ban never cleared.
+    //
+    // Must stay comfortably above the longest configured timeline
+    // horizon (predictionValidationConfig.js's timelineHorizons, 24h)
+    // plus slack, or recordTimelineSnapshots would never get a chance
+    // to record a still-pending horizon before its parent row
+    // disappeared. Set to the same 14-day class as
+    // benchmarkRawDataMaxAgeHours above (raw per-decision detail,
+    // already distilled separately into engine_daily_metrics by
+    // learnService.recordDailySnapshot() - the permanent research
+    // record, never pruned, same pattern as that file's own benchmark
+    // reports).
+    predictionHistoryMaxAgeHours: 24 * 14
 
 };

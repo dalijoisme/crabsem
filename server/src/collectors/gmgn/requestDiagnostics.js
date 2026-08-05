@@ -49,11 +49,20 @@ function nextSequence(){
 
 }
 
-function logRequest({ method, subPath, startedAt, finishedAt, status }){
+// url (RATE_LIMIT_BANNED investigation, round 4): the real, full request
+// URL - safe to log verbatim, never a secret. GMGN's auth is entirely
+// header-based (X-APIKEY, X-Signature - see authClient.js's
+// authExistRequest/authSignedRequest) - neither the API key nor the
+// request signature is ever part of the URL/query string, only
+// timestamp/client_id and the request's own real parameters (chain,
+// address, input_token/output_token, etc). This is what lets
+// gmgnTrafficAccounting.js's timeline surface WHICH token/candidate a
+// given request was actually for, not just which endpoint.
+function logRequest({ method, subPath, startedAt, finishedAt, status, url }){
 
     const { tickId, sequence } = nextSequence();
 
-    gmgnTrafficAccounting.record({ method, subPath, status });
+    gmgnTrafficAccounting.record({ method, subPath, status, url });
 
     console.log("[gmgn-diagnostic]", JSON.stringify({
 
@@ -66,6 +75,8 @@ function logRequest({ method, subPath, startedAt, finishedAt, status }){
         method,
 
         endpoint: subPath,
+
+        url,
 
         startedAtMs: startedAt,
 

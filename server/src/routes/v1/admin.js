@@ -42,6 +42,10 @@ router.get("/admin/gmgn-traffic-accounting", controller.getGmgnTrafficAccounting
 // to 30 min) behind the snapshot above, so the minutes leading up to a
 // ban stay visible instead of being averaged away. TEMPORARY.
 router.get("/admin/gmgn-traffic-accounting/history", controller.getGmgnTrafficAccountingHistory);
+// RATE_LIMIT_BANNED investigation, round 4 - millisecond-precision burst
+// timeline for the N ms right before the first recorded failure status
+// (default 429). TEMPORARY.
+router.get("/admin/gmgn-traffic-accounting/timeline-before-failure", controller.getGmgnTrafficTimelineBeforeFailure);
 router.get("/admin/predictions/summary", controller.getPredictionSummary);
 router.get("/admin/predictions/throughput", controller.getPredictionThroughput);
 

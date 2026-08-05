@@ -72,7 +72,7 @@ async function fetchWithTimeout(url, options, method, subPath){
 
         const res = await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 
-        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: res.status });
+        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: res.status, url });
 
         return res;
 
@@ -81,13 +81,13 @@ async function fetchWithTimeout(url, options, method, subPath){
 
         if(err.name === "TimeoutError" || err.name === "AbortError"){
 
-            requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: "TIMEOUT" });
+            requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: "TIMEOUT", url });
 
             throw new GmgnAuthError(`${method} ${subPath} timed out after ${REQUEST_TIMEOUT_MS}ms`, {});
 
         }
 
-        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: `ERROR:${err.name}` });
+        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: `ERROR:${err.name}`, url });
 
         throw err;
 

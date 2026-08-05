@@ -197,10 +197,48 @@ function pruneOld(){
 // on a hard failure) - stored verbatim, never coerced, so
 // getTrafficHistory() below can show exactly which minute/endpoint/origin
 // a 429 (or any other real failure) first showed up on.
-function record({ method, subPath, status }){
+// Real query params that identify WHICH token/wallet/candidate a
+// request was actually for - safe to log (see requestDiagnostics.js's
+// own comment: GMGN's auth is header-only, never part of the URL).
+// Only the fields that are ever actually candidate-identifying are
+// pulled out; everything else (timestamp, client_id, slippage, chain)
+// is real but not what "kandidat/token" means here, so it's left out
+// rather than dumping the whole query string as noise. Returns null
+// (never a fabricated empty object) when the URL can't be parsed or
+// carries none of these fields (e.g. /v1/trade/gas_price has neither).
+function extractCandidateInfo(url){
+
+    if(!url) return null;
+
+    try{
+
+        const params = new URL(url).searchParams;
+        const info = {};
+
+        for(const key of ["address", "input_token", "output_token", "wallet_address"]){
+            const value = params.get(key);
+            if(value) info[key] = value;
+        }
+
+        return Object.keys(info).length ? info : null;
+
+    }
+    catch(err){
+        return null;
+    }
+
+}
+
+function record({ method, subPath, status, url }){
 
     const origin = getCurrentOrigin();
-    const entry = { endpoint: `${method} ${subPath}`, origin, status: status ?? "UNKNOWN", ts: Date.now() };
+    const entry = {
+        endpoint: `${method} ${subPath}`,
+        origin,
+        status: status ?? "UNKNOWN",
+        ts: Date.now(),
+        candidateInfo: extractCandidateInfo(url)
+    };
 
     if(origin === "unattributed"){
         // Cheap only because this is the rare/unexpected path - never
@@ -338,6 +376,7 @@ function getTrafficHistory({ bucketMs = 60000, windowMs = MAX_RETENTION_MS } = {
                     ts: new Date(sample.ts).toISOString(),
                     endpoint: sample.endpoint,
                     status: sample.status,
+                    candidateInfo: sample.candidateInfo,
                     ...(sample.stackSample ? { stackSample: sample.stackSample } : {})
                 } : null
 
@@ -351,6 +390,77 @@ function getTrafficHistory({ bucketMs = 60000, windowMs = MAX_RETENTION_MS } = {
         bucketMs, windowMs, generatedAt: new Date().toISOString(),
         minuteCount: minuteStarts.length,
         totalCalls: inWindow.length,
+        rows
+    };
+
+}
+
+// RATE_LIMIT_BANNED investigation, round 4: a per-minute view still
+// can't show burst distribution WITHIN a second - the actual thing
+// asked for here is "what happened, millisecond by millisecond, in the
+// 10s right before the first 429". This is that: scans the ring buffer
+// for the FIRST record whose status is in `failureStatuses`, then
+// returns every real record from [thatTimestamp - contextMs,
+// thatTimestamp], oldest first, each with its own real ms-precision
+// timestamp, endpoint, origin, status, candidateInfo (see
+// extractCandidateInfo above), and gapMsFromPrevious (the real elapsed
+// time since the PREVIOUS request in this same list - what actually
+// shows burst-vs-spread-out, not a rate averaged over a whole window).
+//
+// Returns found:false (never a fabricated timeline) when no record in
+// the window has a matching status - most commonly because the ring
+// buffer's own MAX_RETENTION_MS (30 minutes) has already rolled past
+// the real incident, or the process was restarted since. This module's
+// entire history lives in memory only, never persisted - it cannot
+// recover a timeline for a failure that happened before this process's
+// own current uptime, or more than MAX_RETENTION_MS ago.
+function getTimelineBeforeFirstFailure({ contextMs = 10000, windowMs = MAX_RETENTION_MS, failureStatuses = [429] } = {}){
+
+    pruneOld();
+
+    const cutoff = Date.now() - windowMs;
+    const inWindow = records.filter(r => r.ts >= cutoff).sort((a, b) => a.ts - b.ts);
+
+    const firstFailure = inWindow.find(r => failureStatuses.includes(r.status) || failureStatuses.includes(String(r.status)));
+
+    if(!firstFailure){
+        return {
+            found: false,
+            message: `Tidak ada request dengan status ${failureStatuses.join("/")} dalam ${Math.round(windowMs / 60000)} menit terakhir yang masih tersimpan di ring buffer (retensi maksimum ${Math.round(MAX_RETENTION_MS / 60000)} menit, in-memory saja - tidak bertahan lewat restart proses).`,
+            windowMs, failureStatuses, generatedAt: new Date().toISOString()
+        };
+    }
+
+    const rangeStart = firstFailure.ts - contextMs;
+    const timeline = inWindow.filter(r => r.ts >= rangeStart && r.ts <= firstFailure.ts);
+
+    let previousTs = null;
+    const rows = timeline.map(r => {
+
+        const gapMsFromPrevious = previousTs != null ? r.ts - previousTs : null;
+        previousTs = r.ts;
+
+        return {
+            ts: new Date(r.ts).toISOString(),
+            epochMs: r.ts,
+            gapMsFromPrevious,
+            endpoint: r.endpoint,
+            origin: r.origin,
+            status: r.status,
+            candidateInfo: r.candidateInfo,
+            ...(r.stackSample ? { stackSample: r.stackSample } : {})
+        };
+
+    });
+
+    return {
+        found: true,
+        firstFailureAt: new Date(firstFailure.ts).toISOString(),
+        firstFailureEndpoint: firstFailure.endpoint,
+        firstFailureOrigin: firstFailure.origin,
+        contextMs,
+        requestCountInWindow: rows.length,
+        generatedAt: new Date().toISOString(),
         rows
     };
 
@@ -380,6 +490,31 @@ function formatAccountingTable(accounting){
 
     const totalPct = Math.round(accounting.rows.reduce((s, r) => s + r.percentageOfTotal, 0) * 100) / 100;
     lines.push(`TOTAL: ${accounting.totalCalls} calls, ${totalPct}% (harus 100%, boleh meleset tipis karena pembulatan per baris)`);
+
+    return lines.join("\n");
+
+}
+
+// Plain-text millisecond-precision burst timeline - the exact shape
+// requested for the "10 detik sebelum 429 pertama" investigation. Each
+// line's own gap-from-previous is what actually shows a burst (several
+// requests within a handful of ms of each other) versus normal,
+// evenly-paced traffic - never inferred from an averaged rate.
+function formatTimeline(timeline){
+
+    if(!timeline.found){
+        return `[gmgn-traffic-timeline] ${timeline.message}`;
+    }
+
+    const lines = [];
+    lines.push(`[gmgn-traffic-timeline] first failure=${timeline.firstFailureEndpoint} (${timeline.firstFailureOrigin}) at ${timeline.firstFailureAt} - ${timeline.requestCountInWindow} request dalam ${timeline.contextMs}ms sebelumnya`);
+    lines.push("Timestamp (ISO) | +ms sejak req sebelumnya | Endpoint | Origin | Status | Candidate/Token");
+
+    for(const r of timeline.rows){
+        const candidate = r.candidateInfo ? JSON.stringify(r.candidateInfo) : "-";
+        const gap = r.gapMsFromPrevious == null ? "(awal)" : `+${r.gapMsFromPrevious}ms`;
+        lines.push(`${r.ts} | ${gap} | ${r.endpoint} | ${r.origin} | ${r.status} | ${candidate}`);
+    }
 
     return lines.join("\n");
 
@@ -417,6 +552,7 @@ function _resetForTest(){
 }
 
 module.exports = {
-    withOrigin, getCurrentOrigin, record, getTrafficAccounting, getTrafficHistory, formatAccountingTable,
+    withOrigin, getCurrentOrigin, record, getTrafficAccounting, getTrafficHistory,
+    getTimelineBeforeFirstFailure, formatAccountingTable, formatTimeline,
     startPeriodicLogging, stopPeriodicLogging, ORIGIN_METADATA, _resetForTest
 };

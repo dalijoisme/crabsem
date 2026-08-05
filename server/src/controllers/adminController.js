@@ -120,6 +120,32 @@ async function getGmgnTrafficAccountingHistory(req, res, next){
 
 }
 
+// RATE_LIMIT_BANNED investigation, round 4 - real, millisecond-precision
+// timeline of every GMGN request in the contextMs window right before
+// the first recorded failure (default status 429), including which
+// token/candidate each request was for (see gmgnTrafficAccounting.js's
+// own extractCandidateInfo). found:false (never a fabricated timeline)
+// if no matching failure exists in the still-retained window - this
+// module's history is in-memory only (up to 30 min, never persisted),
+// so it can only ever answer for an incident within the CURRENT
+// process's recent uptime. ?contextMs=&windowMs=&status= are optional
+// overrides (status accepts a comma-separated list, e.g. "429,500").
+async function getGmgnTrafficTimelineBeforeFailure(req, res, next){
+
+    try{
+
+        const contextMs = req.query.contextMs ? Number(req.query.contextMs) : undefined;
+        const windowMs = req.query.windowMs ? Number(req.query.windowMs) : undefined;
+        const failureStatuses = req.query.status
+            ? req.query.status.split(",").map(s => s.trim())
+            : undefined;
+        sendSuccess(res, gmgnTrafficAccounting.getTimelineBeforeFirstFailure({ contextMs, windowMs, failureStatuses }));
+
+    }
+    catch(err){ next(err); }
+
+}
+
 async function getPredictionSummary(req, res, next){
 
     try{ sendSuccess(res, adminService.getPredictionSummary()); }
@@ -202,6 +228,8 @@ module.exports = {
     getGmgnTrafficAccounting,
 
     getGmgnTrafficAccountingHistory,
+
+    getGmgnTrafficTimelineBeforeFailure,
 
     getPredictionSummary,
 

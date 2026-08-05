@@ -319,3 +319,180 @@ test("ORIGIN_METADATA has an entry for every real call site tagged in production
     }
 
 });
+
+// RATE_LIMIT_BANNED investigation, round 4: candidateInfo extraction and
+// the millisecond-precision burst timeline.
+
+test("record() extracts candidateInfo (address) from a real pool_info-shaped URL", () => {
+
+    accounting.withOrigin("held-position-refresh-scheduler", () => accounting.record({
+        method: "GET", subPath: "/v1/token/pool_info", status: 200,
+        url: "https://openapi.gmgn.ai/v1/token/pool_info?chain=sol&address=TokenABC111&timestamp=123&client_id=xyz"
+    }));
+
+    const { rows } = accounting.getTrafficHistory();
+    assert.deepEqual(rows[0].sampleRequest.candidateInfo, { address: "TokenABC111" });
+
+});
+
+test("record() extracts candidateInfo (input_token/output_token) from a real quote-shaped URL", () => {
+
+    accounting.withOrigin("execution:buy-quote", () => accounting.record({
+        method: "GET", subPath: "/v1/trade/quote", status: 200,
+        url: "https://openapi.gmgn.ai/v1/trade/quote?chain=sol&input_token=So11111111111111111111111111111111111111112&output_token=TokenXYZ222&slippage=5"
+    }));
+
+    const { rows } = accounting.getTrafficHistory();
+    assert.deepEqual(rows[0].sampleRequest.candidateInfo, {
+        input_token: "So11111111111111111111111111111111111111112",
+        output_token: "TokenXYZ222"
+    });
+
+});
+
+test("record() with a URL carrying no candidate-identifying params (e.g. gas_price) stores candidateInfo: null - never fabricated", () => {
+
+    accounting.withOrigin("scheduler:gas_price", () => accounting.record({
+        method: "GET", subPath: "/v1/trade/gas_price", status: 200,
+        url: "https://openapi.gmgn.ai/v1/trade/gas_price?chain=sol&timestamp=123&client_id=xyz"
+    }));
+
+    const { rows } = accounting.getTrafficHistory();
+    assert.equal(rows[0].sampleRequest.candidateInfo, null);
+
+});
+
+test("record() with no url at all (backward compatible) never throws, candidateInfo: null", () => {
+
+    assert.doesNotThrow(() => {
+        accounting.withOrigin("scheduler:gas_price", () => accounting.record({ method: "GET", subPath: "/v1/trade/gas_price", status: 200 }));
+    });
+
+    const { rows } = accounting.getTrafficHistory();
+    assert.equal(rows[0].sampleRequest.candidateInfo, null);
+
+});
+
+test("record() with a malformed url never throws, candidateInfo: null", () => {
+
+    assert.doesNotThrow(() => {
+        accounting.withOrigin("scheduler:gas_price", () => accounting.record({ method: "GET", subPath: "/v1/trade/gas_price", status: 200, url: "not a real url" }));
+    });
+
+});
+
+test("getTimelineBeforeFirstFailure: found:false (never a fabricated timeline) when no failure status exists in the window", () => {
+
+    accounting.withOrigin("scheduler:trending", () => accounting.record({ method: "GET", subPath: "/v1/market/rank", status: 200 }));
+
+    const timeline = accounting.getTimelineBeforeFirstFailure();
+    assert.equal(timeline.found, false);
+    assert.ok(timeline.message);
+
+});
+
+test("getTimelineBeforeFirstFailure: returns real ms-precision rows for exactly the contextMs window before the FIRST 429, sorted oldest-first, with real gapMsFromPrevious", async (t) => {
+
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+    try{
+
+        // t=0: a request 15s before the failure - OUTSIDE a 10s context window, must be excluded.
+        accounting.withOrigin("scheduler:trending", () => accounting.record({ method: "GET", subPath: "/v1/market/rank", status: 200 }));
+        t.mock.timers.tick(15000);
+
+        // t=15000: inside the 10s window (5s before failure).
+        accounting.withOrigin("usd-to-sol-price-probe", () => accounting.record({
+            method: "GET", subPath: "/v1/trade/quote", status: 200,
+            url: "https://openapi.gmgn.ai/v1/trade/quote?input_token=SOL&output_token=USDC"
+        }));
+        t.mock.timers.tick(4700);
+
+        // t=19700: 300ms before the failure - a real burst (small gap).
+        accounting.withOrigin("execution:buy-quote", () => accounting.record({
+            method: "GET", subPath: "/v1/trade/quote", status: 200,
+            url: "https://openapi.gmgn.ai/v1/trade/quote?input_token=SOL&output_token=CandidateToken333"
+        }));
+        t.mock.timers.tick(300);
+
+        // t=20000: the first real 429.
+        accounting.withOrigin("execution:submit-swap", () => accounting.record({ method: "POST", subPath: "/v1/trade/swap", status: 429 }));
+
+        const timeline = accounting.getTimelineBeforeFirstFailure({ contextMs: 10000 });
+
+        assert.equal(timeline.found, true);
+        assert.equal(timeline.firstFailureEndpoint, "POST /v1/trade/swap");
+        assert.equal(timeline.firstFailureOrigin, "execution:submit-swap");
+        assert.equal(timeline.requestCountInWindow, 3, "the t=0 request (15s before failure) must be excluded from a 10s context window - only the 3 requests within the last 10s, including the failure itself, are included");
+
+        assert.equal(timeline.rows[0].origin, "usd-to-sol-price-probe");
+        assert.equal(timeline.rows[0].gapMsFromPrevious, null, "the first row in the timeline has no previous row to gap against");
+
+        assert.equal(timeline.rows[1].origin, "execution:buy-quote");
+        assert.equal(timeline.rows[1].gapMsFromPrevious, 4700);
+        assert.deepEqual(timeline.rows[1].candidateInfo, { input_token: "SOL", output_token: "CandidateToken333" });
+
+        assert.equal(timeline.rows[2].origin, "execution:submit-swap");
+        assert.equal(timeline.rows[2].status, 429);
+        assert.equal(timeline.rows[2].gapMsFromPrevious, 300, "a 300ms gap right before the failure is exactly the kind of burst this timeline exists to surface");
+
+    }
+    finally{
+        t.mock.timers.reset();
+    }
+
+});
+
+test("getTimelineBeforeFirstFailure: picks the FIRST failure, not the last, when multiple exist in the window", async (t) => {
+
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+    try{
+
+        accounting.withOrigin("execution:submit-swap", () => accounting.record({ method: "POST", subPath: "/v1/trade/swap", status: 429 }));
+        t.mock.timers.tick(2000);
+        accounting.withOrigin("execution:submit-swap", () => accounting.record({ method: "POST", subPath: "/v1/trade/swap", status: 429 }));
+
+        const timeline = accounting.getTimelineBeforeFirstFailure({ contextMs: 10000 });
+
+        assert.equal(timeline.found, true);
+        assert.equal(timeline.requestCountInWindow, 1, "only the FIRST failure anchors the timeline - the second one is outside its own preceding context in this test and must not replace it");
+
+    }
+    finally{
+        t.mock.timers.reset();
+    }
+
+});
+
+test("getTimelineBeforeFirstFailure: a custom failureStatuses filter (e.g. TIMEOUT instead of 429) works", () => {
+
+    accounting.withOrigin("scheduler:trending", () => accounting.record({ method: "GET", subPath: "/v1/market/rank", status: 429 }));
+    accounting.withOrigin("scheduler:trenches", () => accounting.record({ method: "POST", subPath: "/v1/trenches", status: "TIMEOUT" }));
+
+    const timeline = accounting.getTimelineBeforeFirstFailure({ failureStatuses: ["TIMEOUT"] });
+
+    assert.equal(timeline.found, true);
+    assert.equal(timeline.firstFailureEndpoint, "POST /v1/trenches", "must match on the requested status only, ignoring the earlier 429 since it wasn't asked for");
+
+});
+
+test("formatTimeline: found:false renders the honest message, found:true renders every requested column", () => {
+
+    const empty = accounting.getTimelineBeforeFirstFailure();
+    assert.ok(accounting.formatTimeline(empty).includes("Tidak ada request"));
+
+    accounting.withOrigin("execution:submit-swap", () => accounting.record({
+        method: "POST", subPath: "/v1/trade/swap", status: 429,
+        url: "https://openapi.gmgn.ai/v1/trade/swap?input_token=SOL&output_token=TokenABC"
+    }));
+
+    const timeline = accounting.getTimelineBeforeFirstFailure();
+    const table = accounting.formatTimeline(timeline);
+
+    assert.ok(table.includes("Timestamp"));
+    assert.ok(table.includes("Candidate/Token"));
+    assert.ok(table.includes("execution:submit-swap"));
+    assert.ok(table.includes("TokenABC"));
+
+});

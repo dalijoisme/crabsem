@@ -162,9 +162,21 @@ async function main(){
         restores.forEach(restore => restore());
     }
 
-    const outPath = path.join(__dirname, "telemetry-head.json");
-    fs.writeFileSync(outPath, JSON.stringify({ engineVersion: ENGINE_VERSION, generatedAt: new Date().toISOString(), telemetry }, null, 2));
-    console.log(`[regression-compare] HEAD: ${telemetry.length} recorded GMGN calls -> ${outPath}`);
+    // REGRESSION_OUTPUT_PATH (isolation-test addition): lets this same
+    // script be run twice under different config.HELD_POSITION_REFRESH_MODE
+    // values without the second run overwriting the first - see
+    // runFlagCompare.js, which is the only caller that sets this.
+    // Defaults to the original fixed filename so every existing
+    // invocation/doc reference is unaffected.
+    const outPath = process.env.REGRESSION_OUTPUT_PATH
+        ? path.resolve(process.env.REGRESSION_OUTPUT_PATH)
+        : path.join(__dirname, "telemetry-head.json");
+    fs.writeFileSync(outPath, JSON.stringify({
+        engineVersion: ENGINE_VERSION,
+        heldPositionRefreshMode: require("../../src/config/env").HELD_POSITION_REFRESH_MODE,
+        generatedAt: new Date().toISOString(), telemetry
+    }, null, 2));
+    console.log(`[regression-compare] HEAD (mode=${require("../../src/config/env").HELD_POSITION_REFRESH_MODE}): ${telemetry.length} recorded GMGN calls -> ${outPath}`);
 
 }
 

@@ -1,0 +1,155 @@
+{
+  "engineVersion": "HEAD",
+  "heldPositionRefreshMode": "ALL_POSITIONS",
+  "generatedAt": "2026-08-05T15:29:43.567Z",
+  "telemetry": [
+    {
+      "timestamp_ms": 1785943783438,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenKline",
+      "endpoint": "GET /v1/market/token_kline",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenProfit1111111111111111111111111"
+      },
+      "request_start": 1785943783432,
+      "request_finish": 1785943783438,
+      "duration_ms": 6,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783442,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenPoolInfo",
+      "endpoint": "GET /v1/token/pool_info",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenProfit1111111111111111111111111"
+      },
+      "request_start": 1785943783431,
+      "request_finish": 1785943783442,
+      "duration_ms": 11,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783460,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenPoolInfo",
+      "endpoint": "GET /v1/token/pool_info",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenLosing22222222222222222222222222"
+      },
+      "request_start": 1785943783443,
+      "request_finish": 1785943783460,
+      "duration_ms": 17,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783460,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenKline",
+      "endpoint": "GET /v1/market/token_kline",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenLosing22222222222222222222222222"
+      },
+      "request_start": 1785943783443,
+      "request_finish": 1785943783460,
+      "duration_ms": 17,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783490,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenKline",
+      "endpoint": "GET /v1/market/token_kline",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenFlat333333333333333333333333333"
+      },
+      "request_start": 1785943783461,
+      "request_finish": 1785943783490,
+      "duration_ms": 29,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783490,
+      "engine_version": "HEAD",
+      "call_chain": "manage-open-positions -> spyGmgnClient.getTokenPoolInfo",
+      "endpoint": "GET /v1/token/pool_info",
+      "origin": "manage-open-positions",
+      "candidate": {
+        "address": "HeldTokenFlat333333333333333333333333333"
+      },
+      "request_start": 1785943783461,
+      "request_finish": 1785943783490,
+      "duration_ms": 29,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783520,
+      "engine_version": "HEAD",
+      "call_chain": "buy-candidate:ALPHA1 -> spyGmgnClient.getSwapQuote",
+      "endpoint": "GET /v1/trade/quote",
+      "origin": "buy-candidate:ALPHA1",
+      "candidate": {
+        "input_token": "So11111111111111111111111111111111111111112",
+        "output_token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "from_address": "RegressionComparatorFakeWallet1111111111111"
+      },
+      "request_start": 1785943783492,
+      "request_finish": 1785943783520,
+      "duration_ms": 28,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783536,
+      "engine_version": "HEAD",
+      "call_chain": "buy-candidate:ALPHA1 -> spyGmgnClient.getSwapQuote",
+      "endpoint": "GET /v1/trade/quote",
+      "origin": "buy-candidate:ALPHA1",
+      "candidate": {
+        "input_token": "So11111111111111111111111111111111111111112",
+        "output_token": "BuyCandidateAlpha1111111111111111111111",
+        "from_address": "RegressionComparatorFakeWallet1111111111111"
+      },
+      "request_start": 1785943783521,
+      "request_finish": 1785943783536,
+      "duration_ms": 15,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783551,
+      "engine_version": "HEAD",
+      "call_chain": "buy-candidate:BETA2 -> spyGmgnClient.getSwapQuote",
+      "endpoint": "GET /v1/trade/quote",
+      "origin": "buy-candidate:BETA2",
+      "candidate": {
+        "input_token": "So11111111111111111111111111111111111111112",
+        "output_token": "BuyCandidateBeta222222222222222222222222",
+        "from_address": "RegressionComparatorFakeWallet1111111111111"
+      },
+      "request_start": 1785943783536,
+      "request_finish": 1785943783551,
+      "duration_ms": 15,
+      "status": 200
+    },
+    {
+      "timestamp_ms": 1785943783566,
+      "engine_version": "HEAD",
+      "call_chain": "buy-candidate:GAMMA3 -> spyGmgnClient.getSwapQuote",
+      "endpoint": "GET /v1/trade/quote",
+      "origin": "buy-candidate:GAMMA3",
+      "candidate": {
+        "input_token": "So11111111111111111111111111111111111111112",
+        "output_token": "BuyCandidateGamma33333333333333333333333",
+        "from_address": "RegressionComparatorFakeWallet1111111111111"
+      },
+      "request_start": 1785943783551,
+      "request_finish": 1785943783566,
+      "duration_ms": 15,
+      "status": 200
+    }
+  ]
+}

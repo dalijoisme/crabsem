@@ -16,6 +16,18 @@ const path = require("path");
 const HEAD_PATH = path.join(__dirname, "telemetry-head.json");
 const BASELINE_PATH = path.join(__dirname, "telemetry-baseline.json");
 
+// isolation-test addition: an explicit label describing WHAT was
+// compared, derived from the telemetry file's own real metadata
+// (engineVersion + heldPositionRefreshMode, when present) rather than
+// hardcoded "Arjuna"/"HEAD" - so this same comparator also reports
+// correctly for a Mode A vs Mode B run (same HEAD codebase, different
+// config.HELD_POSITION_REFRESH_MODE), not only the original
+// baseline-commit-vs-HEAD comparison.
+function describeRun(raw){
+    const mode = raw.heldPositionRefreshMode ? ` (HELD_POSITION_REFRESH_MODE=${raw.heldPositionRefreshMode})` : "";
+    return `${raw.engineVersion || "unknown"}${mode}`;
+}
+
 function loadTelemetry(filePath, label){
 
     if(!fs.existsSync(filePath)){
@@ -24,7 +36,10 @@ function loadTelemetry(filePath, label){
     }
 
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return raw.telemetry.slice().sort((a, b) => a.request_start - b.request_start);
+    return {
+        label: describeRun(raw),
+        records: raw.telemetry.slice().sort((a, b) => a.request_start - b.request_start)
+    };
 
 }
 
@@ -87,33 +102,33 @@ function computeMetrics(records){
 
 }
 
-function formatMetricsTable(baselineMetrics, headMetrics){
+function formatMetricsTable(leftMetrics, rightMetrics, leftLabel = "Left", rightLabel = "Right"){
 
     const rows = [
-        ["Total request GMGN", baselineMetrics.totalRequests, headMetrics.totalRequests],
-        ["Requests/detik (QPS)", baselineMetrics.qps, headMetrics.qps],
-        ["Burst terbesar (dalam 1000ms)", baselineMetrics.maxBurstIn1s, headMetrics.maxBurstIn1s],
-        ["Concurrent request maksimum", baselineMetrics.maxConcurrent, headMetrics.maxConcurrent],
-        ["Total duration (ms)", baselineMetrics.totalDurationMs, headMetrics.totalDurationMs]
+        ["Total request GMGN", leftMetrics.totalRequests, rightMetrics.totalRequests],
+        ["Requests/detik (QPS)", leftMetrics.qps, rightMetrics.qps],
+        ["Burst terbesar (dalam 1000ms)", leftMetrics.maxBurstIn1s, rightMetrics.maxBurstIn1s],
+        ["Concurrent request maksimum", leftMetrics.maxConcurrent, rightMetrics.maxConcurrent],
+        ["Total duration (ms)", leftMetrics.totalDurationMs, rightMetrics.totalDurationMs]
     ];
 
     const lines = [];
-    lines.push("Metric".padEnd(32) + "| Arjuna (a0a8759)".padEnd(20) + "| HEAD".padEnd(12) + "| Delta");
+    lines.push("Metric".padEnd(32) + `| ${leftLabel}`.padEnd(20) + `| ${rightLabel}`.padEnd(12) + "| Delta");
     lines.push("-".repeat(80));
-    for(const [metric, arjuna, head] of rows){
-        const rawDelta = typeof arjuna === "number" && typeof head === "number" ? Math.round((head - arjuna) * 100) / 100 : "-";
+    for(const [metric, left, right] of rows){
+        const rawDelta = typeof left === "number" && typeof right === "number" ? Math.round((right - left) * 100) / 100 : "-";
         const deltaStr = typeof rawDelta === "number" ? (rawDelta > 0 ? `+${rawDelta}` : `${rawDelta}`) : rawDelta;
-        lines.push(String(metric).padEnd(32) + `| ${String(arjuna).padEnd(18)}| ${String(head).padEnd(10)}| ${deltaStr}`);
+        lines.push(String(metric).padEnd(32) + `| ${String(left).padEnd(18)}| ${String(right).padEnd(10)}| ${deltaStr}`);
     }
 
     lines.push("");
     lines.push("Request per endpoint:");
-    const allEndpoints = new Set([...Object.keys(baselineMetrics.perEndpoint), ...Object.keys(headMetrics.perEndpoint)]);
+    const allEndpoints = new Set([...Object.keys(leftMetrics.perEndpoint), ...Object.keys(rightMetrics.perEndpoint)]);
     for(const ep of allEndpoints){
-        const a = baselineMetrics.perEndpoint[ep] || 0;
-        const h = headMetrics.perEndpoint[ep] || 0;
-        const delta = h - a;
-        lines.push(`  ${ep.padEnd(32)} Arjuna=${a}  HEAD=${h}  Delta=${delta > 0 ? "+" + delta : delta}`);
+        const l = leftMetrics.perEndpoint[ep] || 0;
+        const r = rightMetrics.perEndpoint[ep] || 0;
+        const delta = r - l;
+        lines.push(`  ${ep.padEnd(32)} ${leftLabel}=${l}  ${rightLabel}=${r}  Delta=${delta > 0 ? "+" + delta : delta}`);
     }
 
     return lines.join("\n");
@@ -171,33 +186,42 @@ function findFirstDifference(baseline, head){
 
 function main(){
 
-    const baseline = loadTelemetry(BASELINE_PATH, "baseline (runBaseline.js, di dalam worktree a0a8759)");
-    const head = loadTelemetry(HEAD_PATH, "HEAD (runHead.js)");
+    // isolation-test addition: optional CLI args override which two
+    // telemetry files get compared - `node compare.js <left> <right>` -
+    // so the exact same tool also serves a Mode A vs Mode B comparison
+    // (both HEAD, different config.HELD_POSITION_REFRESH_MODE), not only
+    // the original baseline-commit-vs-HEAD comparison. Defaults preserve
+    // every existing invocation unchanged.
+    const leftPath = process.argv[2] ? path.resolve(process.argv[2]) : BASELINE_PATH;
+    const rightPath = process.argv[3] ? path.resolve(process.argv[3]) : HEAD_PATH;
 
-    const baselineMetrics = computeMetrics(baseline);
-    const headMetrics = computeMetrics(head);
+    const left = loadTelemetry(leftPath, "left-hand side");
+    const right = loadTelemetry(rightPath, "right-hand side");
+
+    const leftMetrics = computeMetrics(left.records);
+    const rightMetrics = computeMetrics(right.records);
 
     console.log("=".repeat(80));
-    console.log("REGRESSION COMPARATOR - Arjuna (a0a8759) vs HEAD");
+    console.log(`REGRESSION COMPARATOR - ${left.label}  vs  ${right.label}`);
     console.log("Berdasarkan runtime nyata (spyGmgnClient, tidak ada request GMGN sungguhan, tidak ada submit, tidak ada tulis DB nyata).");
     console.log("=".repeat(80));
     console.log("");
-    console.log(formatMetricsTable(baselineMetrics, headMetrics));
+    console.log(formatMetricsTable(leftMetrics, rightMetrics, left.label, right.label));
     console.log("");
     console.log("=".repeat(80));
     console.log("CALL GRAPH");
     console.log("=".repeat(80));
-    console.log(formatCallGraph(baseline, "ARJUNA (a0a8759):"));
+    console.log(formatCallGraph(left.records, `${left.label}:`));
     console.log("");
-    console.log(formatCallGraph(head, "HEAD:"));
+    console.log(formatCallGraph(right.records, `${right.label}:`));
     console.log("");
     console.log("=".repeat(80));
     console.log("FIRST DIFFERENCE");
     console.log("=".repeat(80));
 
-    const diff = findFirstDifference(baseline, head);
+    const diff = findFirstDifference(left.records, right.records);
     if(diff.identical){
-        console.log("Tidak ada perbedaan runtime - urutan (origin, endpoint) identik di kedua versi.");
+        console.log("Tidak ada perbedaan runtime - urutan (origin, endpoint) identik di kedua sisi.");
     }
     else{
         console.log(diff.reason);

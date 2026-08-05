@@ -29,6 +29,26 @@ const config = Object.freeze({
 
     GMGN_HOST: process.env.GMGN_HOST || "https://openapi.gmgn.ai",
 
+    // RATE_LIMIT_BANNED investigation, isolation test: feature flag for
+    // held-position refresh SCOPE (services/tradingBotEngine.js's own
+    // manageOpenPositions) - lets the two real behaviors coexist,
+    // switchable, instead of one having to be deleted to test the other.
+    //   - "ALL_POSITIONS" (default - current production behavior,
+    //     unchanged by this flag's mere existence): every open position
+    //     gets a realtime refresh every exit cycle, upside and downside
+    //     alike - the Stop Loss reliability fix from FINAL PRODUCTION
+    //     SPRINT P0 (real incident: -20% SL not closing until -43.8%/-81%).
+    //   - "PROFIT_ONLY" (Arjuna a0a8759's own original behavior): only a
+    //     position already in profit-protection territory gets the
+    //     realtime refresh; a losing/breakeven position is refreshed only
+    //     via the slower `stale` (90s) path - fewer GMGN requests, but
+    //     the exact scope that FINAL PRODUCTION SPRINT P0 was written to
+    //     fix. See services/tradingBotEngine.js's own use of this flag.
+    // Default MUST stay ALL_POSITIONS - this flag exists to make an
+    // A/B comparison possible (scripts/regressionCompare/), never to
+    // silently change production behavior by its own addition.
+    HELD_POSITION_REFRESH_MODE: (process.env.HELD_POSITION_REFRESH_MODE || "ALL_POSITIONS").trim().toUpperCase(),
+
     // Admin Panel (engine-quality sprint) - a single shared password,
     // no role system yet (explicitly out of scope for this sprint).
     // null (unset) means the admin API is fully disabled rather than

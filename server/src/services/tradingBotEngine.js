@@ -494,10 +494,29 @@ async function manageOpenPositions(userId, tradeManagerForUser, botConfig, token
         // never evaluated against a price that stopped being real.
         const stale = msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS;
 
+        // RATE_LIMIT_BANNED investigation, isolation test
+        // (config.HELD_POSITION_REFRESH_MODE): the realtime-refresh
+        // branch below always evaluates for a still-fresh token, but
+        // WHICH tokens qualify is now switchable rather than only ever
+        // "all of them" (FINAL PRODUCTION SPRINT P0's own fix) - default
+        // stays ALL_POSITIONS (this flag's mere existence changes
+        // nothing about production behavior); PROFIT_ONLY restores
+        // Arjuna a0a8759's own original scope
+        // (isInProfitProtectionTerritory - already defined above, kept
+        // live specifically so this flag has something real to switch
+        // to) purely to make an apples-to-apples A/B measurement
+        // possible (scripts/regressionCompare/), never as a silent
+        // default change.
+        const needsRealtimeRefresh = !stale && Boolean(token) && (
+            config.HELD_POSITION_REFRESH_MODE === "PROFIT_ONLY"
+                ? isInProfitProtectionTerritory(position, token, botConfig)
+                : true
+        );
+
         if(stale){
             token = await refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale: true });
         }
-        else if(token){
+        else if(needsRealtimeRefresh){
             // FINAL PRODUCTION SPRINT P0 (see REALTIME_EXIT_REFRESH_TTL_SECONDS's
             // own header comment) - EVERY still-trending open position is
             // re-verified on demand, every exit cycle, upside and downside

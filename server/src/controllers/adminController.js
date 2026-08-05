@@ -100,6 +100,26 @@ async function getGmgnTrafficAccounting(req, res, next){
 
 }
 
+// RATE_LIMIT_BANNED investigation, round 3 - real per-minute history
+// (minute, endpoint, origin, callsPerMinute, %, HTTP status, sample
+// request), up to 30 minutes of real retention (see
+// collectors/gmgn/gmgnTrafficAccounting.js's own getTrafficHistory()).
+// bucketMs/windowMs are optional overrides (?bucketMs=&windowMs=) -
+// default to a real 1-minute resolution over the module's full 30-minute
+// retention.
+async function getGmgnTrafficAccountingHistory(req, res, next){
+
+    try{
+
+        const bucketMs = req.query.bucketMs ? Number(req.query.bucketMs) : undefined;
+        const windowMs = req.query.windowMs ? Number(req.query.windowMs) : undefined;
+        sendSuccess(res, gmgnTrafficAccounting.getTrafficHistory({ bucketMs, windowMs }));
+
+    }
+    catch(err){ next(err); }
+
+}
+
 async function getPredictionSummary(req, res, next){
 
     try{ sendSuccess(res, adminService.getPredictionSummary()); }
@@ -180,6 +200,8 @@ module.exports = {
     getEngineConfig,
 
     getGmgnTrafficAccounting,
+
+    getGmgnTrafficAccountingHistory,
 
     getPredictionSummary,
 

@@ -178,6 +178,132 @@ test("formatAccountingTable: renders the requested columns and a TOTAL line", ()
 
 });
 
+test("record() stores the real HTTP status verbatim; a call with no status falls back to an honest 'UNKNOWN', never fabricated", () => {
+
+    accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 200 }));
+    accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 429 }));
+    accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a" })); // no status at all
+
+    const { rows } = accounting.getTrafficHistory();
+
+    const statuses = rows.map(r => r.httpStatus).sort();
+    assert.deepEqual(statuses, ["200", "429", "UNKNOWN"].sort(), "200, 429, and a real UNKNOWN fallback must each be their own distinct row - never merged or guessed");
+
+});
+
+test("getTrafficHistory: real records in different real minutes land in different buckets, aligned to the wall-clock minute", async (t) => {
+
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-08-05T10:15:30.000Z") });
+
+    try{
+
+        accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 200 }));
+
+        t.mock.timers.tick(60000); // now 10:16:30
+
+        accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 200 }));
+
+        const { rows, minuteCount } = accounting.getTrafficHistory();
+
+        assert.equal(minuteCount, 2, "two records a real minute apart must land in two distinct minute buckets");
+        assert.deepEqual(rows.map(r => r.minute).sort(), ["2026-08-05T10:15:00.000Z", "2026-08-05T10:16:00.000Z"], "each bucket must be labeled by its real wall-clock minute start, not an offset from process start");
+
+    }
+    finally{
+        t.mock.timers.reset();
+    }
+
+});
+
+test("getTrafficHistory: percentage is computed WITHIN each minute (rows for the same minute sum to 100%), not across the whole window", async (t) => {
+
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-08-05T10:15:00.000Z") });
+
+    try{
+
+        // Minute 1: 3 calls origin-a, 1 call origin-b (75%/25%)
+        accounting.withOrigin("origin-a", () => {
+            accounting.record({ method: "GET", subPath: "/v1/a", status: 200 });
+            accounting.record({ method: "GET", subPath: "/v1/a", status: 200 });
+            accounting.record({ method: "GET", subPath: "/v1/a", status: 200 });
+        });
+        accounting.withOrigin("origin-b", () => accounting.record({ method: "GET", subPath: "/v1/b", status: 200 }));
+
+        t.mock.timers.tick(60000); // minute 2
+
+        // Minute 2: 1 call origin-a only (100%)
+        accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 200 }));
+
+        const { rows } = accounting.getTrafficHistory();
+
+        const minute1Rows = rows.filter(r => r.minute === "2026-08-05T10:15:00.000Z");
+        const minute2Rows = rows.filter(r => r.minute === "2026-08-05T10:16:00.000Z");
+
+        const minute1TotalPct = minute1Rows.reduce((s, r) => s + r.percentage, 0);
+        const minute2TotalPct = minute2Rows.reduce((s, r) => s + r.percentage, 0);
+
+        assert.equal(minute1TotalPct, 100, "percentages within minute 1 alone must sum to 100%");
+        assert.equal(minute2TotalPct, 100, "percentages within minute 2 alone must sum to 100%, independent of minute 1's own totals");
+
+        assert.equal(minute1Rows.find(r => r.origin === "origin-a").percentage, 75);
+        assert.equal(minute1Rows.find(r => r.origin === "origin-b").percentage, 25);
+        assert.equal(minute2Rows.find(r => r.origin === "origin-a").percentage, 100);
+
+    }
+    finally{
+        t.mock.timers.reset();
+    }
+
+});
+
+test("getTrafficHistory: each row includes callChain/sourceFile metadata and a real sampleRequest, preferring a non-200 sample over a 200", () => {
+
+    accounting.withOrigin("held-position-fallback-direct-fetch", () => {
+        accounting.record({ method: "GET", subPath: "/v1/token/pool_info", status: 200 });
+        accounting.record({ method: "GET", subPath: "/v1/token/pool_info", status: 429 });
+    });
+
+    const { rows } = accounting.getTrafficHistory();
+    const row = rows.find(r => r.origin === "held-position-fallback-direct-fetch" && r.httpStatus === "429");
+
+    assert.ok(row, "the 429 must be its own visible row, not folded into the 200 row");
+    assert.equal(row.callChain, accounting.ORIGIN_METADATA["held-position-fallback-direct-fetch"].callChain);
+    assert.ok(row.sampleRequest, "a real sample request must be attached");
+    assert.equal(row.sampleRequest.status, 429);
+
+});
+
+test("getTrafficHistory: an empty window returns zero rows, never a fabricated minute", () => {
+
+    const result = accounting.getTrafficHistory();
+    assert.equal(result.minuteCount, 0);
+    assert.equal(result.totalCalls, 0);
+    assert.deepEqual(result.rows, []);
+
+});
+
+test("getTrafficHistory: respects a custom bucketMs/windowMs override", async (t) => {
+
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+
+    try{
+
+        accounting.withOrigin("origin-a", () => accounting.record({ method: "GET", subPath: "/v1/a", status: 200 }));
+        t.mock.timers.tick(20 * 60 * 1000); // 20 minutes later - outside a 10-minute window
+
+        const shortWindow = accounting.getTrafficHistory({ windowMs: 10 * 60 * 1000 });
+        assert.equal(shortWindow.totalCalls, 0, "a record older than the requested windowMs must be excluded");
+
+        const fullWindow = accounting.getTrafficHistory({ windowMs: 30 * 60 * 1000 });
+        assert.equal(fullWindow.totalCalls, 1, "the same record must still be included in a window wide enough to cover it");
+
+    }
+    finally{
+        t.mock.timers.reset();
+    }
+
+});
+
 test("ORIGIN_METADATA has an entry for every real call site tagged in production code, plus the unattributed fallback", () => {
 
     const expectedOrigins = [

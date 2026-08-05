@@ -192,10 +192,15 @@ function pruneOld(){
 // (authClient.js's fetchWithTimeout), for every client instance
 // (marketDataGateway's, execution's). Purely additive: records the real
 // request that already happened, never affects it.
-function record({ method, subPath }){
+// status: the real value requestDiagnostics.js's own logRequest() already
+// has (a real HTTP status code like 200/429, or "TIMEOUT"/"ERROR:<name>"
+// on a hard failure) - stored verbatim, never coerced, so
+// getTrafficHistory() below can show exactly which minute/endpoint/origin
+// a 429 (or any other real failure) first showed up on.
+function record({ method, subPath, status }){
 
     const origin = getCurrentOrigin();
-    const entry = { endpoint: `${method} ${subPath}`, origin, ts: Date.now() };
+    const entry = { endpoint: `${method} ${subPath}`, origin, status: status ?? "UNKNOWN", ts: Date.now() };
 
     if(origin === "unattributed"){
         // Cheap only because this is the rare/unexpected path - never
@@ -254,6 +259,100 @@ function getTrafficAccounting(windowMs = MAX_RETENTION_MS){
     }).sort((a, b) => b.callCount - a.callCount);
 
     return { windowMs, elapsedMs, totalCalls, generatedAt: new Date().toISOString(), rows };
+
+}
+
+// RATE_LIMIT_BANNED investigation, round 3: a single flat snapshot
+// (getTrafficAccounting above) proved insufficient - by the time
+// someone thinks to query it, the specific minute(s) that actually
+// triggered a ban may already be diluted into a much wider average. This
+// is the real, per-minute HISTORY behind that snapshot: every record in
+// the ring buffer (up to MAX_RETENTION_MS = 30 minutes) grouped into
+// real 1-minute buckets (aligned to the wall-clock minute, not to
+// whenever this function happens to be called), and within each minute,
+// further split by (endpoint, origin, HTTP status) - so "which endpoint,
+// called from where, started returning 429 in which specific minute" is
+// directly readable, not something that has to be inferred from a
+// single blended average across the whole window.
+//
+// percentage is computed WITHIN each minute (every row's percentage for
+// the same minute sums to 100%), not across the whole window - the
+// question this answers is "what was happening in THIS minute", not
+// "what's the overall share over 30 minutes" (that's what
+// getTrafficAccounting already answers).
+function getTrafficHistory({ bucketMs = 60000, windowMs = MAX_RETENTION_MS } = {}){
+
+    pruneOld();
+
+    const cutoff = Date.now() - windowMs;
+    const inWindow = records.filter(r => r.ts >= cutoff);
+
+    const byMinute = new Map(); // bucketStartMs -> Map(`${endpoint}::${origin}::${status}` -> { count, sample })
+
+    for(const r of inWindow){
+
+        const bucketStart = Math.floor(r.ts / bucketMs) * bucketMs;
+
+        if(!byMinute.has(bucketStart)) byMinute.set(bucketStart, new Map());
+
+        const bucketMap = byMinute.get(bucketStart);
+        const key = `${r.endpoint}::${r.origin}::${r.status}`;
+
+        if(!bucketMap.has(key)) bucketMap.set(key, { count: 0, sample: null });
+
+        const cell = bucketMap.get(key);
+        cell.count++;
+
+        // Prefer keeping a sample that carries extra debugging value (a
+        // real failure, or an unattributed stack) over an arbitrary
+        // first-seen 200 - but always keep SOME real sample.
+        if(!cell.sample || r.status !== 200) cell.sample = r;
+
+    }
+
+    const minuteStarts = [...byMinute.keys()].sort((a, b) => a - b);
+
+    const rows = [];
+
+    for(const bucketStart of minuteStarts){
+
+        const bucketMap = byMinute.get(bucketStart);
+        const totalCallsThisMinute = [...bucketMap.values()].reduce((sum, cell) => sum + cell.count, 0);
+
+        for(const [key, { count, sample }] of bucketMap.entries()){
+
+            const [endpoint, origin, status] = key.split("::");
+            const meta = ORIGIN_METADATA[origin] || ORIGIN_METADATA.unattributed;
+
+            rows.push({
+
+                minute: new Date(bucketStart).toISOString(),
+                totalCalls: count,
+                endpoint,
+                origin,
+                callChain: meta.callChain,
+                callsPerMinute: count, // this row's own count IS its rate, the bucket is exactly 1 minute wide
+                percentage: Math.round((count / totalCallsThisMinute) * 10000) / 100,
+                httpStatus: status,
+                sampleRequest: sample ? {
+                    ts: new Date(sample.ts).toISOString(),
+                    endpoint: sample.endpoint,
+                    status: sample.status,
+                    ...(sample.stackSample ? { stackSample: sample.stackSample } : {})
+                } : null
+
+            });
+
+        }
+
+    }
+
+    return {
+        bucketMs, windowMs, generatedAt: new Date().toISOString(),
+        minuteCount: minuteStarts.length,
+        totalCalls: inWindow.length,
+        rows
+    };
 
 }
 
@@ -318,6 +417,6 @@ function _resetForTest(){
 }
 
 module.exports = {
-    withOrigin, getCurrentOrigin, record, getTrafficAccounting, formatAccountingTable,
+    withOrigin, getCurrentOrigin, record, getTrafficAccounting, getTrafficHistory, formatAccountingTable,
     startPeriodicLogging, stopPeriodicLogging, ORIGIN_METADATA, _resetForTest
 };

@@ -53,7 +53,7 @@ function logRequest({ method, subPath, startedAt, finishedAt, status }){
 
     const { tickId, sequence } = nextSequence();
 
-    gmgnTrafficAccounting.record({ method, subPath });
+    gmgnTrafficAccounting.record({ method, subPath, status });
 
     console.log("[gmgn-diagnostic]", JSON.stringify({
 

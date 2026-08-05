@@ -38,6 +38,10 @@ router.get("/admin/engine/config", controller.getEngineConfig);
 // traffic accounting (endpoint x origin x calls/min x %total). See
 // collectors/gmgn/gmgnTrafficAccounting.js. TEMPORARY.
 router.get("/admin/gmgn-traffic-accounting", controller.getGmgnTrafficAccounting);
+// RATE_LIMIT_BANNED investigation, round 3 - real per-minute history (up
+// to 30 min) behind the snapshot above, so the minutes leading up to a
+// ban stay visible instead of being averaged away. TEMPORARY.
+router.get("/admin/gmgn-traffic-accounting/history", controller.getGmgnTrafficAccountingHistory);
 router.get("/admin/predictions/summary", controller.getPredictionSummary);
 router.get("/admin/predictions/throughput", controller.getPredictionThroughput);
 

@@ -54,15 +54,24 @@ function findByPrediction(predictionId){
 // recorded_at - a 24h-horizon snapshot can be recorded up to a day
 // after its parent, so pruning by this table's own timestamp could
 // leave a fresh-looking child pointing at an already-deleted parent).
+//
+// Raw `prediction_time < @cutoff` (JS-computed cutoff), not
+// `datetime(prediction_time) < datetime('now', ...)` - see
+// predictionHistoryRepository.pruneOlderThan's own comment: verified
+// via EXPLAIN QUERY PLAN on the real production database that the
+// datetime()-wrapped form defeats idx_prediction_history_prediction_time
+// (full SCAN instead of SEARCH) on this specifically large table.
 function pruneForPredictionsOlderThan(maxAgeHours){
+
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
 
     const info = db.prepare(`
         DELETE FROM prediction_timeline
         WHERE prediction_id IN (
             SELECT id FROM prediction_history
-            WHERE datetime(prediction_time) < datetime('now', '-' || ? || ' hours')
+            WHERE prediction_time < @cutoff
         )
-    `).run(maxAgeHours);
+    `).run({ cutoff });
 
     return info.changes;
 

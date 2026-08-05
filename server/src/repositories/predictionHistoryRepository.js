@@ -399,13 +399,29 @@ function findTradingTierInWindow(fromTimestamp, toTimestamp){
 // violation anyway. Caller MUST prune predictionTimelineRepository's
 // children for the same maxAgeHours FIRST (see that function's own
 // comment) - this repository never reaches across tables itself.
+//
+// Deliberately a raw `prediction_time < @cutoff` comparison against a
+// cutoff computed in JS (CURRENT_TIMESTAMP's own 'YYYY-MM-DD HH:MM:SS'
+// UTC shape - directly comparable as text, no reformatting needed) -
+// NOT `datetime(prediction_time) < datetime('now', ...)` like this
+// codebase's other pruneOlderThan implementations. Verified via
+// EXPLAIN QUERY PLAN on the real (135.8GB) production database:
+// wrapping the column in datetime() defeats
+// idx_prediction_history_prediction_time entirely (SCAN, full table),
+// while this raw form uses it as a covering index (SEARCH) - the
+// difference between a bounded index seek and a multi-minute full scan
+// on the exact table this fix exists to stop from blocking the event
+// loop. Every other table this codebase already prunes is small enough
+// (24-48h retention) that this never mattered before.
 function pruneOlderThan(maxAgeHours){
+
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
 
     const info = db.prepare(`
         DELETE FROM prediction_history
-        WHERE datetime(prediction_time) < datetime('now', '-' || ? || ' hours')
+        WHERE prediction_time < @cutoff
           AND id NOT IN (SELECT opened_by_prediction_id FROM trade_positions)
-    `).run(maxAgeHours);
+    `).run({ cutoff });
 
     return info.changes;
 

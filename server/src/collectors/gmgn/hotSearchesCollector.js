@@ -4,6 +4,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const { transformResponse } = require("../../services/hotSearchesTransformer");
 const gmgnHotSearchesRepository = require("../../repositories/gmgnHotSearchesRepository");
 
@@ -18,11 +19,11 @@ async function collectHotSearches(){
 
     }
 
-    const result = await marketDataGateway.getHotSearches([
+    const result = await withOrigin("scheduler:hot_searches", () => marketDataGateway.getHotSearches([
 
         { label: "hot-search", chain: CHAIN, interval: INTERVAL }
 
-    ]);
+    ]));
 
     const entries = transformResponse(result.data);
 

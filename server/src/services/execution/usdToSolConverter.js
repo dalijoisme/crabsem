@@ -49,6 +49,10 @@
 // at the moment of a real trade and stay on execution's own, separate,
 // uncached gmgnClient instance.
 
+// RATE_LIMIT_BANNED investigation, round 2: tags this price probe's own
+// real fetch with its own origin - see gmgnTrafficAccounting.js's header.
+const { withOrigin } = require("../../collectors/gmgn/gmgnTrafficAccounting");
+
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -99,7 +103,7 @@ async function getSolUsdPrice(gmgnClient, fromAddress){
     // check above already caught it.
     if(inFlightFetch) return inFlightFetch;
 
-    inFlightFetch = (async () => {
+    inFlightFetch = withOrigin("usd-to-sol-price-probe", async () => {
 
         try{
 
@@ -126,7 +130,7 @@ async function getSolUsdPrice(gmgnClient, fromAddress){
             inFlightFetch = null;
         }
 
-    })();
+    });
 
     return inFlightFetch;
 

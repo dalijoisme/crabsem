@@ -4,6 +4,7 @@
 
 const adminService = require("../services/adminService");
 const adminAuthService = require("../services/adminAuthService");
+const gmgnTrafficAccounting = require("../collectors/gmgn/gmgnTrafficAccounting");
 const { sendSuccess, sendError } = require("../utils/apiResponse");
 
 function isValidAddress(address){
@@ -77,6 +78,24 @@ async function getDailyReviewRecent(req, res, next){
 async function getEngineConfig(req, res, next){
 
     try{ sendSuccess(res, adminService.getEngineConfig()); }
+    catch(err){ next(err); }
+
+}
+
+// RATE_LIMIT_BANNED investigation, round 2 - real, measured GMGN
+// traffic accounting, real-time from this process's own in-memory
+// record (see collectors/gmgn/gmgnTrafficAccounting.js). windowMs is
+// optional (?windowMs=600000 for the last 10 minutes, matching the real
+// ban-observation window) - defaults to the module's own full retention
+// (30 minutes).
+async function getGmgnTrafficAccounting(req, res, next){
+
+    try{
+
+        const windowMs = req.query.windowMs ? Number(req.query.windowMs) : undefined;
+        sendSuccess(res, gmgnTrafficAccounting.getTrafficAccounting(windowMs));
+
+    }
     catch(err){ next(err); }
 
 }
@@ -159,6 +178,8 @@ module.exports = {
     getDailyReviewRecent,
 
     getEngineConfig,
+
+    getGmgnTrafficAccounting,
 
     getPredictionSummary,
 

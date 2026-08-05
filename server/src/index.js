@@ -65,6 +65,7 @@ const exitEvaluationScheduler = require("./scheduler/exitEvaluationScheduler");
 // SUPPLIES data they read (services/heldPositionMarketStore.js), never
 // replaces their own manageOpenPositions()/exit-decision wiring.
 const heldPositionRefreshScheduler = require("./scheduler/heldPositionRefreshScheduler");
+const gmgnTrafficAccounting = require("./collectors/gmgn/gmgnTrafficAccounting");
 const missedOpportunityOutcomeScheduler = require("./scheduler/missedOpportunityOutcomeScheduler");
 const abTestScheduler = require("./scheduler/abTestScheduler");
 const benchmarkScheduler = require("./scheduler/benchmarkScheduler");
@@ -177,6 +178,14 @@ const tradingBotSchedulerHandle = tradingBotScheduler.start();
 const exitEvaluationSchedulerHandle = exitEvaluationScheduler.start();
 
 const heldPositionRefreshSchedulerHandle = heldPositionRefreshScheduler.start();
+
+// RATE_LIMIT_BANNED investigation, round 2: logs a real, measured GMGN
+// traffic accounting table (endpoint x origin x calls/min x %total)
+// straight to this process's own stdout every 60s - visible directly in
+// pm2/systemd logs, no separate tooling needed. TEMPORARY, same
+// convention as requestDiagnostics.js - remove once the investigation
+// is closed.
+gmgnTrafficAccounting.startPeriodicLogging(60000);
 
 const missedOpportunityOutcomeSchedulerHandle = missedOpportunityOutcomeScheduler.start();
 

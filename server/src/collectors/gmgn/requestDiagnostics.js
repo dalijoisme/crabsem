@@ -12,6 +12,11 @@
 //
 // REMOVE once the investigation is closed - this is not permanent
 // architecture, per the incident ticket's explicit instruction.
+//
+// RATE_LIMIT_BANNED investigation, round 2: also records every request
+// into gmgnTrafficAccounting.js (WHO called it, not just method+subPath +
+// tick position) - same choke point, purely additive.
+const gmgnTrafficAccounting = require("./gmgnTrafficAccounting");
 
 let tickCounter = 0;
 let currentTickId = null;
@@ -47,6 +52,8 @@ function nextSequence(){
 function logRequest({ method, subPath, startedAt, finishedAt, status }){
 
     const { tickId, sequence } = nextSequence();
+
+    gmgnTrafficAccounting.record({ method, subPath });
 
     console.log("[gmgn-diagnostic]", JSON.stringify({
 

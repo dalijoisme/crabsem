@@ -3,6 +3,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const { transformResponse } = require("../../services/launchpadStatsTransformer");
 const gmgnLaunchpadStatsRepository = require("../../repositories/gmgnLaunchpadStatsRepository");
 
@@ -14,7 +15,7 @@ async function collectLaunchpadStats(){
 
     }
 
-    const result = await marketDataGateway.getCookingStatistics();
+    const result = await withOrigin("scheduler:launchpad_stats", () => marketDataGateway.getCookingStatistics());
 
     const entries = transformResponse(result.data);
 

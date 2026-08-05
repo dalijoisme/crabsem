@@ -4,6 +4,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const { buildTrenchesBody } = require("./trenchesRequestBuilder");
 const { transformResponse } = require("../../services/trenchesTransformer");
 const gmgnTrenchesRepository = require("../../repositories/gmgnTrenchesRepository");
@@ -20,7 +21,7 @@ async function collectTrenches(){
 
     const body = buildTrenchesBody(CHAIN, { limit: 30 });
 
-    const result = await marketDataGateway.getTrenches(CHAIN, body);
+    const result = await withOrigin("scheduler:trenches", () => marketDataGateway.getTrenches(CHAIN, body));
 
     const entries = transformResponse(result.data);
 

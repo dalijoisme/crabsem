@@ -40,6 +40,7 @@ const gmgnOndemandService = require("../services/gmgnOndemandService");
 const heldPositionMarketStore = require("../services/heldPositionMarketStore");
 const tradingBotEngine = require("../services/tradingBotEngine");
 const { createLockGuard } = require("../services/schedulerLockGuard");
+const { withOrigin } = require("../collectors/gmgn/gmgnTrafficAccounting");
 
 const { HELD_POSITION_CHAIN, REALTIME_EXIT_REFRESH_TTL_SECONDS, extractFreshPriceAndLiquidity } = tradingBotEngine;
 
@@ -94,10 +95,10 @@ async function refreshOneToken(tokenAddress, ondemandService){
 
     try{
 
-        const [poolResult, klineResult] = await Promise.all([
+        const [poolResult, klineResult] = await withOrigin("held-position-refresh-scheduler", () => Promise.all([
             ondemandService.getTokenPoolInfo(HELD_POSITION_CHAIN, tokenAddress, REALTIME_EXIT_REFRESH_TTL_SECONDS),
             ondemandService.getTokenKline(HELD_POSITION_CHAIN, tokenAddress, "1h", REALTIME_EXIT_REFRESH_TTL_SECONDS)
-        ]);
+        ]));
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
         if(!fresh) return false;

@@ -3,6 +3,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const { transformResponse } = require("../../services/gasPriceTransformer");
 const gmgnGasPriceRepository = require("../../repositories/gmgnGasPriceRepository");
 
@@ -16,7 +17,7 @@ async function collectGasPrice(){
 
     }
 
-    const result = await marketDataGateway.getGasPrice(CHAIN);
+    const result = await withOrigin("scheduler:gas_price", () => marketDataGateway.getGasPrice(CHAIN));
 
     const entry = transformResponse(CHAIN, result.data);
 

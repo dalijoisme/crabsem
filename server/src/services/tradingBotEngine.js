@@ -57,6 +57,10 @@ const gmgnOndemandService = require("./gmgnOndemandService");
 // how it's used (store-first, direct-fetch fallback, never a widened
 // staleness window).
 const heldPositionMarketStore = require("./heldPositionMarketStore");
+// RATE_LIMIT_BANNED investigation, round 2: tags the fallback direct-
+// fetch branch below with its own origin, distinct from the centralized
+// scheduler's own fetch - see gmgnTrafficAccounting.js's own header.
+const { withOrigin } = require("../collectors/gmgn/gmgnTrafficAccounting");
 // Arjuna vNext sprint, Priority 1 (Synthetic Market Filter): a local
 // SQLite read, not a GMGN API call - the same gmgn_trenches row
 // entryGateService.js's own MISSING_QUALITY_DATA gate already required
@@ -237,10 +241,10 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
 
     try{
 
-        const [poolResult, klineResult] = await Promise.all([
+        const [poolResult, klineResult] = await withOrigin("held-position-fallback-direct-fetch", () => Promise.all([
             ondemandService.getTokenPoolInfo(HELD_POSITION_CHAIN, position.token_address, ttlSeconds),
             ondemandService.getTokenKline(HELD_POSITION_CHAIN, position.token_address, "1h", ttlSeconds)
-        ]);
+        ]));
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
         if(!fresh) return token;

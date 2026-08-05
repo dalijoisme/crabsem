@@ -31,6 +31,9 @@
 const { assertFounderWallet } = require("./founderModeGuard");
 const { assertQuoteIsSafeToExecute } = require("./executionGuard");
 const executionSafetyConfig = require("../../config/executionSafetyConfig");
+// RATE_LIMIT_BANNED investigation, round 2: tags every real quote/submit
+// call with its own origin - see gmgnTrafficAccounting.js's own header.
+const { withOrigin } = require("../../collectors/gmgn/gmgnTrafficAccounting");
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const CHAIN = "sol";
@@ -134,10 +137,10 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
             // BUY - completely untouched: one quote, one check, BUY's own
             // existing guardLimits (default 5%/15%/3-hop), never bypassed.
             slippage = guardLimits.maxSlippagePct ?? DEFAULT_SLIPPAGE_PCT;
-            const { data } = await gmgnClient.getSwapQuote(CHAIN, {
+            const { data } = await withOrigin("execution:buy-quote", () => gmgnClient.getSwapQuote(CHAIN, {
                 inputToken, outputToken, fromAddress: walletPublicKey,
                 inputAmount: String(amountLamports), slippage
-            });
+            }));
             assertQuoteIsSafeToExecute(data, guardLimits);
             quote = data;
 
@@ -154,10 +157,10 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
 
             for(let i = 0; i < EXIT_TOLERANCE_TIERS.length; i++){
                 const tier = EXIT_TOLERANCE_TIERS[i];
-                const { data } = await gmgnClient.getSwapQuote(CHAIN, {
+                const { data } = await withOrigin("execution:sell-quote", () => gmgnClient.getSwapQuote(CHAIN, {
                     inputToken, outputToken, fromAddress: walletPublicKey,
                     inputAmount: String(amountLamports), slippage: tier.slippagePct
-                });
+                }));
                 lastQuote = data;
                 slippage = tier.slippagePct;
                 try{
@@ -207,13 +210,13 @@ function createGmgnSwapTransactionBuilder({ gmgnClient, config, guardLimits = {}
 
             async submit(){
 
-                const { data } = await gmgnClient.submitSwap(CHAIN, {
+                const { data } = await withOrigin("execution:submit-swap", () => gmgnClient.submitSwap(CHAIN, {
                     fromAddress: walletPublicKey,
                     inputToken,
                     outputToken,
                     inputAmount: String(amountLamports),
                     slippage
-                });
+                }));
 
                 if(!data?.hash){
                     throw new Error("gmgnSwapTransactionBuilder: GMGN swap response did not include a transaction hash.");

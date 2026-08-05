@@ -34,6 +34,10 @@ router.get("/admin/wallets/summary", controller.getWalletsSummary);
 router.get("/admin/daily-review", controller.getDailyReview);
 router.get("/admin/daily-review/recent", controller.getDailyReviewRecent);
 router.get("/admin/engine/config", controller.getEngineConfig);
+// RATE_LIMIT_BANNED investigation, round 2 - real, measured GMGN
+// traffic accounting (endpoint x origin x calls/min x %total). See
+// collectors/gmgn/gmgnTrafficAccounting.js. TEMPORARY.
+router.get("/admin/gmgn-traffic-accounting", controller.getGmgnTrafficAccounting);
 router.get("/admin/predictions/summary", controller.getPredictionSummary);
 router.get("/admin/predictions/throughput", controller.getPredictionThroughput);
 

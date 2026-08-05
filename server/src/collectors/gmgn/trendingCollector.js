@@ -9,6 +9,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const gmgnSnapshotRepository = require("../../repositories/gmgnSnapshotRepository");
 const gmgnTokenRepository = require("../../repositories/gmgnTokenRepository");
 const tokenPriceHistoryRepository = require("../../repositories/tokenPriceHistoryRepository");
@@ -72,7 +73,7 @@ async function collectTrending(){
 
         const requestParams = { chain: CHAIN, interval, limit: REQUEST_LIMIT };
 
-        const result = await marketDataGateway.getTrendingSwaps(CHAIN, interval, { limit: REQUEST_LIMIT });
+        const result = await withOrigin("scheduler:trending", () => marketDataGateway.getTrendingSwaps(CHAIN, interval, { limit: REQUEST_LIMIT }));
 
         lastSnapshotId = gmgnSnapshotRepository.insertSnapshot({
 

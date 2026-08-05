@@ -5,6 +5,7 @@
 
 const config = require("../../config/env");
 const marketDataGateway = require("../../services/marketDataGateway");
+const { withOrigin } = require("./gmgnTrafficAccounting");
 const { transformResponse } = require("../../services/activityFeedTransformer");
 const gmgnActivityFeedRepository = require("../../repositories/gmgnActivityFeedRepository");
 
@@ -24,7 +25,7 @@ async function collectKolActivity(){
 
     assertConfigured();
 
-    const result = await marketDataGateway.getKolActivity(CHAIN, 50);
+    const result = await withOrigin("scheduler:kol_activity", () => marketDataGateway.getKolActivity(CHAIN, 50));
 
     const entries = transformResponse("kol", result.data);
 
@@ -38,7 +39,7 @@ async function collectSmartMoneyActivity(){
 
     assertConfigured();
 
-    const result = await marketDataGateway.getSmartMoneyActivity(CHAIN, 50);
+    const result = await withOrigin("scheduler:smart_money_activity", () => marketDataGateway.getSmartMoneyActivity(CHAIN, 50));
 
     const entries = transformResponse("smart_money", result.data);
 

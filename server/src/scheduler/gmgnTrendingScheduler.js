@@ -16,6 +16,10 @@ const { collectKolActivity, collectSmartMoneyActivity } = require("../collectors
 const { collectGasPrice } = require("../collectors/gmgn/gasPriceCollector");
 const { collectLaunchpadStats } = require("../collectors/gmgn/launchpadStatsCollector");
 const { createLockGuard } = require("../services/schedulerLockGuard");
+// TEMPORARY (P0 GMGN IP ban investigation) - see
+// collectors/gmgn/requestDiagnostics.js header. Remove this import +
+// the startTick()/endTick() calls below once closed.
+const requestDiagnostics = require("../collectors/gmgn/requestDiagnostics");
 // Arjuna V4 Phase 2 (Realtime Pulse) - chained onto THIS scheduler's own
 // tick rather than an independently-scheduled timer, specifically to
 // avoid the "duplicate polling" class of bug two independently-drifting
@@ -279,6 +283,10 @@ async function runOnce(){
 
     const startedAt = Date.now();
     const results = [];
+    // TEMPORARY (P0 GMGN IP ban investigation) - marks the tick
+    // boundary so requestDiagnostics can group/order every request
+    // this tick issues. No effect on control flow.
+    requestDiagnostics.startTick();
 
     try{
 
@@ -296,6 +304,8 @@ async function runOnce(){
 
         console.log(`[gmgn-scheduler] Batch finished in ${durationMs}ms - ${okCount}/${results.length} collectors OK`);
 
+        requestDiagnostics.endTick();
+
         lockGuard.release("FINISHED");
 
         // Deliberately AFTER release() (this batch's own duration/health
@@ -309,6 +319,7 @@ async function runOnce(){
     catch(err){
 
         console.error(`[gmgn-scheduler] Batch FAILED: ${err.message}`, err);
+        requestDiagnostics.endTick();
         lockGuard.release("ERROR");
         return null;
 

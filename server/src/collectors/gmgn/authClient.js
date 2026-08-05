@@ -10,6 +10,9 @@
 // https://github.com/GMGNAI/gmgn-skills/blob/main/src/client/OpenApiClient.ts
 
 const { buildAuthQuery, buildMessage, detectAlgorithm, sign } = require("./signer");
+// TEMPORARY (P0 GMGN IP ban investigation) - see requestDiagnostics.js
+// header. Remove this import + the logging calls below once closed.
+const requestDiagnostics = require("./requestDiagnostics");
 
 // ROOT CAUSE FIX (collector-staleness investigation): every request
 // below used to have no timeout at all - Node's built-in fetch waits
@@ -58,18 +61,33 @@ function buildUrl(base, query){
 // AbortError with no endpoint context.
 async function fetchWithTimeout(url, options, method, subPath){
 
+    // TEMPORARY (P0 GMGN IP ban investigation) - startedAt/finishedAt
+    // capture and the requestDiagnostics.logRequest() calls below are
+    // diagnostic-only additions. Every return/throw path below is
+    // byte-for-byte identical to before this instrumentation - no
+    // behavior, retry, or throttling change.
+    const startedAt = Date.now();
+
     try{
 
-        return await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+        const res = await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+
+        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: res.status });
+
+        return res;
 
     }
     catch(err){
 
         if(err.name === "TimeoutError" || err.name === "AbortError"){
 
+            requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: "TIMEOUT" });
+
             throw new GmgnAuthError(`${method} ${subPath} timed out after ${REQUEST_TIMEOUT_MS}ms`, {});
 
         }
+
+        requestDiagnostics.logRequest({ method, subPath, startedAt, finishedAt: Date.now(), status: `ERROR:${err.name}` });
 
         throw err;
 

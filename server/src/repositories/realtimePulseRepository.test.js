@@ -80,13 +80,13 @@ test("findRecentForToken limits to the requested count, still oldest first", asy
 
 });
 
-test("pruneOlderThan only removes rows past the real age bound", () => {
+test("pruneOlderThan only removes rows past the real age bound", async () => {
 
     const address = `${PREFIX}E`;
     realtimePulseRepository.insertMany([snapshot(address)]);
 
     // maxAgeHours=1000 must never delete a row inserted moments ago.
-    realtimePulseRepository.pruneOlderThan(1000);
+    await realtimePulseRepository.pruneOlderThan(1000);
     assert.equal(realtimePulseRepository.findRecentForToken(address, 10).length, 1);
 
     // Backdate the row directly (deterministic - SQLite's CURRENT_TIMESTAMP
@@ -95,9 +95,38 @@ test("pruneOlderThan only removes rows past the real age bound", () => {
     // in the same second) rather than relying on real elapsed wall time.
     db.prepare("UPDATE realtime_pulse_snapshots SET recorded_at = datetime('now', '-2 hours') WHERE token_address = ?").run(address);
 
-    const deleted = realtimePulseRepository.pruneOlderThan(1);
+    const deleted = await realtimePulseRepository.pruneOlderThan(1);
 
     assert.ok(deleted >= 1);
     assert.equal(realtimePulseRepository.findRecentForToken(address, 10).length, 0);
+
+});
+
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS):
+// pruneOlderThan was rewritten from one unbatched DELETE to batched +
+// event-loop-yielding (same fix, same evidence, as
+// predictionHistoryRepository.js's own pruneOlderThan - see that
+// function's header). The critical property under test: a backlog
+// LARGER than one batch (PRUNE_BATCH_SIZE=200) must still be fully
+// drained in one pruneOlderThan() call, not just the first batch's
+// worth - this is a query-shape optimization, not a "prune less"
+// behavior change.
+test("pruneOlderThan drains a backlog larger than one batch completely, not just the first batch", async () => {
+
+    const address = `${PREFIX}BATCH`;
+    const rowCount = 250; // > PRUNE_BATCH_SIZE (200)
+
+    realtimePulseRepository.insertMany(
+        Array.from({ length: rowCount }, (_, i) => snapshot(address, { price: i }))
+    );
+
+    db.prepare("UPDATE realtime_pulse_snapshots SET recorded_at = datetime('now', '-2 hours') WHERE token_address = ?").run(address);
+
+    const deleted = await realtimePulseRepository.pruneOlderThan(1);
+
+    assert.equal(deleted, rowCount, "every eligible row must be pruned in one call, even across multiple batches");
+
+    const remaining = db.prepare("SELECT COUNT(*) c FROM realtime_pulse_snapshots WHERE token_address = ?").get(address).c;
+    assert.equal(remaining, 0);
 
 });

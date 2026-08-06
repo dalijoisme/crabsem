@@ -69,17 +69,45 @@ function countAll(){
 
 }
 
-// Retention - same pattern every other time-series table in this codebase
-// already uses (tokenPriceHistoryRepository.pruneOlderThan, etc.), wired
-// into services/retentionService.js's existing scheduled pass.
-function pruneOlderThan(maxAgeHours){
+// Retention - batched + yielding, raw literal cutoff instead of
+// datetime(recorded_at) < datetime('now', ...) - same fix, same
+// evidence, as repositories/predictionHistoryRepository.js's own
+// pruneOlderThan and repositories/tokenPriceHistoryRepository.js's own
+// (see either function's own header for the full incident writeup).
+// Real runtime evidence this closes: validation-scheduler logged
+// realtimePulseSnapshotsPruned:2389 as part of the SAME 145720ms run
+// that also pruned 2433 token_price_history rows, immediately followed
+// by 49528ms and 36232ms runs (a classic draining-backlog signature).
+const PRUNE_BATCH_SIZE = 200;
 
-    const info = db.prepare(`
-        DELETE FROM realtime_pulse_snapshots
-        WHERE datetime(recorded_at) < datetime('now', '-' || ? || ' hours')
-    `).run(maxAgeHours);
+function yieldToEventLoop(){
+    return new Promise(resolve => setImmediate(resolve));
+}
 
-    return info.changes;
+const pruneOlderThanBatchStmt = db.prepare(`
+    DELETE FROM realtime_pulse_snapshots WHERE id IN (
+        SELECT id FROM realtime_pulse_snapshots WHERE recorded_at < @cutoff LIMIT @batch
+    )
+`);
+
+async function pruneOlderThan(maxAgeHours){
+
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
+
+    let total = 0;
+
+    while(true){
+
+        const info = pruneOlderThanBatchStmt.run({ cutoff, batch: PRUNE_BATCH_SIZE });
+        total += info.changes;
+
+        if(info.changes < PRUNE_BATCH_SIZE) break;
+
+        await yieldToEventLoop();
+
+    }
+
+    return total;
 
 }
 

@@ -24,8 +24,14 @@ const predictionHistoryRepository = require("../repositories/predictionHistoryRe
 // pruneOlderThan are batched + event-loop-yielding (see their own
 // comments - a real production incident where the unbatched form
 // blocked the event loop for minutes at a time on any nontrivial
-// backlog). Every other prune below is already small enough (24-48h
-// retention, proven fast) to stay synchronous.
+// backlog). tokenPriceHistoryRepository/realtimePulseRepository's own
+// pruneOlderThan joined them (2026-08-06, live VPS): the same
+// validation-scheduler run that motivated the original fix was
+// observed doing it again - 145720ms, immediately followed by 49528ms
+// and 36232ms as the backlog drained - with priceHistoryPruned/
+// realtimePulseSnapshotsPruned as the dominant row counts each time.
+// Every other prune below is still small enough (24-48h retention, no
+// evidence of a problem) to stay synchronous.
 async function pruneOldData(){
 
     // predictionTimelineRepository MUST run before predictionHistoryRepository,
@@ -34,6 +40,8 @@ async function pruneOldData(){
     // to be gone before their parent row can be deleted.
     const predictionTimelinePruned = await predictionTimelineRepository.pruneForPredictionsOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
     const predictionHistoryPruned = await predictionHistoryRepository.pruneOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
+    const priceHistoryPruned = await tokenPriceHistoryRepository.pruneOlderThan(retentionConfig.tokenPriceHistoryMaxAgeHours);
+    const realtimePulseSnapshotsPruned = await realtimePulseRepository.pruneOlderThan(retentionConfig.realtimePulseSnapshotsMaxAgeHours);
 
     return {
 
@@ -43,9 +51,9 @@ async function pruneOldData(){
 
         gasPricePruned: gmgnGasPriceRepository.pruneOlderThan(retentionConfig.gmgnGasPriceMaxAgeHours),
 
-        priceHistoryPruned: tokenPriceHistoryRepository.pruneOlderThan(retentionConfig.tokenPriceHistoryMaxAgeHours),
+        priceHistoryPruned,
 
-        realtimePulseSnapshotsPruned: realtimePulseRepository.pruneOlderThan(retentionConfig.realtimePulseSnapshotsMaxAgeHours),
+        realtimePulseSnapshotsPruned,
 
         predictionTimelinePruned,
 

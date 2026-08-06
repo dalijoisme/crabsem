@@ -51,15 +51,53 @@ function countAll(){
 // Retention: only needed long enough to evaluate the longest
 // recommendation_outcomes horizon (24h) plus slack for a delayed
 // evaluator run - see config/retentionConfig.js.
+//
+// Batched + yielding, raw literal cutoff instead of
+// datetime(recorded_at) < datetime('now', ...) - same fix, same
+// evidence, as repositories/predictionHistoryRepository.js's own
+// pruneOlderThan (see that function's own header for the full
+// incident writeup this closes: "validation-scheduler 345 seconds as
+// ONE unbatched DELETE"). Confirmed via EXPLAIN QUERY PLAN on the real
+// production DB (2026-08-06): the datetime()-wrapped form produced a
+// full SCAN of this table's 384k+ rows; this raw-literal form uses
+// idx_token_price_history_token_time as a covering index SEARCH even
+// without constraining token_address (SQLite's ANY() skip-scan). Real
+// runtime evidence this closes: validation-scheduler logged
+// priceHistoryPruned:2433 as part of a 145720ms run, immediately
+// followed by 49528ms and 36232ms runs (a classic draining-backlog
+// signature) - this table alone was never isolated as the sole cause,
+// but shares the exact same query-shape defect already proven to cause
+// multi-minute stalls in this same scheduler for a different table.
+const PRUNE_BATCH_SIZE = 200;
 
-function pruneOlderThan(maxAgeHours){
+function yieldToEventLoop(){
+    return new Promise(resolve => setImmediate(resolve));
+}
 
-    const info = db.prepare(`
-        DELETE FROM token_price_history
-        WHERE datetime(recorded_at) < datetime('now', '-' || ? || ' hours')
-    `).run(maxAgeHours);
+const pruneOlderThanBatchStmt = db.prepare(`
+    DELETE FROM token_price_history WHERE id IN (
+        SELECT id FROM token_price_history WHERE recorded_at < @cutoff LIMIT @batch
+    )
+`);
 
-    return info.changes;
+async function pruneOlderThan(maxAgeHours){
+
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
+
+    let total = 0;
+
+    while(true){
+
+        const info = pruneOlderThanBatchStmt.run({ cutoff, batch: PRUNE_BATCH_SIZE });
+        total += info.changes;
+
+        if(info.changes < PRUNE_BATCH_SIZE) break;
+
+        await yieldToEventLoop();
+
+    }
+
+    return total;
 
 }
 

@@ -161,6 +161,11 @@ if(!config.GMGN_API_KEY || !config.GMGN_PRIVATE_KEY){
 
 }
 
+// TEMPORARY (validation-scheduler stall investigation, 2026-08-06) -
+// see services/eventLoopLagDiagnostic.js's own header. Purely
+// observational, remove once the investigation concludes.
+require("./services/eventLoopLagDiagnostic").start();
+
 console.log("[startup] Starting GMGN collectors on the scheduler...");
 
 const schedulerHandle = gmgnScheduler.start();

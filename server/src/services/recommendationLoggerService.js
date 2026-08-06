@@ -10,13 +10,36 @@ const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const recommendationLogRepository = require("../repositories/recommendationLogRepository");
 const intelligenceEngine = require("./intelligenceEngine");
 
+// TEMPORARY (validation-scheduler stall investigation, 2026-08-06) -
+// wall-clock (process.hrtime.bigint, immune to system clock
+// adjustments) + CPU time (process.cpuUsage, isolates this call's own
+// user+system CPU consumption from the rest of the process) + row
+// count around the two real candidates for a main-thread block:
+// analyzeTokens() (the same unbounded, non-worker-offloaded,
+// full-table intelligence-engine pass predictionValidationService.js's
+// evaluateAndRecordDecisions already had and was fixed for, in commits
+// d4d99fa/230ab27 - this file was never touched by that fix) and the
+// surrounding entries.map()/insertMany() work. Zero behavior change -
+// no return value, control flow, or error handling below is touched,
+// only console.log calls are added. Remove once the investigation
+// concludes.
 function logRecommendations(){
+
+    const _diagWallStart = process.hrtime.bigint();
+    const _diagCpuStart = process.cpuUsage();
 
     const tokens = gmgnTokenRepository.getAllTokens();
 
     if(!tokens.length) return { logged: 0 };
 
+    const _diagAnalyzeWallStart = process.hrtime.bigint();
+    const _diagAnalyzeCpuStart = process.cpuUsage();
+
     const signals = intelligenceEngine.analyzeTokens(tokens);
+
+    const _diagAnalyzeWallMs = Number(process.hrtime.bigint() - _diagAnalyzeWallStart) / 1e6;
+    const _diagAnalyzeCpu = process.cpuUsage(_diagAnalyzeCpuStart);
+    console.log(`[recommendation-logger-diag] analyzeTokens: tokens=${tokens.length} wallMs=${_diagAnalyzeWallMs.toFixed(1)} cpuUserMs=${(_diagAnalyzeCpu.user / 1000).toFixed(1)} cpuSystemMs=${(_diagAnalyzeCpu.system / 1000).toFixed(1)}`);
 
     const entries = tokens.map((token, i) => {
 
@@ -80,7 +103,18 @@ function logRecommendations(){
 
     });
 
+    const _diagInsertWallStart = process.hrtime.bigint();
+    const _diagInsertCpuStart = process.cpuUsage();
+
     recommendationLogRepository.insertMany(entries);
+
+    const _diagInsertWallMs = Number(process.hrtime.bigint() - _diagInsertWallStart) / 1e6;
+    const _diagInsertCpu = process.cpuUsage(_diagInsertCpuStart);
+    console.log(`[recommendation-logger-diag] insertMany: rows=${entries.length} wallMs=${_diagInsertWallMs.toFixed(1)} cpuUserMs=${(_diagInsertCpu.user / 1000).toFixed(1)} cpuSystemMs=${(_diagInsertCpu.system / 1000).toFixed(1)}`);
+
+    const _diagWallMs = Number(process.hrtime.bigint() - _diagWallStart) / 1e6;
+    const _diagCpu = process.cpuUsage(_diagCpuStart);
+    console.log(`[recommendation-logger-diag] logRecommendations TOTAL: tokens=${tokens.length} wallMs=${_diagWallMs.toFixed(1)} cpuUserMs=${(_diagCpu.user / 1000).toFixed(1)} cpuSystemMs=${(_diagCpu.system / 1000).toFixed(1)}`);
 
     return { logged: entries.length };
 

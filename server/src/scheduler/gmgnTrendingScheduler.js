@@ -63,10 +63,35 @@ const COLLECTORS = [
 // scheduler can never be permanently stuck ("previous batch still in
 // progress" forever) even if something inside runOnce() truly hangs
 // (a never-resolving await) despite every collector already having its
-// own 15s HTTP timeout (collectors/gmgn/authClient.js). Generous versus
-// a real batch (7 collectors x ~15s worst case + spacing, see
-// TICK_STUCK_AFTER_MS below) so this never fires on a merely slow tick.
-const lockGuard = createLockGuard("gmgn-scheduler", { maxDurationMs: 5 * 30000 });
+// own 15s HTTP timeout (collectors/gmgn/authClient.js).
+//
+// maxDurationMs recalibrated (2026-08-06, live VPS, RATE_LIMIT_BANNED
+// incident follow-up): the original 5 * 30000 = 150000ms assumed a
+// CLEAN 15s worst case per collector (7 x 15s + spacing = ~112s), but
+// real production evidence (requestDiagnostics.js's own logged
+// startedAtMs/finishedAtMs for every GMGN request) proved individual
+// collector calls that genuinely stall take 17,000-28,355ms to actually
+// resolve, not a clean 15,000ms - AbortSignal.timeout(15000) has real
+// observed overhead beyond its nominal value. Confirmed NOT caused by
+// connection-pool reuse (an isolated reproduction script, same
+// unmodified authClient.js, proved keep-alive reuse and idle-eviction
+// both work correctly), NOT overlapping/duplicate requests (direct
+// timestamp-overlap analysis of the real request log found none), and
+// NOT aggregate request-volume throttling (single isolated requests in
+// otherwise-quiet minutes still occasionally stalled) - this is
+// intermittent, low-frequency, real external latency on individual
+// requests. With the corrected per-request worst case, 7 sequential
+// collectors can legitimately need up to ~7 x 28s + 6 x 1.2s spacing =
+// ~203s even when NOTHING is stuck - already past the old 150s ceiling,
+// which caused the watchdog to force-release ticks that were still
+// genuinely (if slowly) making progress, discarding their own
+// in-flight work and forcing gmgn_tokens to wait for the NEXT tick
+// instead. 10x the tick interval matches the same convention already
+// used by scheduler/heldPositionRefreshScheduler.js (6x) and
+// scheduler/predictionValidationScheduler.js / validationScheduler.js
+// (10x) - this scheduler's old 5x was the outlier, not a deliberately
+// tighter bound.
+const lockGuard = createLockGuard("gmgn-scheduler", { maxDurationMs: 10 * INTERVAL_MS });
 
 // HEALTH MONITORING (collector-staleness investigation): before this,
 // the only externally-visible signal was gmgn_tokens.updated_at - which

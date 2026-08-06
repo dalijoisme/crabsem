@@ -33,7 +33,7 @@ async function runOnce(){
 
         const evalResult = evaluateDueOutcomes();
 
-        const pruneResult = pruneOldData();
+        const pruneResult = await pruneOldData();
 
         const durationMs = Date.now() - startedAt;
 

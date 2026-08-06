@@ -413,17 +413,53 @@ function findTradingTierInWindow(fromTimestamp, toTimestamp){
 // on the exact table this fix exists to stop from blocking the event
 // loop. Every other table this codebase already prunes is small enough
 // (24-48h retention) that this never mattered before.
-function pruneOlderThan(maxAgeHours){
+//
+// Batched + yielding, same pattern as services/predictionValidationService.js's
+// own yieldToEventLoop()/EVENT_LOOP_YIELD_BATCH_SIZE (that file's own
+// header documents the exact same failure mode this fix is closing:
+// "measured, not hypothesized" 40-110+ second event-loop stalls from a
+// single large synchronous query starving gmgn-scheduler's timers).
+// Confirmed necessary by this very incident's OWN deploy: even after
+// the historical backlog was cleared by hand, the routine catch-up
+// (tens of thousands of rows accumulated during the outage) still took
+// validation-scheduler 345 seconds as ONE unbatched DELETE, reproducing
+// the identical stall on the very first run of this "fix". A small
+// batch keeps every single synchronous chunk sub-second regardless of
+// how large the backlog is, at the cost of this function no longer
+// being synchronous.
+const PRUNE_BATCH_SIZE = 200;
+
+function yieldToEventLoop(){
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+const pruneOlderThanBatchStmt = db.prepare(`
+    DELETE FROM prediction_history WHERE id IN (
+        SELECT id FROM prediction_history
+        WHERE prediction_time < @cutoff
+          AND id NOT IN (SELECT opened_by_prediction_id FROM trade_positions)
+        LIMIT @batch
+    )
+`);
+
+async function pruneOlderThan(maxAgeHours){
 
     const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
 
-    const info = db.prepare(`
-        DELETE FROM prediction_history
-        WHERE prediction_time < @cutoff
-          AND id NOT IN (SELECT opened_by_prediction_id FROM trade_positions)
-    `).run({ cutoff });
+    let total = 0;
 
-    return info.changes;
+    while(true){
+
+        const info = pruneOlderThanBatchStmt.run({ cutoff, batch: PRUNE_BATCH_SIZE });
+        total += info.changes;
+
+        if(info.changes < PRUNE_BATCH_SIZE) break;
+
+        await yieldToEventLoop();
+
+    }
+
+    return total;
 
 }
 

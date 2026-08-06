@@ -20,14 +20,20 @@ const realtimePulseRepository = require("../repositories/realtimePulseRepository
 const predictionTimelineRepository = require("../repositories/predictionTimelineRepository");
 const predictionHistoryRepository = require("../repositories/predictionHistoryRepository");
 
-function pruneOldData(){
+// async: predictionTimelineRepository/predictionHistoryRepository's own
+// pruneOlderThan are batched + event-loop-yielding (see their own
+// comments - a real production incident where the unbatched form
+// blocked the event loop for minutes at a time on any nontrivial
+// backlog). Every other prune below is already small enough (24-48h
+// retention, proven fast) to stay synchronous.
+async function pruneOldData(){
 
     // predictionTimelineRepository MUST run before predictionHistoryRepository,
     // same maxAgeHours - prediction_timeline.prediction_id is a real FK
     // to prediction_history(id) with foreign_keys=ON, so children have
     // to be gone before their parent row can be deleted.
-    const predictionTimelinePruned = predictionTimelineRepository.pruneForPredictionsOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
-    const predictionHistoryPruned = predictionHistoryRepository.pruneOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
+    const predictionTimelinePruned = await predictionTimelineRepository.pruneForPredictionsOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
+    const predictionHistoryPruned = await predictionHistoryRepository.pruneOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
 
     return {
 

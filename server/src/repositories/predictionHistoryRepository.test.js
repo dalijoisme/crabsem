@@ -36,30 +36,30 @@ function backdate(id, hoursAgo){
     db.prepare("UPDATE prediction_history SET prediction_time = datetime('now', '-' || ? || ' hours') WHERE id = ?").run(hoursAgo, id);
 }
 
-test("pruneOlderThan keeps rows still within the real age bound", () => {
+test("pruneOlderThan keeps rows still within the real age bound", async () => {
 
     const id = insertPrediction(`${PREFIX}A`);
 
-    const deleted = predictionHistoryRepository.pruneOlderThan(1000);
+    const deleted = await predictionHistoryRepository.pruneOlderThan(1000);
 
     assert.equal(deleted, 0);
     assert.ok(predictionHistoryRepository.findById(id));
 
 });
 
-test("pruneOlderThan deletes a pure decision-log row (DECISION_ONLY) once it is past the real age bound", () => {
+test("pruneOlderThan deletes a pure decision-log row (DECISION_ONLY) once it is past the real age bound", async () => {
 
     const id = insertPrediction(`${PREFIX}B`);
     backdate(id, 400); // older than the 14-day (336h) production retention window
 
-    const deleted = predictionHistoryRepository.pruneOlderThan(336);
+    const deleted = await predictionHistoryRepository.pruneOlderThan(336);
 
     assert.ok(deleted >= 1);
     assert.equal(predictionHistoryRepository.findById(id), undefined);
 
 });
 
-test("pruneOlderThan NEVER deletes a decision row that opened a real trade_positions row, no matter how old", () => {
+test("pruneOlderThan NEVER deletes a decision row that opened a real trade_positions row, no matter how old", async () => {
 
     const id = insertPrediction(`${PREFIX}C`, { initialStatus: "OPEN" });
     backdate(id, 100000); // absurdly old - the real point is this must still survive
@@ -72,7 +72,7 @@ test("pruneOlderThan NEVER deletes a decision row that opened a real trade_posit
     });
     assert.ok(opened.opened !== false, "test setup: trade_positions row must open cleanly");
 
-    const deleted = predictionHistoryRepository.pruneOlderThan(1);
+    const deleted = await predictionHistoryRepository.pruneOlderThan(1);
 
     assert.ok(predictionHistoryRepository.findById(id), "a real trade's own decision-log row must survive pruning regardless of age");
     // deleted may be >0 from other unrelated old rows in this same run,

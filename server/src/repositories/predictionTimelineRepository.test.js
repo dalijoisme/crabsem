@@ -33,20 +33,20 @@ function backdatePrediction(id, hoursAgo){
     db.prepare("UPDATE prediction_history SET prediction_time = datetime('now', '-' || ? || ' hours') WHERE id = ?").run(hoursAgo, id);
 }
 
-test("pruneForPredictionsOlderThan keeps timeline rows whose parent is still within the age bound", () => {
+test("pruneForPredictionsOlderThan keeps timeline rows whose parent is still within the age bound", async () => {
 
     const id = insertPrediction(`${PREFIX}A`);
     predictionTimelineRepository.insertSnapshot({ predictionId: id, horizon: "30m", roiPct: 1, marketCap: 1000, price: 1 });
 
     // Parent is only moments old - maxAgeHours=1000 must never touch it.
-    const deleted = predictionTimelineRepository.pruneForPredictionsOlderThan(1000);
+    const deleted = await predictionTimelineRepository.pruneForPredictionsOlderThan(1000);
 
     assert.equal(deleted, 0);
     assert.equal(predictionTimelineRepository.findExistingHorizons(id).size, 1);
 
 });
 
-test("pruneForPredictionsOlderThan deletes timeline rows once their PARENT (not their own recorded_at) is past the age bound", () => {
+test("pruneForPredictionsOlderThan deletes timeline rows once their PARENT (not their own recorded_at) is past the age bound", async () => {
 
     const id = insertPrediction(`${PREFIX}B`);
 
@@ -59,14 +59,14 @@ test("pruneForPredictionsOlderThan deletes timeline rows once their PARENT (not 
     predictionTimelineRepository.insertSnapshot({ predictionId: id, horizon: "24h", roiPct: 5, marketCap: 1100, price: 1.1 });
     backdatePrediction(id, 400); // older than the 14-day (336h) production retention window
 
-    const deleted = predictionTimelineRepository.pruneForPredictionsOlderThan(336);
+    const deleted = await predictionTimelineRepository.pruneForPredictionsOlderThan(336);
 
     assert.equal(deleted, 1);
     assert.equal(predictionTimelineRepository.findExistingHorizons(id).size, 0);
 
 });
 
-test("pruneForPredictionsOlderThan never touches a different token's still-fresh timeline rows", () => {
+test("pruneForPredictionsOlderThan never touches a different token's still-fresh timeline rows", async () => {
 
     const oldId = insertPrediction(`${PREFIX}C_OLD`);
     backdatePrediction(oldId, 400);
@@ -75,7 +75,7 @@ test("pruneForPredictionsOlderThan never touches a different token's still-fresh
     const freshId = insertPrediction(`${PREFIX}C_FRESH`);
     predictionTimelineRepository.insertSnapshot({ predictionId: freshId, horizon: "30m", roiPct: 1, marketCap: 1000, price: 1 });
 
-    predictionTimelineRepository.pruneForPredictionsOlderThan(336);
+    await predictionTimelineRepository.pruneForPredictionsOlderThan(336);
 
     assert.equal(predictionTimelineRepository.findExistingHorizons(oldId).size, 0);
     assert.equal(predictionTimelineRepository.findExistingHorizons(freshId).size, 1);

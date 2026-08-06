@@ -61,19 +61,46 @@ function findByPrediction(predictionId){
 // via EXPLAIN QUERY PLAN on the real production database that the
 // datetime()-wrapped form defeats idx_prediction_history_prediction_time
 // (full SCAN instead of SEARCH) on this specifically large table.
-function pruneForPredictionsOlderThan(maxAgeHours){
+//
+// Batched + yielding - same defensive pattern (and same real-incident
+// justification) as predictionHistoryRepository.pruneOlderThan's own
+// comment. This table has proven much lighter in practice (tens of
+// thousands of rows clear in ~1s even unbatched), but batching costs
+// nothing when a batch finishes in one iteration, and closes off the
+// same class of stall if this table's growth pattern ever changes.
+const PRUNE_BATCH_SIZE = 500;
+
+function yieldToEventLoop(){
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+const pruneBatchStmt = db.prepare(`
+    DELETE FROM prediction_timeline WHERE id IN (
+        SELECT pt.id FROM prediction_timeline pt
+        JOIN prediction_history ph ON ph.id = pt.prediction_id
+        WHERE ph.prediction_time < @cutoff
+        LIMIT @batch
+    )
+`);
+
+async function pruneForPredictionsOlderThan(maxAgeHours){
 
     const cutoff = new Date(Date.now() - maxAgeHours * 3600000).toISOString().slice(0, 19).replace("T", " ");
 
-    const info = db.prepare(`
-        DELETE FROM prediction_timeline
-        WHERE prediction_id IN (
-            SELECT id FROM prediction_history
-            WHERE prediction_time < @cutoff
-        )
-    `).run({ cutoff });
+    let total = 0;
 
-    return info.changes;
+    while(true){
+
+        const info = pruneBatchStmt.run({ cutoff, batch: PRUNE_BATCH_SIZE });
+        total += info.changes;
+
+        if(info.changes < PRUNE_BATCH_SIZE) break;
+
+        await yieldToEventLoop();
+
+    }
+
+    return total;
 
 }
 

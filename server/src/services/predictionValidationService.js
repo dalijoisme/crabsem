@@ -128,6 +128,58 @@ function yieldToEventLoop(){
     return new Promise(resolve => setImmediate(resolve));
 }
 
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS): with
+// gmgn_tokens grown to 30,636 rows, one single scoringWorkerPool.scoreTokens()
+// call for ALL of them measured ~26s in isolation on production
+// (diagnostic script, real DB) - and prediction-validation-scheduler's
+// own live logs showed gmgn-scheduler's WATCHDOG force-releasing its
+// lock every tick for 60+ straight minutes during the exact same
+// window, with gmgn_tokens.updated_at frozen the whole time (no
+// collector progress at all). Root cause: postMessage() to/from the
+// worker structured-clones the tokens/signals payload SYNCHRONOUSLY on
+// THIS thread (see scoringWorkerPool.js) - for 30k+ objects that is a
+// real, single, uninterrupted span this thread cannot service any other
+// timer during, including gmgn-scheduler's own AbortSignal.timeout
+// (authClient.js, 15s) callbacks - a delayed timer callback effectively
+// extends that collector call's real wall-clock hang time well past its
+// nominal bound. Splitting into smaller worker round-trips with a yield
+// between each does NOT change which tokens get scored, their order, or
+// the returned signal for any of them (scoringWorkerPool.scoreTokens is
+// a pure function of the tokens it's given) - only how many separate
+// synchronous bursts the total serialize/deserialize cost is spread
+// across. SCORE_BATCH_SIZE is a starting point (same "not validated,
+// tunable" framing as EVENT_LOOP_YIELD_BATCH_SIZE above) - large enough
+// to keep worker round-trip overhead low, small enough that no single
+// burst should be noticeable to a waiting HTTP request.
+let SCORE_BATCH_SIZE = 1000;
+
+async function scoreTokensInBatches(tokens, philosophy){
+
+    const signals = new Array(tokens.length);
+
+    for(let i = 0; i < tokens.length; i += SCORE_BATCH_SIZE){
+
+        const chunk = tokens.slice(i, i + SCORE_BATCH_SIZE);
+        const chunkSignals = await scoringWorkerPool.scoreTokens(chunk, philosophy);
+
+        for(let j = 0; j < chunkSignals.length; j++) signals[i + j] = chunkSignals[j];
+
+        if(i + SCORE_BATCH_SIZE < tokens.length) await yieldToEventLoop();
+
+    }
+
+    return signals;
+
+}
+
+// Test-only override - same convention as heldPositionRefreshScheduler.js's
+// own _setCooldownStateForTest() - lets a test force a small batch size
+// against a handful of real tokens instead of needing 1000+ rows to
+// prove the chunking/reassembly logic itself.
+function _setScoreBatchSizeForTest(n){
+    SCORE_BATCH_SIZE = n;
+}
+
 // Deliberately simple, unvalidated starting point (same honest framing
 // as TRIGGERS/QUALITY_GATE elsewhere in this file) - small enough that
 // no single uninterrupted synchronous block should run long enough to
@@ -285,7 +337,7 @@ async function evaluateAndRecordDecisions(){
     // the live GMGN collector) for its entire duration. Routed through
     // scoringWorkerPool so the heavy scoring pass runs on a separate
     // thread instead of blocking this one.
-    const signals = await scoringWorkerPool.scoreTokens(tokens, engineParams.philosophy);
+    const signals = await scoreTokensInBatches(tokens, engineParams.philosophy);
 
     let created = 0, skipped = 0, recommendationChanges = 0, upgrades = 0, downgrades = 0;
     let positionsOpened = 0, positionsClosedOnReversal = 0;
@@ -731,5 +783,6 @@ module.exports = {
     // Backward-compatible aliases (old names, same behavior) in case
     // anything else in the codebase still imports the pre-redesign names.
     createNewPredictions: evaluateAndRecordDecisions,
-    updateOpenPredictions: updateOpenTradePositions
+    updateOpenPredictions: updateOpenTradePositions,
+    scoreTokensInBatches, _setScoreBatchSizeForTest
 };

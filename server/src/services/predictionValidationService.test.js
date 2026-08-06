@@ -18,7 +18,10 @@ const predictionTimelineRepository = require("../repositories/predictionTimeline
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
 const db = require("../database/connection");
 
-const { recordTimelineSnapshots } = require("./predictionValidationService");
+const {
+    recordTimelineSnapshots, scoreTokensInBatches, _setScoreBatchSizeForTest
+} = require("./predictionValidationService");
+const scoringWorkerPool = require("./scoringWorkerPool");
 
 const PREFIX = "PREDVALSVC_TEST_";
 
@@ -167,5 +170,89 @@ test("two different horizons for the SAME prediction are each checked independen
         cleanup([id]);
         db.prepare("DELETE FROM token_price_history WHERE token_address = ?").run(tokenAddress);
     }
+
+});
+
+// scoreTokensInBatches - RATE_LIMIT_BANNED incident follow-up
+// (2026-08-06, live VPS): evaluateAndRecordDecisions' single
+// scoreTokens() call for the account's real 30,636-row gmgn_tokens
+// table measured ~26s in one uninterrupted worker round-trip, and
+// gmgn-scheduler's own live logs showed its WATCHDOG force-releasing
+// its lock every single tick for 60+ straight minutes during the same
+// window (gmgn_tokens.updated_at frozen the whole time). Splitting into
+// smaller worker round-trips with a yield between each must produce the
+// EXACT SAME signals, in the EXACT SAME order, as one single call -
+// this is a scheduling-shape change only, never a scoring behavior
+// change. Uses the real worker (not mocked), same convention as
+// scoringWorkerPool.test.js.
+test.after(async () => { await scoringWorkerPool.shutdown(); });
+
+function buildTestToken(i){
+    return {
+        token_address: `${PREFIX}SCORE_${i}`,
+        symbol: `T${i}`,
+        name: `Test Token ${i}`,
+        chain: "sol",
+        market_cap: 1000 * (i + 1),
+        liquidity: 500,
+        price: 0.001 * (i + 1),
+        price_change_5m: 0, price_change_1h: 0, price_change_24h: 0,
+        volume_5m: 0, volume_1h: 100, volume_24h: 100,
+        buys_5m: 0, sells_5m: 0, holders: 10, fdv: 1000,
+        launch_time: new Date().toISOString(), last_seen: new Date().toISOString(),
+        updated_at: new Date().toISOString(), raw_json: "{}", logo: null
+    };
+}
+
+// computedAtMs (nested under realtime-pulse fields) is Date.now()
+// captured live during scoring, not derived from the token/philosophy
+// input - it will legitimately differ between the single-shot call and
+// the batched call since they run at two different real moments. Strip
+// it (recursively - it shows up at several nesting depths) before
+// comparing so the assertion is about scoring CONTENT, not wall-clock
+// timing.
+function stripComputedAtMs(value){
+    if(Array.isArray(value)) return value.map(stripComputedAtMs);
+    if(value && typeof value === "object"){
+        const out = {};
+        for(const [k, v] of Object.entries(value)){
+            if(k === "computedAtMs") continue;
+            out[k] = stripComputedAtMs(v);
+        }
+        return out;
+    }
+    return value;
+}
+
+test("scoreTokensInBatches, split across several small batches, returns the exact same signals in the exact same order as one single scoreTokens() call", async () => {
+
+    const tokens = Array.from({ length: 5 }, (_, i) => buildTestToken(i));
+    const philosophy = {};
+
+    const singleShot = await scoringWorkerPool.scoreTokens(tokens, philosophy);
+
+    _setScoreBatchSizeForTest(2); // forces 3 round-trips (2, 2, 1) for these 5 tokens
+
+    try{
+
+        const batched = await scoreTokensInBatches(tokens, philosophy);
+
+        assert.equal(batched.length, singleShot.length);
+        assert.deepEqual(
+            stripComputedAtMs(batched), stripComputedAtMs(singleShot),
+            "chunking must never change which signal comes back for which token, or their order"
+        );
+
+    }
+    finally{
+        _setScoreBatchSizeForTest(1000); // restore the real production default
+    }
+
+});
+
+test("scoreTokensInBatches handles an empty token list without making any worker call", async () => {
+
+    const result = await scoreTokensInBatches([], {});
+    assert.deepEqual(result, []);
 
 });

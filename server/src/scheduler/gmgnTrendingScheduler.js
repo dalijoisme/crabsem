@@ -103,8 +103,18 @@ const collectorHealth = new Map();
 // safety margin over the confirmed 5. A THIRD independent no-backoff
 // source (services/tradingBotEngine.js's refreshStaleHeldToken fallback)
 // was found and fixed in the same pass - see that file's own comment.
+//
+// EARLY_PROBE_DELAY_MS: same mitigation as heldPositionRefreshScheduler.js's
+// own (see that file's header) - a full 6-minute blackout on gmgn_tokens
+// freshness stalls the whole BUY-candidate universe, not just this
+// scheduler's own health. ONE real collector call partway through the
+// cooldown checks whether the ban already cleared; success ends the
+// blackout immediately, failure re-arms a fresh cooldown + checkpoint.
 const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
+const EARLY_PROBE_DELAY_MS = 90 * 1000;
 let cooldownUntilMs = 0;
+let earlyProbeAtMs = 0;
+let earlyProbeAttempted = false;
 
 function recordCollectorResult(name, result){
 
@@ -190,7 +200,15 @@ function sleep(ms){
 
 }
 
-async function runCollector({ name, run }){
+// isProbeAttempt: true only for the SINGLE, deliberately-designated
+// probe call each cooldown cycle (see runOnce's own comment) - never
+// inferred from cooldownUntilMs alone. In a NORMAL (non-cooldown)
+// tick, every collector runs regardless of an earlier one's failure -
+// if collector 1 trips a fresh cooldown and collector 2 (run right
+// after, same tick) happens to succeed anyway, that unrelated success
+// must never be mistaken for the probe and clear the cooldown collector
+// 1 JUST set.
+async function runCollector({ name, run }, isProbeAttempt = false){
 
     const startedAt = Date.now();
 
@@ -201,6 +219,14 @@ async function runCollector({ name, run }){
         const durationMs = Date.now() - startedAt;
 
         console.log(`[gmgn-scheduler] ${name} OK in ${durationMs}ms - ${JSON.stringify(result)}`);
+
+        // Only the designated probe attempt may clear the cooldown on
+        // success.
+        if(isProbeAttempt){
+            console.warn(`[gmgn-scheduler] Early-exit probe succeeded on ${name} - GMGN ban has cleared, resuming normal collector batches immediately`);
+            cooldownUntilMs = 0;
+            earlyProbeAttempted = false;
+        }
 
         const outcome = { name, ok: true, durationMs, result };
 
@@ -222,7 +248,9 @@ async function runCollector({ name, run }){
         // comment for the real-incident evidence behind this.
         if(err.status === 429){
             cooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-            console.warn(`[gmgn-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) on ${name} - pausing the WHOLE collector batch for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban) to stop re-triggering it`);
+            earlyProbeAtMs = Date.now() + EARLY_PROBE_DELAY_MS;
+            earlyProbeAttempted = false;
+            console.warn(`[gmgn-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) on ${name} - pausing the WHOLE collector batch for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban, early-exit probe at ${EARLY_PROBE_DELAY_MS / 1000}s) to stop re-triggering it`);
         }
 
         const outcome = { name, ok: false, durationMs, error: err.message };
@@ -320,9 +348,14 @@ async function runOnce(){
     // Circuit breaker (see cooldownUntilMs's own header comment) - skip
     // every collector this tick without making a single GMGN call,
     // rather than retrying into a ban that has not had time to expire
-    // yet. Lock is released immediately so the very next tick after the
-    // cooldown clears gets a real attempt, never delayed further.
-    if(Date.now() < cooldownUntilMs){
+    // yet - EXCEPT the single early-exit probe (EARLY_PROBE_DELAY_MS)
+    // partway through, allowed exactly once per cooldown cycle. Lock is
+    // released immediately so the very next tick after the cooldown
+    // clears gets a real attempt, never delayed further.
+    const inCooldown = Date.now() < cooldownUntilMs;
+    const isEarlyProbe = inCooldown && !earlyProbeAttempted && Date.now() >= earlyProbeAtMs;
+
+    if(inCooldown && !isEarlyProbe){
         console.warn(`[gmgn-scheduler] Skipped: in GMGN 429 cooldown for ${Math.ceil((cooldownUntilMs - Date.now()) / 1000)}s more`);
         lockGuard.release("FINISHED");
         return { ok: false, durationMs: 0, results: [], cooldown: true };
@@ -337,9 +370,24 @@ async function runOnce(){
 
     try{
 
+        if(isEarlyProbe){
+            earlyProbeAttempted = true;
+            console.warn("[gmgn-scheduler] Early-exit probe: attempting ONE real collector call mid-cooldown to check if the ban already cleared");
+        }
+
         for(let i=0; i<COLLECTORS.length; i++){
 
-            results.push(await runCollector(COLLECTORS[i]));
+            // Only the FIRST collector this tick is ever the designated
+            // probe - once it succeeds, cooldownUntilMs is already 0,
+            // so every later collector this tick is just an ordinary call.
+            const isProbeAttempt = isEarlyProbe && i === 0;
+
+            results.push(await runCollector(COLLECTORS[i], isProbeAttempt));
+
+            // The probe itself just failed (still banned) - runCollector's
+            // own catch already re-armed a fresh cooldown; stop here,
+            // never attempt the remaining collectors this tick.
+            if(isProbeAttempt && !results[results.length - 1].ok) break;
 
             if(i < COLLECTORS.length - 1) await sleep(COLLECTOR_SPACING_MS);
 
@@ -398,6 +446,8 @@ function start(){
 // own _resetForTest()/services/heldPositionMarketStore.js's clear().
 function _resetForTest(){
     cooldownUntilMs = 0;
+    earlyProbeAtMs = 0;
+    earlyProbeAttempted = false;
 }
 
 module.exports = { start, runOnce, INTERVAL_MS, COLLECTORS, getCollectorHealth, getTickHealth, getPulseHealth, _resetForTest };

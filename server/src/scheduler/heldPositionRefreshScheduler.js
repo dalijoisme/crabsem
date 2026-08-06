@@ -82,8 +82,20 @@ let lastTickErrorCount = null;
 // now (same incident) - an exit decision during this window still uses
 // whatever price was last fetched, never blocks - this only stops NEW
 // GMGN calls, never masks or fabricates data.
+// Real safety concern raised directly by the founder: a full 6-minute
+// blackout on an open position is dangerous on its own terms (no
+// independent/on-chain price source exists in this codebase - GMGN is
+// the only price feed, so this really is a blind window). EARLY_PROBE_DELAY_MS
+// is the accepted mitigation: ONE real attempt partway through the
+// cooldown, never a loop - ends the blackout immediately if the ban
+// already cleared, otherwise re-arms a fresh full cooldown + a fresh
+// checkpoint from that point (never a tighter retry loop, never a
+// regression to the original every-5-seconds pattern).
 const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
+const EARLY_PROBE_DELAY_MS = 90 * 1000;
 let cooldownUntilMs = 0;
+let earlyProbeAtMs = 0;
+let earlyProbeAttempted = false;
 
 // Real union of every RUNNING user's own open-position token addresses -
 // paper and live alike (trading_bot_positions carries no paper/live
@@ -118,7 +130,15 @@ function collectOpenPositionTokenAddresses(){
 // token's error is logged and skipped, never allowed to abort the rest
 // of this tick's tokens (same fail-soft contract refreshStaleHeldToken
 // itself already has).
-async function refreshOneToken(tokenAddress, ondemandService){
+// isProbeAttempt: true only for the SINGLE, deliberately-designated
+// probe call each cooldown cycle (see runOnce's own comment) - never
+// inferred from cooldownUntilMs alone. A different, ordinary token
+// processed in the SAME tick right after another token just tripped a
+// FRESH cooldown (the original, pre-circuit-breaker "OTHER_TOKEN still
+// gets its own attempt this same tick" behavior a real test caught
+// regressing) must never be mistaken for the probe and incorrectly
+// clear that brand-new cooldown on its own unrelated success.
+async function refreshOneToken(tokenAddress, ondemandService, isProbeAttempt = false){
 
     try{
 
@@ -129,6 +149,14 @@ async function refreshOneToken(tokenAddress, ondemandService){
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
         if(!fresh) return false;
+
+        // Only the designated probe attempt may clear the cooldown on
+        // success.
+        if(isProbeAttempt){
+            console.warn(`[held-position-refresh-scheduler] Early-exit probe succeeded for ${tokenAddress} - GMGN ban has cleared, resuming normal refresh immediately`);
+            cooldownUntilMs = 0;
+            earlyProbeAttempted = false;
+        }
 
         heldPositionMarketStore.set(tokenAddress, { price: fresh.price, liquidity: fresh.liquidity ?? null });
         return true;
@@ -146,7 +174,9 @@ async function refreshOneToken(tokenAddress, ondemandService){
         // ordinary network hiccup.
         if(err.status === 429){
             cooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-            console.warn(`[held-position-refresh-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) - pausing ALL held-position refreshes for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban, not just this token) to stop re-triggering it`);
+            earlyProbeAtMs = Date.now() + EARLY_PROBE_DELAY_MS;
+            earlyProbeAttempted = false;
+            console.warn(`[held-position-refresh-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) - pausing ALL held-position refreshes for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban, early-exit probe at ${EARLY_PROBE_DELAY_MS / 1000}s) to stop re-triggering it`);
         }
 
         return false;
@@ -181,10 +211,15 @@ async function runOnce(ondemandService = gmgnOndemandService){
     // still-active cooldown means the LAST real GMGN call from this
     // scheduler came back 429. Skip every token this tick without
     // making a single GMGN call, rather than retrying into a ban that
-    // has not had time to expire yet. lockGuard is released immediately
-    // (not held for INTERVAL_MS) so the next real tick can try again
-    // the moment the cooldown clears, never later.
-    if(Date.now() < cooldownUntilMs){
+    // has not had time to expire yet - EXCEPT the single early-exit
+    // probe (EARLY_PROBE_DELAY_MS) partway through, allowed exactly
+    // once per cooldown cycle. lockGuard is released immediately (not
+    // held for INTERVAL_MS) so the next real tick can try again the
+    // moment the cooldown clears, never later.
+    const inCooldown = Date.now() < cooldownUntilMs;
+    const isEarlyProbe = inCooldown && !earlyProbeAttempted && Date.now() >= earlyProbeAtMs;
+
+    if(inCooldown && !isEarlyProbe){
         console.warn(`[held-position-refresh-scheduler] Skipped: in GMGN 429 cooldown for ${Math.ceil((cooldownUntilMs - Date.now()) / 1000)}s more`);
         lockGuard.release("FINISHED");
         return { ok: true, tokenCount: 0, errorCount: 0, cooldown: true };
@@ -193,11 +228,27 @@ async function runOnce(ondemandService = gmgnOndemandService){
     try{
 
         const tokenAddresses = [...collectOpenPositionTokenAddresses()];
+
+        if(isEarlyProbe){
+            earlyProbeAttempted = true;
+            console.warn("[held-position-refresh-scheduler] Early-exit probe: attempting a real refresh mid-cooldown to check if the ban already cleared - stops after the first token if it fails, continues normally through the rest if it succeeds");
+        }
+
         let errorCount = 0;
+        let isFirstToken = true;
 
         for(const tokenAddress of tokenAddresses){
-            const ok = await refreshOneToken(tokenAddress, ondemandService);
+            // Only the FIRST token this tick is ever the designated
+            // probe - once it succeeds, cooldownUntilMs is already 0,
+            // so every later token this tick is just an ordinary call.
+            const isProbeAttempt = isEarlyProbe && isFirstToken;
+            isFirstToken = false;
+            const ok = await refreshOneToken(tokenAddress, ondemandService, isProbeAttempt);
             if(!ok) errorCount++;
+            // The probe itself just failed (still banned) - refreshOneToken's
+            // own catch already re-armed a fresh cooldown; stop here,
+            // never attempt more tokens this tick.
+            if(isProbeAttempt && !ok) break;
         }
 
         lastTickTokenCount = tokenAddresses.length;
@@ -205,7 +256,7 @@ async function runOnce(ondemandService = gmgnOndemandService){
 
         lockGuard.release("FINISHED");
 
-        return { ok: true, tokenCount: tokenAddresses.length, errorCount };
+        return { ok: true, tokenCount: tokenAddresses.length, errorCount, ...(isEarlyProbe ? { earlyProbe: true } : {}) };
 
     }
     catch(err){
@@ -257,6 +308,17 @@ function getTickHealth(){
 // clear()/services/execution/usdToSolConverter.js's _resetPriceCacheForTest().
 function _resetForTest(){
     cooldownUntilMs = 0;
+    earlyProbeAtMs = 0;
+    earlyProbeAttempted = false;
 }
 
-module.exports = { start, runOnce, INTERVAL_MS, getTickHealth, collectOpenPositionTokenAddresses, _resetForTest };
+// Test-only - lets a test simulate being partway through an active
+// cooldown (e.g. already past the early-probe checkpoint) without a
+// real multi-minute wait. Same spirit as _resetForTest(), parameterized.
+function _setCooldownStateForTest(cooldownUntilMsValue, earlyProbeAtMsValue, earlyProbeAttemptedValue){
+    cooldownUntilMs = cooldownUntilMsValue;
+    earlyProbeAtMs = earlyProbeAtMsValue;
+    earlyProbeAttempted = earlyProbeAttemptedValue;
+}
+
+module.exports = { start, runOnce, INTERVAL_MS, getTickHealth, collectOpenPositionTokenAddresses, _resetForTest, _setCooldownStateForTest, EARLY_PROBE_DELAY_MS };

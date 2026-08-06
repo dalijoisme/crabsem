@@ -176,8 +176,26 @@ const REALTIME_EXIT_REFRESH_TTL_SECONDS = 5;
 // cooldown is set comfortably longer (6 minutes) so a retry only ever
 // happens after the real ban has already had time to expire, never
 // mid-ban.
+//
+// Real safety concern raised directly by the founder: a FULL 6-minute
+// blackout on an OPEN position is dangerous on its own terms - a
+// held token can crash well past its own Stop Loss floor in far less
+// time than that, and this fallback existing at all means the
+// position's own price genuinely cannot be verified any other way
+// (no on-chain/independent price source exists in this codebase yet -
+// GMGN is the only price feed). EARLY_PROBE_DELAY_MS is the accepted
+// mitigation: ONE real attempt partway through the cooldown, never a
+// loop - if GMGN's own ~5min ban already cleared, this ends the
+// blackout immediately (best case: blind for ~90s, not 360s) instead
+// of always waiting out the full conservative ceiling. If that single
+// probe ALSO gets a 429, the full cooldown re-arms from that point
+// (a fresh checkpoint, not a tighter retry loop) - never regresses to
+// the original every-5-seconds pattern that caused this incident.
 const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
+const EARLY_PROBE_DELAY_MS = 90 * 1000;
 let heldPositionRateLimitCooldownUntilMs = 0;
+let heldPositionEarlyProbeAtMs = 0;
+let heldPositionEarlyProbeAttempted = false;
 
 function msSinceTokenSeen(token){
     const lastSeen = token?.last_seen || token?.updated_at;
@@ -264,9 +282,20 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
     // fallback came back 429. Fails soft exactly like a real fetch
     // failure below (returns `token` unchanged, exit checks keep using
     // the last known price) but skips the network call entirely rather
-    // than retrying into a ban that has not had time to expire yet.
-    if(Date.now() < heldPositionRateLimitCooldownUntilMs){
+    // than retrying into a ban that has not had time to expire yet -
+    // EXCEPT for the single early-exit probe (EARLY_PROBE_DELAY_MS's
+    // own header comment) partway through, which is allowed to fall
+    // through to a real attempt below exactly once per cooldown cycle.
+    const inCooldown = Date.now() < heldPositionRateLimitCooldownUntilMs;
+    const isEarlyProbe = inCooldown && !heldPositionEarlyProbeAttempted && Date.now() >= heldPositionEarlyProbeAtMs;
+
+    if(inCooldown && !isEarlyProbe){
         return token;
+    }
+
+    if(isEarlyProbe){
+        heldPositionEarlyProbeAttempted = true;
+        console.warn(`[tradingBotEngine] Early-exit probe: attempting a real held-position refresh mid-cooldown for ${position.token_symbol} to check if the ban already cleared`);
     }
 
     try{
@@ -278,6 +307,19 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
 
         const fresh = extractFreshPriceAndLiquidity(poolResult, klineResult);
         if(!fresh) return token;
+
+        // Only the DESIGNATED probe attempt may clear the cooldown on
+        // success - never any other success, even one that happens to
+        // land while cooldownUntilMs is still nonzero (structurally the
+        // only way to even reach this line while in cooldown IS via
+        // isEarlyProbe, since the guard above returns early otherwise -
+        // but gating on isEarlyProbe explicitly, not just "nonzero",
+        // keeps that invariant provable rather than incidental).
+        if(isEarlyProbe){
+            console.warn(`[tradingBotEngine] Early-exit probe succeeded for ${position.token_symbol} - GMGN ban has cleared, resuming normal held-position refresh immediately`);
+            heldPositionRateLimitCooldownUntilMs = 0;
+            heldPositionEarlyProbeAttempted = false;
+        }
 
         // Written back so the next reader within this same freshness
         // window - another position sharing this token, or
@@ -314,7 +356,9 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
         // header comment for the real-incident evidence behind this.
         if(err.status === 429){
             heldPositionRateLimitCooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-            console.warn(`[tradingBotEngine] GMGN returned 429 (${err.apiError || "rate limited"}) on held-position fallback fetch - pausing this fallback for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban) to stop re-triggering it`);
+            heldPositionEarlyProbeAtMs = Date.now() + EARLY_PROBE_DELAY_MS;
+            heldPositionEarlyProbeAttempted = false;
+            console.warn(`[tradingBotEngine] GMGN returned 429 (${err.apiError || "rate limited"}) on held-position fallback fetch - pausing this fallback for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban, early-exit probe at ${EARLY_PROBE_DELAY_MS / 1000}s) to stop re-triggering it`);
         }
 
         tradingBotRepository.insertLog(userId, {
@@ -1098,6 +1142,17 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
 // _resetForTest().
 function _resetHeldPositionRateLimitCooldownForTest(){
     heldPositionRateLimitCooldownUntilMs = 0;
+    heldPositionEarlyProbeAtMs = 0;
+    heldPositionEarlyProbeAttempted = false;
+}
+
+// Test-only - lets a test simulate being partway through an active
+// cooldown (e.g. already past the early-probe checkpoint) without a
+// real multi-minute wait. Same spirit as the reset above, parameterized.
+function _setHeldPositionCooldownStateForTest(cooldownUntilMsValue, earlyProbeAtMsValue, earlyProbeAttemptedValue){
+    heldPositionRateLimitCooldownUntilMs = cooldownUntilMsValue;
+    heldPositionEarlyProbeAtMs = earlyProbeAtMsValue;
+    heldPositionEarlyProbeAttempted = earlyProbeAttemptedValue;
 }
 
 module.exports = {
@@ -1106,5 +1161,5 @@ module.exports = {
     isInProfitProtectionTerritory,
     HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, HELD_POSITION_CHAIN,
     manageOpenPositions, runExitCycle,
-    _resetHeldPositionRateLimitCooldownForTest
+    _resetHeldPositionRateLimitCooldownForTest, _setHeldPositionCooldownStateForTest, EARLY_PROBE_DELAY_MS
 };

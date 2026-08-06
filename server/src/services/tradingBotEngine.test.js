@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 
-const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle, _resetHeldPositionRateLimitCooldownForTest } = require("./tradingBotEngine");
+const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle, _resetHeldPositionRateLimitCooldownForTest, _setHeldPositionCooldownStateForTest, EARLY_PROBE_DELAY_MS } = require("./tradingBotEngine");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
@@ -651,6 +651,112 @@ test("refreshStaleHeldToken trips a cooldown on a real GMGN 429 - the NEXT call 
 
         assert.equal(callCount, callCountAfterFirstCall, "the cooldown must make ZERO GMGN calls, even for a token that never itself failed");
         assert.deepEqual(secondResult, otherToken, "still fails soft - the unrelated token's own data is returned unchanged, never blocked");
+
+    }
+    finally{
+        _resetHeldPositionRateLimitCooldownForTest();
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+// Real safety concern (founder, 2026-08-06): a full 6-minute blackout
+// on an open position is dangerous with no independent price source.
+// The early-exit probe (EARLY_PROBE_DELAY_MS) is the mitigation - these
+// two tests prove both branches without a real 90s wait, using
+// _setHeldPositionCooldownStateForTest to simulate "already past the
+// checkpoint".
+test("once past the early-probe checkpoint, a SUCCESSFUL refresh clears the cooldown immediately", async () => {
+
+    const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const token = { token_address: "TestProbeToken444", symbol: "PROBE4", price: 0.5, last_seen: "2020-01-01 00:00:00" };
+        const position = { token_address: "TestProbeToken444", token_symbol: "PROBE4", id: 994 };
+
+        let callCount = 0;
+        const recoveredOndemand = {
+            async getTokenPoolInfo(){ callCount++; return { data: { liquidity: "500" } }; },
+            async getTokenKline(){ return { data: { list: [{ close: "2.0" }] } }; }
+        };
+
+        // Simulate: a 429 tripped minutes ago, cooldown still has time
+        // left, but the 90s probe checkpoint has already passed.
+        _setHeldPositionCooldownStateForTest(Date.now() + 4 * 60 * 1000, Date.now() - 1000, false);
+
+        const result = await refreshStaleHeldToken(userId, position, token, recoveredOndemand);
+
+        assert.equal(callCount, 1, "the probe must make a real call");
+        assert.equal(result.price, 2.0, "the ban already cleared - a real fresh price must be applied, not the fail-soft fallback");
+
+        // Cooldown must be fully cleared now - a completely normal next
+        // call (heldPositionMarketStore cleared first, so this proves
+        // the CIRCUIT BREAKER let the call through, not a store hit).
+        heldPositionMarketStore.clear();
+        callCount = 0;
+        await refreshStaleHeldToken(userId, position, { ...token, last_seen: "2020-01-01 00:00:00" }, recoveredOndemand);
+        assert.equal(callCount, 1, "no cooldown left - the next call must run normally, not be skipped");
+
+    }
+    finally{
+        _resetHeldPositionRateLimitCooldownForTest();
+        heldPositionMarketStore.clear();
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+test("once past the early-probe checkpoint, a FAILED probe re-arms a fresh full cooldown", async () => {
+
+    const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const token = { token_address: "TestStillBannedToken555", symbol: "STILLBAN5", price: 0.5, last_seen: "2020-01-01 00:00:00" };
+        const position = { token_address: "TestStillBannedToken555", token_symbol: "STILLBAN5", id: 993 };
+
+        const stillBannedOndemand = {
+            async getTokenPoolInfo(){
+                throw new GmgnAuthError("GET /v1/token/pool_info failed: HTTP 429 code=429 error=RATE_LIMIT_BANNED message=IP is temporarily banned", {
+                    status: 429, apiCode: 429, apiError: "RATE_LIMIT_BANNED"
+                });
+            },
+            async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+        };
+
+        const beforeProbe = Date.now();
+        _setHeldPositionCooldownStateForTest(Date.now() + 4 * 60 * 1000, Date.now() - 1000, false);
+
+        const result = await refreshStaleHeldToken(userId, position, token, stillBannedOndemand);
+        assert.deepEqual(result, token, "still fails soft on a repeat 429");
+
+        // A fresh full cooldown must now be armed - a normal call right
+        // after must be skipped again (not itself treated as a new probe).
+        let secondCallHappened = false;
+        const secondResult = await refreshStaleHeldToken(userId, position, token, {
+            async getTokenPoolInfo(){ secondCallHappened = true; return { data: { liquidity: "1" } }; },
+            async getTokenKline(){ secondCallHappened = true; return { data: { list: [{ close: "1" }] } }; }
+        });
+        assert.equal(secondCallHappened, false, "immediately back in cooldown - the fresh trip");
+        assert.deepEqual(secondResult, token);
+        assert.ok(Date.now() - beforeProbe < EARLY_PROBE_DELAY_MS, "sanity: this whole test ran well under the real probe delay, proving no real wait was needed");
 
     }
     finally{

@@ -251,6 +251,103 @@ test("a real GMGN 429 trips a GLOBAL cooldown - the NEXT tick skips every token 
 
 });
 
+// Real safety concern (founder, 2026-08-06): a full 6-minute blackout
+// on an open position is dangerous with no independent price source.
+// The early-exit probe (EARLY_PROBE_DELAY_MS) is the mitigation -
+// these two tests prove both branches without a real 90s wait, using
+// _setCooldownStateForTest to simulate "already past the checkpoint".
+test("once past the early-probe checkpoint, a SUCCESSFUL probe clears the cooldown immediately and continues through the rest of the tick's tokens", async () => {
+
+    const positionsByUser = { 6003: [{ token_address: "PROBE_TOKEN_A" }, { token_address: "PROBE_TOKEN_B" }] };
+
+    let callCount = 0;
+    const recoveredOndemand = {
+        async getTokenPoolInfo(){ callCount++; return { data: { liquidity: "1000" } }; },
+        async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+    };
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => [6003]),
+        stub(tradingBotRepository, "findOpenPositions", (userId) => positionsByUser[userId] || [])
+    ];
+
+    try{
+
+        // Simulate: a 429 tripped 2 minutes ago, cooldown still has ~4
+        // minutes left, but the 90s probe checkpoint has already passed.
+        scheduler._setCooldownStateForTest(Date.now() + 4 * 60 * 1000, Date.now() - 1000, false);
+
+        const result = await scheduler.runOnce(recoveredOndemand);
+
+        assert.equal(result.earlyProbe, true, "this tick must be marked as the early-exit probe");
+        assert.equal(callCount, 2, "the ban already cleared - BOTH tokens must be refreshed this same tick, not just one");
+        assert.equal(result.tokenCount, 2);
+        assert.equal(result.errorCount, 0);
+
+        // Cooldown must be fully cleared now - a completely normal next tick.
+        callCount = 0;
+        const nextResult = await scheduler.runOnce(recoveredOndemand);
+        assert.equal(nextResult.cooldown, undefined, "no cooldown left - the next tick must run normally, not be skipped");
+        assert.equal(callCount, 2);
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});
+
+test("once past the early-probe checkpoint, a FAILED probe re-arms a fresh full cooldown and stops immediately (never tries the remaining tokens)", async () => {
+
+    const positionsByUser = { 6004: [{ token_address: "STILL_BANNED_A" }, { token_address: "STILL_BANNED_B" }] };
+
+    let callCount = 0;
+    const stillBannedOndemand = {
+        async getTokenPoolInfo(){
+            callCount++;
+            throw new GmgnAuthError("GET /v1/token/pool_info failed: HTTP 429 code=429 error=RATE_LIMIT_BANNED message=IP is temporarily banned", {
+                status: 429, apiCode: 429, apiError: "RATE_LIMIT_BANNED"
+            });
+        },
+        async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+    };
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => [6004]),
+        stub(tradingBotRepository, "findOpenPositions", (userId) => positionsByUser[userId] || [])
+    ];
+
+    try{
+
+        const beforeProbe = Date.now();
+        scheduler._setCooldownStateForTest(Date.now() + 4 * 60 * 1000, Date.now() - 1000, false);
+
+        const result = await scheduler.runOnce(stillBannedOndemand);
+
+        assert.equal(result.earlyProbe, true);
+        // callCount is the real proof STILL_BANNED_B was never attempted
+        // (only ONE getTokenPoolInfo call happened, for STILL_BANNED_A) -
+        // result.tokenCount itself reports the full candidate list found
+        // this tick (2, both open-position tokens), not how many were
+        // actually attempted before the early break; that's a real,
+        // separate, useful signal (a real open-position count for
+        // monitoring), not a bug in this circuit breaker.
+        assert.equal(callCount, 1, "must stop after the FIRST token fails again - never attempt the second token in the same probe tick");
+        assert.equal(result.errorCount, 1);
+
+        // A fresh full cooldown must now be armed, starting from
+        // roughly now - not still counting down from the original trip.
+        const nextResult = await scheduler.runOnce(stillBannedOndemand);
+        assert.equal(nextResult.cooldown, true, "immediately back in cooldown - the fresh trip");
+        assert.ok(Date.now() - beforeProbe < scheduler.EARLY_PROBE_DELAY_MS, "sanity: this whole test ran well under the real probe delay, proving no real wait was needed");
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});
+
 test("a plain network error (no real GMGN 429) never trips the cooldown - the next tick fetches normally", async () => {
 
     const positionsByUser = { 6002: [{ token_address: "FLAKY_TOKEN" }] };

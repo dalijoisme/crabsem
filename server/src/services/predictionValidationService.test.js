@@ -16,10 +16,13 @@ const assert = require("node:assert/strict");
 const predictionHistoryRepository = require("../repositories/predictionHistoryRepository");
 const predictionTimelineRepository = require("../repositories/predictionTimelineRepository");
 const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRepository");
+const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
+const tradePositionRepository = require("../repositories/tradePositionRepository");
 const db = require("../database/connection");
 
 const {
-    recordTimelineSnapshots, scoreTokensInBatches, _setScoreBatchSizeForTest
+    recordTimelineSnapshots, scoreTokensInBatches, _setScoreBatchSizeForTest,
+    getDecisionScanTokens, DECISION_SCAN_MAX_AGE_SECONDS
 } = require("./predictionValidationService");
 const scoringWorkerPool = require("./scoringWorkerPool");
 
@@ -55,6 +58,28 @@ function cleanup(ids){
         db.prepare("DELETE FROM prediction_timeline WHERE prediction_id = ?").run(id);
     }
     db.prepare("DELETE FROM prediction_history WHERE id IN (" + ids.map(() => "?").join(",") + ")").run(...ids);
+}
+
+function upsertTestToken(tokenAddress, overrides = {}){
+    gmgnTokenRepository.upsertToken({
+        tokenAddress, symbol: "TST", name: "Test Token", chain: "sol", logo: null,
+        marketCap: 1000, liquidity: 500, price: 0.001,
+        priceChange5m: 0, priceChange1h: 0, priceChange24h: 0,
+        volume5m: 0, volume1h: 100, volume24h: 100,
+        buys5m: 0, sells5m: 0, holders: 10, fdv: 1000,
+        launchTimestamp: Math.floor(Date.now() / 1000), rawJson: "{}",
+        ...overrides
+    });
+}
+
+function backdateToken(tokenAddress, secondsAgo){
+    db.prepare("UPDATE gmgn_tokens SET updated_at = datetime('now', '-' || ? || ' seconds') WHERE token_address = ?").run(secondsAgo, tokenAddress);
+}
+
+function cleanupTokens(tokenAddresses){
+    for(const addr of tokenAddresses){
+        db.prepare("DELETE FROM gmgn_tokens WHERE token_address = ?").run(addr);
+    }
 }
 
 test("a prediction whose 30m horizon just became due gets a real snapshot recorded from real price history", async () => {
@@ -255,4 +280,138 @@ test("scoreTokensInBatches handles an empty token list without making any worker
     const result = await scoreTokensInBatches([], {});
     assert.deepEqual(result, []);
 
+});
+
+// getDecisionScanTokens - RATE_LIMIT_BANNED incident follow-up
+// (2026-08-06, live VPS): chunking scoreTokens() (previous commit)
+// only spread the SAME total scoring work across more, smaller worker
+// round-trips - it never reduced how much there was. Under real
+// sustained load evaluateAndRecordDecisions still grew to 86-107s per
+// cycle and gmgn-scheduler relapsed into its stuck-lock loop after only
+// a ~2min recovery window. Real data: 96% of gmgn_tokens had not been
+// touched by ANY collector in 7+ days - dead weight. This scopes the
+// scan down to fresh tokens (approved 2026-08-06), while proving the
+// one non-negotiable safety property: a token backing an OPEN position
+// must never silently fall out of the scan just because its own
+// trending-collector coverage lapsed, since that's exactly the
+// close-on-AVOID-reversal path that protects a held position.
+test("getDecisionScanTokens includes a token updated within the freshness window", () => {
+
+    const tokenAddress = `${PREFIX}FRESH_A`;
+
+    try{
+
+        upsertTestToken(tokenAddress);
+
+        const tokens = getDecisionScanTokens();
+        assert.ok(tokens.some(t => t.token_address === tokenAddress), "a freshly-updated token must be scanned");
+
+    }
+    finally{
+        cleanupTokens([tokenAddress]);
+    }
+
+});
+
+test("getDecisionScanTokens excludes a token that's gone stale (no collector update in 7+ days) and has no open position", () => {
+
+    const tokenAddress = `${PREFIX}STALE_NO_POSITION`;
+
+    try{
+
+        upsertTestToken(tokenAddress);
+        backdateToken(tokenAddress, 8 * 24 * 60 * 60); // 8 days ago - well past DECISION_SCAN_MAX_AGE_SECONDS
+
+        const tokens = getDecisionScanTokens();
+        assert.ok(
+            !tokens.some(t => t.token_address === tokenAddress),
+            "a token dead for 8 days with no open position must not be scanned - it can never be a real live candidate"
+        );
+
+    }
+    finally{
+        cleanupTokens([tokenAddress]);
+    }
+
+});
+
+test("getDecisionScanTokens ALWAYS includes a token backing an OPEN position, even if it has gone stale - the close-on-AVOID-reversal safety net must never silently lose coverage", () => {
+
+    const tokenAddress = `${PREFIX}STALE_WITH_POSITION`;
+    let predictionId, position;
+
+    try{
+
+        upsertTestToken(tokenAddress);
+        backdateToken(tokenAddress, 8 * 24 * 60 * 60); // same staleness as the excluded case above
+
+        predictionId = insertPrediction(tokenAddress, {
+            targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
+            initialStatus: "OPEN"
+        });
+
+        const result = tradePositionRepository.openPosition({
+            tokenAddress, tokenSymbol: "TST", openedByPredictionId: predictionId,
+            entryPrice: 1, entryMarketCap: 1000, entryLiquidity: 100, entryVolume: 100, entryHolders: 10,
+            targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
+            predictionHorizonSeconds: 86400
+        });
+        assert.ok(result.opened, "test setup: the position must actually open");
+        position = tradePositionRepository.findOpenForToken(tokenAddress);
+
+        const tokens = getDecisionScanTokens();
+        assert.ok(
+            tokens.some(t => t.token_address === tokenAddress),
+            "a stale token with an OPEN position must still be scanned, unconditionally"
+        );
+
+    }
+    finally{
+        if(position) db.prepare("DELETE FROM trade_positions WHERE id = ?").run(position.id);
+        if(predictionId) cleanup([predictionId]);
+        cleanupTokens([tokenAddress]);
+    }
+
+});
+
+test("getDecisionScanTokens never returns the same token twice, even when it is both fresh AND has an open position", () => {
+
+    const tokenAddress = `${PREFIX}FRESH_WITH_POSITION`;
+    let predictionId, position;
+
+    try{
+
+        upsertTestToken(tokenAddress); // fresh - default updated_at is "now"
+
+        predictionId = insertPrediction(tokenAddress, {
+            targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
+            initialStatus: "OPEN"
+        });
+
+        const result = tradePositionRepository.openPosition({
+            tokenAddress, tokenSymbol: "TST", openedByPredictionId: predictionId,
+            entryPrice: 1, entryMarketCap: 1000, entryLiquidity: 100, entryVolume: 100, entryHolders: 10,
+            targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
+            predictionHorizonSeconds: 86400
+        });
+        assert.ok(result.opened, "test setup: the position must actually open");
+        position = tradePositionRepository.findOpenForToken(tokenAddress);
+
+        const tokens = getDecisionScanTokens();
+        const matches = tokens.filter(t => t.token_address === tokenAddress);
+        assert.equal(matches.length, 1, "a token that is both fresh and open-position-backed must appear exactly once, never duplicated");
+
+    }
+    finally{
+        if(position) db.prepare("DELETE FROM trade_positions WHERE id = ?").run(position.id);
+        if(predictionId) cleanup([predictionId]);
+        cleanupTokens([tokenAddress]);
+    }
+
+});
+
+test("DECISION_SCAN_MAX_AGE_SECONDS is a real, generous window - much wider than entryGateService's tight execution-time freshness gate", () => {
+    // This is a decision/research log, not a live BUY execution gate -
+    // it only needs to exclude tokens that are unambiguously dead.
+    assert.equal(DECISION_SCAN_MAX_AGE_SECONDS, 6 * 60 * 60);
 });

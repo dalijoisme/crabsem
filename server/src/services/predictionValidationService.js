@@ -302,11 +302,64 @@ function buildWalletSummary(signal){
     };
 }
 
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS): chunking
+// the scoring call (previous commit) only changes WHEN the same total
+// scoring work runs, never HOW MUCH there is - under real sustained
+// load evaluateAndRecordDecisions still grew to 86-107s per cycle and
+// gmgn-scheduler relapsed into its stuck-lock loop after only a ~2min
+// recovery window. Real data: 96% of gmgn_tokens (29,428 of 30,674 rows
+// at the time of this fix) had not been touched by ANY collector in 7+
+// days - dead weight that can never realistically become a live BUY
+// candidate through this account's own collector pipeline. Same root
+// cause services/freshUniverseService.js's own "Fresh BUY Universe RFC"
+// already fixed for tradingBotScheduler.js's sibling pipeline (see that
+// file's header) - this decision-log pipeline never got the same fix.
+//
+// DECISION_SCAN_MAX_AGE_SECONDS is deliberately far more generous than
+// entryGateService.js's own MAX_MARKET_DATA_AGE_SECONDS (120s, tuned
+// for live BUY execution timing) - this is a decision/research LOG, not
+// an execution gate, so it only needs to exclude tokens that are
+// unambiguously dead, not merely a few minutes old. Real behavior
+// change, approved (2026-08-06): a token with no collector update in
+// 6+ hours stops getting FIXED_REFRESH_TIMEOUT's every-25-minute forced
+// re-log - it was never a real trading candidate anyway, but the
+// historical decision-log loses that completeness for dead tokens.
+//
+// Every OPEN position's token is unioned in regardless of this cutoff -
+// held-position price refreshes (scheduler/heldPositionRefreshScheduler.js)
+// write into services/heldPositionMarketStore.js, a SEPARATE cache,
+// never back into gmgn_tokens.updated_at, so a token whose own
+// trending-collector coverage lapsed could otherwise silently fall out
+// of this scan and lose its close-on-AVOID-reversal safety net (see
+// OPEN PREDICTIONS POLICY above) even while still being actively held.
+const DECISION_SCAN_MAX_AGE_SECONDS = 6 * 60 * 60;
+
+function getDecisionScanTokens(){
+
+    const freshTokens = gmgnTokenRepository.getFreshTokens({ maxAgeSeconds: DECISION_SCAN_MAX_AGE_SECONDS, minMarketCap: 0 });
+    const freshAddresses = new Set(freshTokens.map(t => t.token_address));
+
+    const openOnlyTokens = [];
+
+    for(const position of tradePositionRepository.findOpen()){
+
+        if(freshAddresses.has(position.token_address)) continue;
+
+        const token = gmgnTokenRepository.getTokenByAddress(position.token_address);
+
+        if(token && token.market_cap != null && token.market_cap > 0) openOnlyTokens.push(token);
+
+    }
+
+    return [...freshTokens, ...openOnlyTokens];
+
+}
+
 async function evaluateAndRecordDecisions(){
 
     const cycleStartedAt = Date.now();
 
-    const tokens = gmgnTokenRepository.getAllTokens().filter(t => t.market_cap != null && t.market_cap > 0);
+    const tokens = getDecisionScanTokens();
 
     if(!tokens.length) return { created: 0, scanned: 0, skipped: 0, skipReasons: {} };
 
@@ -784,5 +837,6 @@ module.exports = {
     // anything else in the codebase still imports the pre-redesign names.
     createNewPredictions: evaluateAndRecordDecisions,
     updateOpenPredictions: updateOpenTradePositions,
-    scoreTokensInBatches, _setScoreBatchSizeForTest
+    scoreTokensInBatches, _setScoreBatchSizeForTest,
+    getDecisionScanTokens, DECISION_SCAN_MAX_AGE_SECONDS
 };

@@ -122,7 +122,18 @@ const PROFILES = {
     },
 
     AGGRESSIVE: {
-        min_confidence: 45,
+        // Production trading-quality audit (2026-08-06, live VPS):
+        // raised from 45 - real backtest against this account's own 243
+        // real trades (official ROI = COALESCE(realized_roi_pct, roi_pct),
+        // fee-inclusive PnL) proved confidence<50 was 39.5% of all real
+        // volume at avgROI=-7.43%/winRate=31.7%, while every confidence
+        // floor from 55 up produced positive total PnL - floor=45 (today's
+        // value, i.e. no floor beyond what already applies) backtested to
+        // -41.48 total; floor=55 backtested to +6.40; floor=58 to +13.23
+        // (smaller n=52, held out as a less robust, single-point choice).
+        // 55 sits at the start of the broad, non-overfit positive zone
+        // rather than the small-sample tail peak.
+        min_confidence: 55,
         min_decay_fraction: 0.85,
         position_size_pct: 15,
         max_position_size: 150,
@@ -137,7 +148,22 @@ const PROFILES = {
         // Hunter: reweights composition from confirmation (priceStability/
         // volume/holderDistribution) toward early-probability signals
         // (accumulation/smartMoney/whale/kol), not just looser bars.
-        weights: { accumulation: 1.6, smartMoney: 1.8, kol: 1.4, whale: 1.5, developer: 0.8, sniperQuality: 0.7, bundleQuality: 0.7, insiderQuality: 0.7, holderDistribution: 0.5, volume: 0.5, priceStability: 0.4 },
+        //
+        // walletQuality: 0.5 added (production trading-quality audit,
+        // 2026-08-06) - Pearson correlation against this account's own
+        // 243 real trades' official ROI was r=-0.638 (n=124), the
+        // strongest single-module signal found in either direction -
+        // tokens where involved wallets were classified "experienced"
+        // (traded 20+ tokens before, see
+        // intelligence/participant/walletQuality.js's own scoring)
+        // measurably underperformed. Plausible real mechanism: in this
+        // asset class, "traded many tokens before" more often marks
+        // serial flippers/early-exit chasers than genuine informed
+        // conviction. Down-weighted (not zeroed/inverted) at the same
+        // 0.5-0.7x scale this profile already applies to
+        // developer/sniperQuality/bundleQuality/insiderQuality below,
+        // pending more real volume to validate further.
+        weights: { accumulation: 1.6, smartMoney: 1.8, kol: 1.4, whale: 1.5, developer: 0.8, sniperQuality: 0.7, bundleQuality: 0.7, insiderQuality: 0.7, walletQuality: 0.5, holderDistribution: 0.5, volume: 0.5, priceStability: 0.4 },
         tiers: { buy: 55, strongBuy: 75 },
         min_liquidity_usd: 1200,
         min_volume_usd: null, // deliberate - never gate on volume not yet built up

@@ -80,6 +80,24 @@ const lockGuard = createLockGuard("gmgn-scheduler", { maxDurationMs: 5 * 30000 }
 // anything from timestamps in the database).
 const collectorHealth = new Map();
 
+// RATE_LIMIT_BANNED incident (2026-08-06), same real-production finding
+// as heldPositionRefreshScheduler.js's own cooldownUntilMs (see that
+// file's header for the full live-log evidence): this scheduler ticks
+// every 30s with NO backoff of its own either - runCollector() below
+// only ever console.error's a 429, never slows anything down, so the
+// NEXT tick retried all 7 collectors again regardless. Live evidence
+// from the SAME incident window: after heldPositionRefreshScheduler.js's
+// own circuit breaker was deployed and stopped ITS retries, this
+// scheduler alone kept producing "0/7 collectors OK" batches every 30s
+// straight through an active ban - confirming this scheduler's own
+// retries were independently sufficient to keep the ban from ever
+// expiring. Global (one cooldown for the whole batch, not per-collector)
+// for the same reason as the held-position scheduler's: the ban is
+// IP-wide, so a DIFFERENT collector succeeding at full speed while
+// another just got banned would still hammer the same banned IP.
+const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+let cooldownUntilMs = 0;
+
 function recordCollectorResult(name, result){
 
     const state = collectorHealth.get(name) || { consecutiveFailures: 0 };
@@ -189,6 +207,16 @@ async function runCollector({ name, run }){
 
         console.error(`[gmgn-scheduler] ${name} FAILED after ${durationMs}ms: ${err.message}`);
 
+        // err.status is set from the real HTTP response (see
+        // authClient.js's GmgnAuthError) - a bare timeout carries no
+        // status, so this only trips on a REAL 429 from GMGN, never on
+        // an ordinary network hiccup. See cooldownUntilMs's own header
+        // comment for the real-incident evidence behind this.
+        if(err.status === 429){
+            cooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+            console.warn(`[gmgn-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) on ${name} - pausing the WHOLE collector batch for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban) to stop re-triggering it`);
+        }
+
         const outcome = { name, ok: false, durationMs, error: err.message };
 
         recordCollectorResult(name, outcome);
@@ -281,6 +309,17 @@ async function runOnce(){
 
     }
 
+    // Circuit breaker (see cooldownUntilMs's own header comment) - skip
+    // every collector this tick without making a single GMGN call,
+    // rather than retrying into a ban that has not had time to expire
+    // yet. Lock is released immediately so the very next tick after the
+    // cooldown clears gets a real attempt, never delayed further.
+    if(Date.now() < cooldownUntilMs){
+        console.warn(`[gmgn-scheduler] Skipped: in GMGN 429 cooldown for ${Math.ceil((cooldownUntilMs - Date.now()) / 1000)}s more`);
+        lockGuard.release("FINISHED");
+        return { ok: false, durationMs: 0, results: [], cooldown: true };
+    }
+
     const startedAt = Date.now();
     const results = [];
     // TEMPORARY (P0 GMGN IP ban investigation) - marks the tick
@@ -347,4 +386,10 @@ function start(){
 
 }
 
-module.exports = { start, runOnce, INTERVAL_MS, COLLECTORS, getCollectorHealth, getTickHealth, getPulseHealth };
+// Test-only reset - same convention as scheduler/heldPositionRefreshScheduler.js's
+// own _resetForTest()/services/heldPositionMarketStore.js's clear().
+function _resetForTest(){
+    cooldownUntilMs = 0;
+}
+
+module.exports = { start, runOnce, INTERVAL_MS, COLLECTORS, getCollectorHealth, getTickHealth, getPulseHealth, _resetForTest };

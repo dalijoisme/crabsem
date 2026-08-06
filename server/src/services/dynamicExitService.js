@@ -351,9 +351,38 @@ function evaluateDynamicExit({ position, token, trenchesEntry }){
     // Checked before Hard Stop Loss so it can genuinely accelerate past
     // what the (now-tighter, see resolveEffectiveStopLossPct) fixed stop
     // would otherwise have waited for.
-    if(!contextStale && position.mae_pct < 0 && roiPct <= position.mae_pct && isMomentumWeakening(realtimePulse)){
-        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=MAE_ACCELERATED_EXIT roiPct=${roiPct.toFixed(2)} priorMaePct=${position.mae_pct.toFixed(2)}`);
-        return { action: "SELL_ALL", sellFraction: 1, reason: "MAE_ACCELERATED_EXIT", currentPrice, roiPct, momentumHealth };
+    //
+    // Graceful-degradation fix (production trading-quality audit,
+    // 2026-08-06, live VPS): real production evidence proved the strict
+    // isMomentumWeakening(realtimePulse) requirement was silently
+    // disabling this entire protection for the large majority of real
+    // STOP_LOSS-triggering positions - direct log evidence across every
+    // real STOP_LOSS decision sampled showed realtimePulseFlow=n/a (no
+    // buffer data yet - a brand-new position hasn't had time to
+    // accumulate the 2+ ticks a direction vote needs) or contextStale=true
+    // far more often than a real, computed "not weakening" vote. Real
+    // STOP_LOSS trades realized a median of -36.9% against a -20%
+    // configured floor (n=80) specifically because the one mechanism
+    // that could have caught the decline earlier structurally could not
+    // fire when its confirming data source was empty, not because real
+    // data showed things were fine. hasRealtimeSignal distinguishes
+    // "we have a real vote and it says not-weakening" (preserve the
+    // existing, deliberate, already-tested behavior - see
+    // dynamicExitService.test.js's own "...WITHOUT weakening momentum
+    // confirming it" case, which explicitly records real buffer data
+    // showing genuine improvement and must keep NOT firing) from "we
+    // have no real vote at all" (previously silently defaulted to no
+    // protection - now falls back to the raw, always-available mae_pct
+    // new-low signal alone, same as if momentum data had confirmed it).
+    // contextStale is intentionally NOT part of this fallback - a stale
+    // market context is a real reason to distrust momentum classification
+    // specifically, not the underlying price/mae_pct reading itself
+    // (which the Hard Stop Loss below already trusts unconditionally).
+    const hasRealtimeSignal = realtimePulse?.flowDirectionVoteProvisional != null;
+    if(position.mae_pct < 0 && roiPct <= position.mae_pct && (isMomentumWeakening(realtimePulse) || !hasRealtimeSignal)){
+        const reason = hasRealtimeSignal ? "MAE_ACCELERATED_EXIT" : "MAE_ACCELERATED_EXIT_NO_SIGNAL";
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=${reason} roiPct=${roiPct.toFixed(2)} priorMaePct=${position.mae_pct.toFixed(2)} hasRealtimeSignal=${hasRealtimeSignal}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason, currentPrice, roiPct, momentumHealth };
     }
 
     // Step 1 - Hard Stop Loss. Always fresh, never gated on staleness (a

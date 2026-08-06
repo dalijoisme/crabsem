@@ -395,3 +395,40 @@ test("MAE_ACCELERATED_EXIT does NOT fire on a real new low WITHOUT weakening mom
     }
 
 });
+
+// Graceful-degradation fix (production trading-quality audit,
+// 2026-08-06, live VPS) - see this block's own header comment in
+// dynamicExitService.js for the real production evidence: every real
+// STOP_LOSS decision sampled from live logs showed realtimePulseFlow=n/a
+// (an empty/insufficient buffer - the common case for a young position,
+// not an edge case) far more often than a real "not weakening" vote,
+// silently disabling this entire protection for the trades that needed
+// it most (median realized loss -36.9% against a -20% configured
+// floor). The critical property under test: a real new low with NO
+// buffer data at all (empty buffer - never recorded a single point, so
+// flowDirectionVoteProvisional is genuinely null, not a real "UP"/"MIXED"
+// vote) must now fall back to firing on the raw mae_pct signal alone -
+// this is the ONLY behavior change from the three tests above, which
+// must all keep passing unmodified.
+test("MAE_ACCELERATED_EXIT_NO_SIGNAL fires on a real new low when no realtime buffer data exists at all (the common real-production case)", () => {
+
+    const address = "TEST_MAE_NO_BUFFER_AT_ALL";
+    const token = { ...healthyToken(), token_address: address, price: 0.92 };
+    // Deliberately no realtimePulseBufferService.recordPoint() calls -
+    // an empty buffer, exactly matching a brand-new position that
+    // hasn't had time to accumulate the 2+ ticks a direction vote needs.
+
+    try{
+
+        const pos = position({ mae_pct: -5 });
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        assert.equal(result.action, "SELL_ALL");
+        assert.equal(result.reason, "MAE_ACCELERATED_EXIT_NO_SIGNAL");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});

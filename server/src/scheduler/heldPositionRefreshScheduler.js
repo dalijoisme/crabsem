@@ -72,16 +72,17 @@ let lastTickErrorCount = null;
 // one - continuing to hit OTHER tokens at full speed while one is
 // banned would still hammer the same already-banned IP.
 //
-// 60s is a deliberate guess, not a measured GMGN policy value (GMGN
-// documents no official ban duration) - long enough that a real ban
-// gets real breathing room to expire before the next attempt, short
-// enough that a transient/short ban doesn't leave held positions
-// running on stale prices for unreasonably long. refreshStaleHeldToken's
-// own store-miss fallback (services/tradingBotEngine.js) means an exit
-// decision during this window still uses whatever price was last
-// fetched, never blocks - this only stops NEW GMGN calls, never masks
-// or fabricates data.
-const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+// Confirmed by direct user report (2026-08-06): GMGN's own temporary
+// ban is ~5 minutes. 60s (this file's original guess) was proven too
+// short by real observation - it made this scheduler probe every
+// minute straight through a still-active ban, never actually letting
+// it expire. 6 minutes gives real safety margin over the confirmed 5.
+// refreshStaleHeldToken's own store-miss fallback
+// (services/tradingBotEngine.js) has its OWN matching circuit breaker
+// now (same incident) - an exit decision during this window still uses
+// whatever price was last fetched, never blocks - this only stops NEW
+// GMGN calls, never masks or fabricates data.
+const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
 let cooldownUntilMs = 0;
 
 // Real union of every RUNNING user's own open-position token addresses -

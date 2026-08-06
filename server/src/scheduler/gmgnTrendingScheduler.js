@@ -95,7 +95,15 @@ const collectorHealth = new Map();
 // for the same reason as the held-position scheduler's: the ban is
 // IP-wide, so a DIFFERENT collector succeeding at full speed while
 // another just got banned would still hammer the same banned IP.
-const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+//
+// Confirmed by direct user report (2026-08-06): GMGN's own temporary
+// ban is ~5 minutes. 60s (this file's original guess) was proven too
+// short by real observation - it made this scheduler probe every
+// minute straight through a still-active ban. 6 minutes gives real
+// safety margin over the confirmed 5. A THIRD independent no-backoff
+// source (services/tradingBotEngine.js's refreshStaleHeldToken fallback)
+// was found and fixed in the same pass - see that file's own comment.
+const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
 let cooldownUntilMs = 0;
 
 function recordCollectorResult(name, result){

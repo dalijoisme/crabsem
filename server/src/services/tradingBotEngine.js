@@ -159,6 +159,26 @@ function isInProfitProtectionTerritory(position, token, botConfig){
 // fetch rather than hammering GMGN.
 const REALTIME_EXIT_REFRESH_TTL_SECONDS = 5;
 
+// RATE_LIMIT_BANNED incident (2026-08-06) - THIRD source of the same
+// no-backoff retry pattern already fixed in
+// scheduler/heldPositionRefreshScheduler.js and
+// scheduler/gmgnTrendingScheduler.js. refreshStaleHeldToken's own
+// direct-fetch fallback (below) had zero 429 awareness - and unlike
+// the scheduler's own centralized loop, this fallback is reached from
+// BOTH runCycle() (the BUY-tick) and runExitCycle() (the independent
+// exit-tick, exit_evaluation_interval_seconds - 5s for this account),
+// for every open position, every time heldPositionMarketStore doesn't
+// have a fresh entry. During an active ban, the centralized scheduler
+// correctly stops populating that store (its own cooldown) - which
+// means EVERY exit cycle then falls through to THIS fallback instead,
+// still with no backoff, for as long as the ban lasted. Confirmed via
+// direct user report: GMGN's own temporary ban is ~5 minutes: this
+// cooldown is set comfortably longer (6 minutes) so a retry only ever
+// happens after the real ban has already had time to expire, never
+// mid-ban.
+const RATE_LIMIT_COOLDOWN_MS = 6 * 60 * 1000;
+let heldPositionRateLimitCooldownUntilMs = 0;
+
 function msSinceTokenSeen(token){
     const lastSeen = token?.last_seen || token?.updated_at;
     if(!lastSeen) return Infinity;
@@ -239,6 +259,16 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
 
     }
 
+    // Circuit breaker (see RATE_LIMIT_COOLDOWN_MS's own header comment) -
+    // a still-active cooldown means the LAST real GMGN call from THIS
+    // fallback came back 429. Fails soft exactly like a real fetch
+    // failure below (returns `token` unchanged, exit checks keep using
+    // the last known price) but skips the network call entirely rather
+    // than retrying into a ban that has not had time to expire yet.
+    if(Date.now() < heldPositionRateLimitCooldownUntilMs){
+        return token;
+    }
+
     try{
 
         const [poolResult, klineResult] = await withOrigin("held-position-fallback-direct-fetch", () => Promise.all([
@@ -276,6 +306,16 @@ async function refreshStaleHeldToken(userId, position, token, ondemandService, {
 
     }
     catch(err){
+
+        // err.status is set from the real HTTP response (see
+        // authClient.js's GmgnAuthError) - a bare timeout carries no
+        // status, so this only trips on a REAL 429 from GMGN, never on
+        // an ordinary network hiccup. See RATE_LIMIT_COOLDOWN_MS's own
+        // header comment for the real-incident evidence behind this.
+        if(err.status === 429){
+            heldPositionRateLimitCooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+            console.warn(`[tradingBotEngine] GMGN returned 429 (${err.apiError || "rate limited"}) on held-position fallback fetch - pausing this fallback for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban) to stop re-triggering it`);
+        }
 
         tradingBotRepository.insertLog(userId, {
             logType: "WARNING",
@@ -494,37 +534,33 @@ async function manageOpenPositions(userId, tradeManagerForUser, botConfig, token
         // never evaluated against a price that stopped being real.
         const stale = msSinceTokenSeen(token) > HELD_POSITION_STALE_AFTER_MS;
 
-        // RATE_LIMIT_BANNED investigation, isolation test
-        // (config.HELD_POSITION_REFRESH_MODE): the realtime-refresh
-        // branch below always evaluates for a still-fresh token, but
-        // WHICH tokens qualify is now switchable rather than only ever
-        // "all of them" (FINAL PRODUCTION SPRINT P0's own fix) - default
-        // stays ALL_POSITIONS (this flag's mere existence changes
-        // nothing about production behavior); PROFIT_ONLY restores
-        // Arjuna a0a8759's own original scope
-        // (isInProfitProtectionTerritory - already defined above, kept
-        // live specifically so this flag has something real to switch
-        // to) purely to make an apples-to-apples A/B measurement
-        // possible (scripts/regressionCompare/), never as a silent
-        // default change.
-        const needsRealtimeRefresh = !stale && Boolean(token) && (
-            config.HELD_POSITION_REFRESH_MODE === "PROFIT_ONLY"
-                ? isInProfitProtectionTerritory(position, token, botConfig)
-                : true
-        );
+        // RATE_LIMIT_BANNED investigation - refresh COVERAGE reverted to
+        // Arjuna a0a8759's original scope byte-for-byte (bisect-confirmed
+        // root cause of the traffic regression): only a position already
+        // at/above its own take-profit floor is refreshed EVERY exit
+        // cycle regardless of staleness. Skipped when `stale` already
+        // covers it (avoids a redundant duplicate check/log) or when
+        // there is no token at all yet (nothing to compute an ROI
+        // against - the `stale` branch above already handles token==null
+        // via msSinceTokenSeen's own Infinity fallback). FINAL PRODUCTION
+        // SPRINT P0's symmetric (all-positions) coverage is intentionally
+        // NOT restored here - Stop Loss/TP execution reliability itself
+        // (executionGuard SELL bypass, wallet-contention catch) is
+        // untouched and stays in effect; only WHICH positions get this
+        // on-demand refresh reverts.
+        const needsProfitProtectionRefresh = !stale && token && isInProfitProtectionTerritory(position, token, botConfig);
 
         if(stale){
             token = await refreshStaleHeldToken(userId, position, token, ondemandService, { markContextStale: true });
         }
-        else if(needsRealtimeRefresh){
-            // FINAL PRODUCTION SPRINT P0 (see REALTIME_EXIT_REFRESH_TTL_SECONDS's
-            // own header comment) - EVERY still-trending open position is
-            // re-verified on demand, every exit cycle, upside and downside
-            // alike - Stop Loss/TP1 both trigger off THIS fresh price, never
-            // the 30s-old shared trending snapshot. markContextStale: false
-            // since the token's other fields (price_change_5m/volume_1h/
-            // trenches) are still genuinely fresh either way - only price/
-            // liquidity are being re-verified early here.
+        else if(needsProfitProtectionRefresh){
+            // markContextStale: false - the token is still in this
+            // cycle's shared trending snapshot (or was seen within the
+            // last HELD_POSITION_STALE_AFTER_MS), so its price_change_5m/
+            // volume_1h/trenches are still genuinely fresh; only price/
+            // liquidity are being re-verified early here, so
+            // dynamicExitService's momentum-hold check must keep treating
+            // that momentum evidence as real, never as stale.
             token = await refreshStaleHeldToken(userId, position, token, ondemandService, {
                 markContextStale: false,
                 ttlSeconds: REALTIME_EXIT_REFRESH_TTL_SECONDS
@@ -1057,10 +1093,18 @@ async function runCycle(userId, tokens, liveByAddress, ondemandService = gmgnOnd
 // independent, faster exit-only cadence (Exit Evaluation Interval
 // sprint). manageOpenPositions is exported purely for this file's own
 // regression test - no other module calls it directly.
+// Test-only reset - same convention as scheduler/heldPositionRefreshScheduler.js's
+// own _resetForTest()/scheduler/gmgnTrendingScheduler.js's own
+// _resetForTest().
+function _resetHeldPositionRateLimitCooldownForTest(){
+    heldPositionRateLimitCooldownUntilMs = 0;
+}
+
 module.exports = {
     runCycle, orderCandidates, buildLiveExecutionOptions,
     msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken,
     isInProfitProtectionTerritory,
     HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, HELD_POSITION_CHAIN,
-    manageOpenPositions, runExitCycle
+    manageOpenPositions, runExitCycle,
+    _resetHeldPositionRateLimitCooldownForTest
 };

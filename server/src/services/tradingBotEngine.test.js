@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 
-const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle } = require("./tradingBotEngine");
+const { orderCandidates, runCycle, msSinceTokenSeen, extractFreshPriceAndLiquidity, refreshStaleHeldToken, isInProfitProtectionTerritory, HELD_POSITION_STALE_AFTER_MS, REALTIME_EXIT_REFRESH_TTL_SECONDS, manageOpenPositions, runExitCycle, _resetHeldPositionRateLimitCooldownForTest } = require("./tradingBotEngine");
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const tradingBotCandidateSightingsRepository = require("../repositories/tradingBotCandidateSightingsRepository");
 const tradingBotMissedOpportunityRepository = require("../repositories/tradingBotMissedOpportunityRepository");
@@ -20,6 +20,7 @@ const gmgnTrenchesRepository = require("../repositories/gmgnTrenchesRepository")
 const researchEngineFactory = require("./researchEngineFactory");
 const strategyProfileTranslator = require("./strategyProfileTranslator");
 const heldPositionMarketStore = require("./heldPositionMarketStore");
+const { GmgnAuthError } = require("../collectors/gmgn/authClient");
 const db = require("../database/connection");
 
 // Production Stabilization V2 (Close Remaining BUY Blind Spots, Section
@@ -595,6 +596,65 @@ test("refreshStaleHeldToken fails soft: a GMGN error logs a WARNING and returns 
 
     }
     finally{
+        db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM email_verification_tokens WHERE user_id = ?").run(userId);
+        db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    }
+
+});
+
+// RATE_LIMIT_BANNED incident (2026-08-06): a REAL GMGN 429 (as opposed
+// to the generic error above) must trip a cooldown so the NEXT call
+// skips the network entirely - see RATE_LIMIT_COOLDOWN_MS's own header
+// comment in tradingBotEngine.js for the real-incident evidence (this
+// exact fallback, reached every exit_evaluation_interval_seconds for
+// every open position once heldPositionMarketStore goes stale during a
+// ban, was found still retrying with zero backoff).
+test("refreshStaleHeldToken trips a cooldown on a real GMGN 429 - the NEXT call for a DIFFERENT token skips the network too", async () => {
+
+    const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const bannedToken = { token_address: "TestBannedToken111", symbol: "BANNED1", price: 0.5, last_seen: "2020-01-01 00:00:00" };
+        const bannedPosition = { token_address: "TestBannedToken111", token_symbol: "BANNED1", id: 996 };
+
+        let callCount = 0;
+        const bannedOndemand = {
+            async getTokenPoolInfo(){
+                callCount++;
+                throw new GmgnAuthError("GET /v1/token/pool_info failed: HTTP 429 code=429 error=RATE_LIMIT_BANNED message=IP is temporarily banned", {
+                    status: 429, apiCode: 429, apiError: "RATE_LIMIT_BANNED"
+                });
+            },
+            async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+        };
+
+        const firstResult = await refreshStaleHeldToken(userId, bannedPosition, bannedToken, bannedOndemand);
+        assert.deepEqual(firstResult, bannedToken, "on a real 429, same fail-soft contract as any other error - original token unchanged");
+
+        const callCountAfterFirstCall = callCount;
+
+        // A DIFFERENT token, different position - the cooldown is
+        // global (the ban is IP-wide), so this must also be skipped
+        // without a single GMGN call.
+        const otherToken = { token_address: "TestOtherToken222", symbol: "OTHER2", price: 0.7, last_seen: "2020-01-01 00:00:00" };
+        const otherPosition = { token_address: "TestOtherToken222", token_symbol: "OTHER2", id: 995 };
+
+        const secondResult = await refreshStaleHeldToken(userId, otherPosition, otherToken, bannedOndemand);
+
+        assert.equal(callCount, callCountAfterFirstCall, "the cooldown must make ZERO GMGN calls, even for a token that never itself failed");
+        assert.deepEqual(secondResult, otherToken, "still fails soft - the unrelated token's own data is returned unchanged, never blocked");
+
+    }
+    finally{
+        _resetHeldPositionRateLimitCooldownForTest();
         db.prepare("DELETE FROM trading_bot_log WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM trading_bot_config WHERE user_id = ?").run(userId);
         db.prepare("DELETE FROM trading_bot_state WHERE user_id = ?").run(userId);

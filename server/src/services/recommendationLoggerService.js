@@ -10,6 +10,30 @@ const gmgnTokenRepository = require("../repositories/gmgnTokenRepository");
 const recommendationLogRepository = require("../repositories/recommendationLogRepository");
 const intelligenceEngine = require("./intelligenceEngine");
 
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS): CONFIRMED
+// by direct runtime measurement (process.hrtime.bigint/process.cpuUsage,
+// not inferred) - analyzeTokens() alone took 9734ms wall-clock on a
+// completely ordinary cycle (30,977 tokens, no incident in progress),
+// with insertMany() adding another 3582ms - ~14.5s of synchronous
+// main-thread blocking EVERY 5 minutes as a baseline, ballooning past
+// 146s/174s under worse conditions (the exact validation-scheduler
+// stalls that motivated this investigation). Same root cause, same
+// fix, as predictionValidationService.js's own evaluateAndRecordDecisions
+// (commits d4d99fa/230ab27): scoring/analyzing the FULL, unbounded
+// gmgn_tokens universe (96% of which goes untouched by any collector
+// for 7+ days per that investigation's own findings) every cycle is
+// pure waste - a token the collector hasn't refreshed can't produce a
+// meaningfully different intelligence-engine analysis than its last
+// one. Reusing the SAME generous (not the tight, execution-time
+// entryGateService.js) freshness window for the same "this is a
+// decision/research log, not a live BUY gate" reasoning. Unlike
+// evaluateAndRecordDecisions, this function has NO position-lifecycle
+// action of its own (verified: it only ever logs, never opens/closes
+// a trade_positions row) - so the "always include open positions"
+// safety union that fix needed does not apply here; there is nothing
+// this narrower scope could cause to lose safety coverage.
+const RECOMMENDATION_LOG_MAX_AGE_SECONDS = 6 * 60 * 60;
+
 // TEMPORARY (validation-scheduler stall investigation, 2026-08-06) -
 // wall-clock (process.hrtime.bigint, immune to system clock
 // adjustments) + CPU time (process.cpuUsage, isolates this call's own
@@ -28,7 +52,7 @@ function logRecommendations(){
     const _diagWallStart = process.hrtime.bigint();
     const _diagCpuStart = process.cpuUsage();
 
-    const tokens = gmgnTokenRepository.getAllTokens();
+    const tokens = gmgnTokenRepository.getFreshTokens({ maxAgeSeconds: RECOMMENDATION_LOG_MAX_AGE_SECONDS, minMarketCap: 0 });
 
     if(!tokens.length) return { logged: 0 };
 

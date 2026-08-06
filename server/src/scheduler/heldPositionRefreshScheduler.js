@@ -58,6 +58,32 @@ let lastTickAt = null;
 let lastTickTokenCount = null;
 let lastTickErrorCount = null;
 
+// RATE_LIMIT_BANNED incident (2026-08-06), real production evidence:
+// this scheduler had NO backoff at all - a 429 was only ever
+// console.warn'd, never slowed anything down, so the NEXT tick (5s
+// later, INTERVAL_MS) retried the exact same GMGN call regardless. A
+// live log capture during a real paper-trading run showed this ticking
+// straight through an active GMGN ban, every 5s, for multiple minutes -
+// each retry is itself a "repeated rate limit violation" in GMGN's own
+// terms, so this loop was self-renewing a ban that would otherwise have
+// expired on its own. The ban is IP-wide, not per-token (GMGN's own
+// error text: "IP is temporarily banned"), so this is a GLOBAL circuit
+// breaker across every token this scheduler covers, not a per-token
+// one - continuing to hit OTHER tokens at full speed while one is
+// banned would still hammer the same already-banned IP.
+//
+// 60s is a deliberate guess, not a measured GMGN policy value (GMGN
+// documents no official ban duration) - long enough that a real ban
+// gets real breathing room to expire before the next attempt, short
+// enough that a transient/short ban doesn't leave held positions
+// running on stale prices for unreasonably long. refreshStaleHeldToken's
+// own store-miss fallback (services/tradingBotEngine.js) means an exit
+// decision during this window still uses whatever price was last
+// fetched, never blocks - this only stops NEW GMGN calls, never masks
+// or fabricates data.
+const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+let cooldownUntilMs = 0;
+
 // Real union of every RUNNING user's own open-position token addresses -
 // paper and live alike (trading_bot_positions carries no paper/live
 // distinction of its own; a user's mode lives in trading_bot_config and
@@ -110,6 +136,18 @@ async function refreshOneToken(tokenAddress, ondemandService){
     catch(err){
 
         console.warn(`[held-position-refresh-scheduler] refresh failed for ${tokenAddress}: ${err.message}`);
+
+        // err.status is set from the real HTTP response (see authClient.js's
+        // GmgnAuthError - status/apiCode/apiError all come straight from
+        // GMGN's own response, never guessed); a bare timeout carries no
+        // status at all, so this only trips on a REAL 429 from GMGN
+        // (RATE_LIMIT_BANNED or RATE_LIMIT_EXCEEDED alike), never on an
+        // ordinary network hiccup.
+        if(err.status === 429){
+            cooldownUntilMs = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+            console.warn(`[held-position-refresh-scheduler] GMGN returned 429 (${err.apiError || "rate limited"}) - pausing ALL held-position refreshes for ${RATE_LIMIT_COOLDOWN_MS / 1000}s (IP-wide ban, not just this token) to stop re-triggering it`);
+        }
+
         return false;
 
     }
@@ -137,6 +175,19 @@ async function runOnce(ondemandService = gmgnOndemandService){
     }
 
     lastTickAt = Date.now();
+
+    // Circuit breaker (see cooldownUntilMs's own header comment) - a
+    // still-active cooldown means the LAST real GMGN call from this
+    // scheduler came back 429. Skip every token this tick without
+    // making a single GMGN call, rather than retrying into a ban that
+    // has not had time to expire yet. lockGuard is released immediately
+    // (not held for INTERVAL_MS) so the next real tick can try again
+    // the moment the cooldown clears, never later.
+    if(Date.now() < cooldownUntilMs){
+        console.warn(`[held-position-refresh-scheduler] Skipped: in GMGN 429 cooldown for ${Math.ceil((cooldownUntilMs - Date.now()) / 1000)}s more`);
+        lockGuard.release("FINISHED");
+        return { ok: true, tokenCount: 0, errorCount: 0, cooldown: true };
+    }
 
     try{
 
@@ -201,4 +252,10 @@ function getTickHealth(){
 
 }
 
-module.exports = { start, runOnce, INTERVAL_MS, getTickHealth, collectOpenPositionTokenAddresses };
+// Test-only reset - same convention as services/heldPositionMarketStore.js's
+// clear()/services/execution/usdToSolConverter.js's _resetPriceCacheForTest().
+function _resetForTest(){
+    cooldownUntilMs = 0;
+}
+
+module.exports = { start, runOnce, INTERVAL_MS, getTickHealth, collectOpenPositionTokenAddresses, _resetForTest };

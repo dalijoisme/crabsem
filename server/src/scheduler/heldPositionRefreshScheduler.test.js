@@ -14,6 +14,7 @@ const assert = require("node:assert/strict");
 
 const tradingBotRepository = require("../repositories/tradingBotRepository");
 const heldPositionMarketStore = require("../services/heldPositionMarketStore");
+const { GmgnAuthError } = require("../collectors/gmgn/authClient");
 
 const scheduler = require("./heldPositionRefreshScheduler");
 
@@ -25,6 +26,7 @@ function stub(obj, method, fn){
 
 test.afterEach(() => {
     heldPositionMarketStore.clear();
+    scheduler._resetForTest();
 });
 
 test("collectOpenPositionTokenAddresses unions every RUNNING user's open positions, de-duplicated", () => {
@@ -199,6 +201,95 @@ test("getTickHealth reflects a real, just-updated timestamp and token count afte
 
 });
 
+test("a real GMGN 429 trips a GLOBAL cooldown - the NEXT tick skips every token without calling GMGN at all", async () => {
+
+    const positionsByUser = { 6001: [{ token_address: "BANNED_TOKEN" }, { token_address: "OTHER_TOKEN" }] };
+
+    let callCount = 0;
+    const bannedOndemand = {
+        async getTokenPoolInfo(chain, address){
+            callCount++;
+            if(address === "BANNED_TOKEN"){
+                throw new GmgnAuthError("GET /v1/token/pool_info failed: HTTP 429 code=429 error=RATE_LIMIT_BANNED message=IP is temporarily banned", {
+                    status: 429, apiCode: 429, apiError: "RATE_LIMIT_BANNED"
+                });
+            }
+            return { data: { liquidity: "1000" } };
+        },
+        async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+    };
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => [6001]),
+        stub(tradingBotRepository, "findOpenPositions", (userId) => positionsByUser[userId] || [])
+    ];
+
+    try{
+
+        // First tick: BANNED_TOKEN's real 429 trips the cooldown - OTHER_TOKEN
+        // in this SAME tick still gets its own attempt (the trip only takes
+        // effect starting the NEXT tick), matching the fail-soft/never-abort
+        // contract every other token-level failure in this file already has.
+        const firstResult = await scheduler.runOnce(bannedOndemand);
+        assert.equal(firstResult.errorCount, 1, "only BANNED_TOKEN failed this tick");
+
+        const callCountAfterFirstTick = callCount;
+
+        // Second tick: cooldown is active - must skip BOTH tokens without
+        // calling GMGN even once, including OTHER_TOKEN which never itself
+        // failed (the ban is IP-wide, not per-token).
+        const secondResult = await scheduler.runOnce(bannedOndemand);
+
+        assert.equal(callCount, callCountAfterFirstTick, "the cooldown tick must make ZERO GMGN calls - not even for the token that never failed");
+        assert.equal(secondResult.cooldown, true);
+        assert.equal(secondResult.tokenCount, 0);
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});
+
+test("a plain network error (no real GMGN 429) never trips the cooldown - the next tick fetches normally", async () => {
+
+    const positionsByUser = { 6002: [{ token_address: "FLAKY_TOKEN" }] };
+
+    let callCount = 0;
+    const flakyOndemand = {
+        async getTokenPoolInfo(){
+            callCount++;
+            if(callCount === 1) throw new Error("ECONNRESET (simulated, not a real GMGN 429)");
+            return { data: { liquidity: "1000" } };
+        },
+        async getTokenKline(){ return { data: { list: [{ close: "1.0" }] } }; }
+    };
+
+    const restores = [
+        stub(tradingBotRepository, "findRunningUserIds", () => [6002]),
+        stub(tradingBotRepository, "findOpenPositions", (userId) => positionsByUser[userId] || [])
+    ];
+
+    try{
+
+        const firstResult = await scheduler.runOnce(flakyOndemand);
+        assert.equal(firstResult.errorCount, 1);
+
+        const secondResult = await scheduler.runOnce(flakyOndemand);
+
+        assert.equal(secondResult.cooldown, undefined, "a non-429 failure must never trip the GMGN-ban circuit breaker");
+        assert.equal(callCount, 2, "the second tick must have made a real attempt, not been skipped");
+
+    }
+    finally{
+        restores.forEach(restore => restore());
+    }
+
+});
+
+// NOTE: intentionally the LAST test in this file - it leaves a runOnce()
+// call permanently in flight (see its own comment), which would poison
+// lockGuard's state for any test defined after it in this same process.
 test("a second overlapping runOnce() is skipped while the first is still in flight - never runs concurrently with itself", async () => {
 
     const restores = [

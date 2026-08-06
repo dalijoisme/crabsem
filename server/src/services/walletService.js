@@ -261,11 +261,23 @@ async function getRealWalletBalance(userId){
     // buildLiveExecutionOptions() already uses for the identical reason.
     const { balanceService, gmgnClient } = require("./execution");
 
+    // TEMPORARY (wallet-balance-sync-scheduler stall investigation,
+    // 2026-08-06) - purely additive timing around the two real network
+    // calls this function makes, so a slow/stuck run can be attributed
+    // to the actual offending call (Solana RPC getBalance vs the GMGN
+    // quote probe) instead of guessed from the total. Zero behavior
+    // change: no return value, control flow, or error handling below is
+    // touched - only console.log calls are added. Remove once the
+    // investigation is closed, same convention as
+    // collectors/gmgn/requestDiagnostics.js's own header.
     let solLamports;
+    const _diagBalanceStartedAt = Date.now();
     try{
         solLamports = await balanceService.getNativeSolBalanceLamports(trading.public_key);
+        console.log(`[wallet-balance-diag] getNativeSolBalanceLamports OK in ${Date.now() - _diagBalanceStartedAt}ms`);
     }
     catch(e){
+        console.log(`[wallet-balance-diag] getNativeSolBalanceLamports FAILED after ${Date.now() - _diagBalanceStartedAt}ms: ${e.message}`);
         return { publicKey: trading.public_key, solLamports: null, solAmount: null, solUsdPrice: null, solUsd: null, unavailableReason: `RPC balance read failed: ${e.message}` };
     }
 
@@ -275,11 +287,16 @@ async function getRealWalletBalance(userId){
     // what happens next - a failed USD price probe only ever nulls out
     // the USD conversion, never the real balance itself.
     let solUsdPrice = null, solUsd = null;
+    const _diagQuoteStartedAt = Date.now();
     try{
         solUsdPrice = await getSolUsdPrice(gmgnClient, trading.public_key);
         solUsd = solAmount * solUsdPrice;
+        console.log(`[wallet-balance-diag] getSolUsdPrice OK in ${Date.now() - _diagQuoteStartedAt}ms`);
     }
-    catch(e){ /* price probe failed - solLamports/solAmount above are still real and returned */ }
+    catch(e){
+        console.log(`[wallet-balance-diag] getSolUsdPrice FAILED after ${Date.now() - _diagQuoteStartedAt}ms: ${e.message}`);
+        /* price probe failed - solLamports/solAmount above are still real and returned */
+    }
 
     return { publicKey: trading.public_key, solLamports, solAmount, solUsdPrice, solUsd, unavailableReason: null };
 

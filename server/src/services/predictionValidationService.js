@@ -611,37 +611,67 @@ async function updateOpenTradePositions(){
 // SPRINT 12 (Arjuna V5) - ROOT CAUSE FIX: only predictions still young
 // enough for at least one configured horizon to legitimately still be
 // pending are worth re-scanning - see findRecentLite's own header
-// comment for the real production incident this closes. maxHorizonSeconds
-// is real (config.timelineHorizons' own largest value), never a second,
-// independently-drifting number; 3600s slack covers this scheduler's
-// own worst-case single-cycle delay plus a fresh boundary that just
-// elapsed.
+// comment for the real production incident this closes. 3600s slack
+// covers this scheduler's own worst-case single-cycle delay plus a
+// fresh boundary that just elapsed - reused below (2026-08-06 follow-up)
+// as the width of each horizon's own narrow scan window, same
+// reasoning, now applied per-horizon instead of once globally.
 const TIMELINE_LOOKBACK_SLACK_SECONDS = 3600;
 
-function timelineLookbackCutoff(){
-    const maxHorizonSeconds = Math.max(...config.timelineHorizons.map(h => h.seconds));
-    return toSqliteTimestamp(new Date(Date.now() - (maxHorizonSeconds + TIMELINE_LOOKBACK_SLACK_SECONDS) * 1000));
-}
-
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06) - ROOT CAUSE FIX:
+// the original version scanned EVERY prediction in the full 25h
+// lookback window (findRecentLite) on EVERY ~60s cycle, then checked
+// all 6 horizons against each - real measurement against production
+// data found 491,317 rows in that window, and this phase alone took
+// 60-85 seconds per run (the dominant cost left in this scheduler
+// after the separate disk-bloat/retention fix). Almost all of that
+// work was pure waste: a prediction whose horizon boundary passed
+// hours ago either already got that horizon recorded on an earlier
+// cycle, or (rare) will still be caught here as long as no run gap
+// exceeds TIMELINE_LOOKBACK_SLACK_SECONDS - re-checking it AGAIN every
+// single cycle for its entire 25h lifetime added nothing.
+//
+// Restructured per-horizon instead of per-prediction: for each of the 6
+// configured horizons, only predictions whose OWN prediction_time falls
+// in a narrow, bounded window - "old enough that this horizon just
+// became due, recent enough it could plausibly still be unrecorded" -
+// are worth checking THIS cycle. TIMELINE_LOOKBACK_SLACK_SECONDS (1h,
+// already established elsewhere in this file for the same worst-case-
+// delay reasoning) is reused as that window's width, so a prediction
+// whose horizon boundary falls inside a ~1-hour band gets checked on
+// several consecutive cycles (the SAME safety margin the original
+// design had against a skipped/delayed run) before aging out - never
+// re-scanned for its whole 25h lifetime like before. Net effect: the
+// same 491K-row backlog becomes roughly (predictions/hour) x 6 narrow
+// window queries instead of ALL of it x 6, independent of prediction
+// history's own total size or age.
 async function recordTimelineSnapshots(){
 
-    const predictions = predictionHistoryRepository.findRecentLite(timelineLookbackCutoff());
-
     let recorded = 0;
+    let checked = 0;
+    const now = Date.now();
 
-    for(let i = 0; i < predictions.length; i++){
+    for(const h of config.timelineHorizons){
 
-        const p = predictions[i];
+        // Anything with prediction_time < windowEnd already has this
+        // horizon's boundary in the past (due); anything >= windowStart
+        // is recent enough this horizon could plausibly still be
+        // unrecorded for it (within the same slack every other lookback
+        // in this file already uses).
+        const windowEnd = toSqliteTimestamp(new Date(now - h.seconds * 1000));
+        const windowStart = toSqliteTimestamp(new Date(now - (h.seconds + TIMELINE_LOOKBACK_SLACK_SECONDS) * 1000));
 
-        const existingHorizons = predictionTimelineRepository.findExistingHorizons(p.id);
+        const predictions = predictionHistoryRepository.findRecentLiteInWindow(windowStart, windowEnd);
 
-        for(const h of config.timelineHorizons){
+        for(let i = 0; i < predictions.length; i++){
 
+            const p = predictions[i];
+            checked++;
+
+            const existingHorizons = predictionTimelineRepository.findExistingHorizons(p.id);
             if(existingHorizons.has(h.label)) continue;
 
             const targetTimestamp = toSqliteTimestamp(new Date(parseSqliteTimestamp(p.prediction_time) + h.seconds * 1000));
-
-            if(Date.now() < parseSqliteTimestamp(targetTimestamp)) continue;
 
             const point = tokenPriceHistoryRepository.findPriceAtOrAfter(p.token_address, targetTimestamp);
 
@@ -663,9 +693,9 @@ async function recordTimelineSnapshots(){
 
             if(inserted) recorded++;
 
-        }
+            if(checked % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
 
-        if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
+        }
 
     }
 

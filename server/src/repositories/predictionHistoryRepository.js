@@ -111,6 +111,27 @@ function findRecentLite(sinceTimestamp){
 
 }
 
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06): findRecentLite's
+// OWN "small, roughly-constant-size window" assumption above turned out
+// false at this account's real creation rate - the 25h window it scans
+// held 491,317 real rows at the time this was measured, and
+// recordTimelineSnapshots() (services/predictionValidationService.js)
+// re-scanned that ENTIRE set every single ~60s cycle even though only a
+// small fraction newly cross a horizon boundary each cycle - measured
+// at 60-85s per run, the dominant cost left in that scheduler after the
+// disk-bloat fix. This narrower, per-horizon window (see that file's
+// own recordTimelineSnapshots for how it's used) only returns
+// predictions whose prediction_time falls in a bounded slice - a
+// small fraction of the 25h backlog - while still using the same real
+// index (idx_prediction_history_prediction_time) as a genuine SEARCH,
+// not a SCAN (confirmed via EXPLAIN QUERY PLAN against the real
+// production database).
+function findRecentLiteInWindow(fromTimestamp, toTimestamp){
+
+    return db.prepare("SELECT id, token_address, prediction_time FROM prediction_history WHERE prediction_time >= ? AND prediction_time < ?").all(fromTimestamp, toTimestamp);
+
+}
+
 // The ONLY function permitted to UPDATE prediction_history - and it
 // only ever lists tracking columns. Any future change here must never
 // add an entry/immutable column to this SET list.
@@ -472,6 +493,8 @@ module.exports = {
     findOpen,
 
     findRecentLite,
+
+    findRecentLiteInWindow,
 
     updateTracking,
 

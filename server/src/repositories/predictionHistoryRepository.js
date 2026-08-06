@@ -223,7 +223,21 @@ function buildWhereClause({ status, recommendation, tradingOnly, from, to, exclu
 
     if(to){ clauses.push("prediction_time <= @to"); params.to = `${to} 23:59:59`; }
 
-    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+    // RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS):
+    // hasDateRange lets callers force idx_prediction_history_prediction_time
+    // ONLY when a from/to predicate actually exists in this WHERE clause -
+    // real production evidence (this table's own 7.6M+ rows) proved the
+    // planner instead picks idx_prediction_history_recommendation for a
+    // tradingOnly query, which means "every STRONG BUY/BUY row this table
+    // has EVER held" gets scanned before the date range narrows it down,
+    // not "just today"'s ~150 rows (2485ms measured for a 137-row result,
+    // vs 164ms once the date index is forced). Conditional, not
+    // unconditional, because some real callers
+    // (services/customObjectiveService.js's getStatistics({}), among
+    // others) genuinely have no date predicate at all - forcing a
+    // prediction_time-ordered scan on THOSE would be pure regression, not
+    // a fix.
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params, hasDateRange: Boolean(from || to) };
 
 }
 
@@ -349,22 +363,25 @@ function findRecentByTokens(tokenAddresses, limit = 2){
 
 function findAllStatuses({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
+    const { where, params, hasDateRange } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
 
-    return db.prepare(`SELECT * FROM prediction_history ${where}`).all(params);
+    const indexHint = hasDateRange ? " INDEXED BY idx_prediction_history_prediction_time" : "";
+
+    return db.prepare(`SELECT * FROM prediction_history${indexHint} ${where}`).all(params);
 
 }
 
 function findClosed({ recommendation, tradingOnly, from, to } = {}){
 
-    const { where, params } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
+    const { where, params, hasDateRange } = buildWhereClause({ status: undefined, recommendation, tradingOnly, from, to, excludeDecisionOnly: true });
 
     // findClosed always means "not OPEN" - folded in here rather than
     // via buildWhereClause's single-value `status` param, since this
     // is a negative/multi-value condition, not an equality filter.
     const clauses = [where.replace(/^WHERE /, "") || null, "status != 'OPEN'"].filter(Boolean);
+    const indexHint = hasDateRange ? " INDEXED BY idx_prediction_history_prediction_time" : "";
 
-    return db.prepare(`SELECT * FROM prediction_history WHERE ${clauses.join(" AND ")}`).all(params);
+    return db.prepare(`SELECT * FROM prediction_history${indexHint} WHERE ${clauses.join(" AND ")}`).all(params);
 
 }
 

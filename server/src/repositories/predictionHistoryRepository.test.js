@@ -79,3 +79,64 @@ test("pruneOlderThan NEVER deletes a decision row that opened a real trade_posit
     // but must never include id above (asserted directly).
 
 });
+
+// RATE_LIMIT_BANNED incident follow-up (2026-08-06, live VPS):
+// findClosed/findAllStatuses now force idx_prediction_history_prediction_time
+// via INDEXED BY whenever a from/to date range is present - real
+// production evidence (7.6M+ rows) proved the planner otherwise picks
+// idx_prediction_history_recommendation for a tradingOnly query,
+// scanning this table's ENTIRE history of STRONG BUY/BUY rows before a
+// date range narrows it to "today" (2485ms measured for a 137-row
+// result, vs 164ms once forced). SQLite's own INDEXED BY only changes
+// the query PLAN, never which rows match - the critical property under
+// test is that both functions still return exactly the right rows with
+// a date range applied, proving the query-shape change is real
+// (not silently falling back to a table scan or a wrong index) without
+// altering what's returned.
+test("findClosed with a date range only returns rows inside that range, using the forced prediction_time index", async () => {
+
+    const inRangeId = insertPrediction(`${PREFIX}D`, { initialStatus: "DECISION_ONLY" });
+    const outOfRangeId = insertPrediction(`${PREFIX}E`, { initialStatus: "DECISION_ONLY" });
+    // findClosed excludes both OPEN and DECISION_ONLY (see its own
+    // "excludeDecisionOnly" call) - a real "closed" status is required
+    // for either row to be eligible at all, regardless of date range.
+    db.prepare("UPDATE prediction_history SET status = 'TP_HIT' WHERE id IN (?, ?)").run(inRangeId, outOfRangeId);
+
+    try{
+
+        backdate(outOfRangeId, 48); // 2 days ago - outside a "today" range
+
+        const today = new Date().toISOString().slice(0, 10);
+        const closed = predictionHistoryRepository.findClosed({ from: today, to: today });
+
+        assert.ok(closed.some(r => r.id === inRangeId), "a prediction from today must be included");
+        assert.ok(!closed.some(r => r.id === outOfRangeId), "a prediction from 2 days ago must be excluded by the date range");
+
+    }
+    finally{
+        db.prepare("DELETE FROM prediction_history WHERE id IN (?, ?)").run(inRangeId, outOfRangeId);
+    }
+
+});
+
+test("findAllStatuses with a date range only returns rows inside that range, using the forced prediction_time index", async () => {
+
+    const inRangeId = insertPrediction(`${PREFIX}F`, { initialStatus: "OPEN" });
+    const outOfRangeId = insertPrediction(`${PREFIX}G`, { initialStatus: "OPEN" });
+
+    try{
+
+        backdate(outOfRangeId, 48);
+
+        const today = new Date().toISOString().slice(0, 10);
+        const rows = predictionHistoryRepository.findAllStatuses({ tradingOnly: false, from: today, to: today });
+
+        assert.ok(rows.some(r => r.id === inRangeId), "a prediction from today must be included");
+        assert.ok(!rows.some(r => r.id === outOfRangeId), "a prediction from 2 days ago must be excluded by the date range");
+
+    }
+    finally{
+        db.prepare("DELETE FROM prediction_history WHERE id IN (?, ?)").run(inRangeId, outOfRangeId);
+    }
+
+});

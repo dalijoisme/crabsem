@@ -825,7 +825,8 @@ test("finalizeClose persists the full self-learning dataset (participantScore/co
             rawFactsAtEntry: { holders: 140, liquidity: 45000, volume1h: 22000 },
             reasons: ["Net accumulation detected"],
             riskReasons: ["Very low liquidity"],
-            breakdown: { participant: { smartMoney: { score: 14, max: 20, hasData: true } }, market: { liquidity: { score: 10, max: 15 } } }
+            breakdown: { participant: { smartMoney: { score: 14, max: 20, hasData: true } }, market: { liquidity: { score: 10, max: 15 } } },
+            momentumPhase: "EARLY_MOMENTUM"
         });
 
         const positionId = tradingBotRepository.insertPosition(userId, {
@@ -851,6 +852,12 @@ test("finalizeClose persists the full self-learning dataset (participantScore/co
         assert.deepEqual(JSON.parse(trade.entry_reasons_json), ["Net accumulation detected"]);
         assert.deepEqual(JSON.parse(trade.risk_reasons_json), ["Very low liquidity"]);
         assert.ok(JSON.parse(trade.module_scores_json).participant.smartMoney);
+        // Production trading-quality audit, Phase 4 (2026-08-06, migration
+        // 073): momentumPhase must be projected onto its own column too,
+        // same "project once, read cheaply later" pattern as every other
+        // field above - proves a future correlation query never has to
+        // reach back into breakdown_json.
+        assert.equal(trade.momentum_phase_at_entry, "EARLY_MOMENTUM");
 
     }
     finally{

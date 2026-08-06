@@ -254,9 +254,26 @@ module.exports = {
         // shape forbidden here). See
         // intelligence/market/momentumPhase.js's classifyMomentumPhase
         // for the six real, data-driven phases these numbers apply to.
+        //
+        // Production trading-quality audit, Phase 4 (2026-08-06, live
+        // VPS): momentumPhase-at-entry (trading_bot_positions.
+        // breakdown_json) joined against COALESCE(realized_roi_pct,
+        // roi_pct) for every real closed trade with a captured phase
+        // (n=236) - only two phases have ever actually been observed in
+        // a real BUY under the currently-live AGGRESSIVE philosophy (the
+        // other four - NORMAL/DEAD_BOUNCE/EXIT_LIQUIDITY/POST_RUG_RECOVERY -
+        // have zero real trades between them, so left untouched; no
+        // evidence either way):
+        //   EARLY_MOMENTUM  (n=170): winRate=50.0%, avgROI=+12.21%
+        //   HEALTHY_MOMENTUM (n=66): winRate=19.7%, avgROI=-11.00%
+        // HEALTHY_MOMENTUM was rewarded almost as much as EARLY_MOMENTUM
+        // (+6 vs +10) despite performing far closer to (if not worse
+        // than) DEAD_BOUNCE's own already-penalized -8 in this account's
+        // real history - lowered to match. EARLY_MOMENTUM's own +10 is
+        // left unchanged - real evidence confirms it, doesn't contradict it.
         momentumModifier: {
             EARLY_MOMENTUM: 10,
-            HEALTHY_MOMENTUM: 6,
+            HEALTHY_MOMENTUM: -8,
             NORMAL: 0,
             DEAD_BOUNCE: -8,
             EXIT_LIQUIDITY: -12,

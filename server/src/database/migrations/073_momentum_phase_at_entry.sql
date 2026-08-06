@@ -1,0 +1,13 @@
+-- Production trading-quality audit, Phase 4 (2026-08-06, live VPS):
+-- momentumPhase was already captured at BUY time inside
+-- trading_bot_positions.breakdown_json (see researchEngineFactory.js's
+-- computeUnifiedEntryScore), but never projected onto trading_bot_trades -
+-- so a real momentumPhase-vs-realized-ROI correlation query always had to
+-- JOIN back to trading_bot_positions and json_extract() a JSON blob.
+-- Projected here the same way confidence/participantScore/marketHealth
+-- etc. already are (see buildTradeDatasetFields in
+-- repositories/tradingBotRepository.js), so future analysis reads a
+-- plain column. Additive, nullable - null for any pre-this-migration row
+-- and for any trade whose position never had a breakdown_json at all
+-- (benchmark/ab-test stubs).
+ALTER TABLE trading_bot_trades ADD COLUMN momentum_phase_at_entry TEXT;

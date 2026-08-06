@@ -447,7 +447,8 @@ const insertTradeStmt = db.prepare(`
         entry_reasons_json, risk_reasons_json, module_scores_json, mfe_pct, mae_pct, exit_classification,
         actual_sol_spent, actual_sol_received, realized_pnl_sol, realized_roi_pct,
         entry_tx_signature, exit_tx_signature, entry_block_time, exit_block_time,
-        roi_version, dataset_version, actual_exit_price, realtime_pulse_at_entry_json, confidence_adjustment_at_entry_json
+        roi_version, dataset_version, actual_exit_price, realtime_pulse_at_entry_json, confidence_adjustment_at_entry_json,
+        momentum_phase_at_entry
     ) VALUES (
         @userId, @tokenAddress, @tokenSymbol, @entryPrice, @exitPrice, @sizeUsd,
         @roiPct, @feeUsd, @slippagePct, @durationSeconds, @reason,
@@ -457,7 +458,8 @@ const insertTradeStmt = db.prepare(`
         @entryReasonsJson, @riskReasonsJson, @moduleScoresJson, @mfePct, @maePct, @exitClassification,
         @actualSolSpent, @actualSolReceived, @realizedPnlSol, @realizedRoiPct,
         @entryTxSignature, @exitTxSignature, @entryBlockTime, @exitBlockTime,
-        @roiVersion, @datasetVersion, @actualExitPrice, @realtimePulseAtEntryJson, @confidenceAdjustmentAtEntryJson
+        @roiVersion, @datasetVersion, @actualExitPrice, @realtimePulseAtEntryJson, @confidenceAdjustmentAtEntryJson,
+        @momentumPhaseAtEntry
     )
 `);
 
@@ -526,6 +528,10 @@ function buildTradeDatasetFields(position){
         // realtimePulseAtEntryJson is - the Daily Trading Review measures
         // each component's real effectiveness without re-deriving it.
         confidenceAdjustmentAtEntryJson: breakdown.breakdown?.realtimeConfidenceAdjustment ? JSON.stringify(breakdown.breakdown.realtimeConfidenceAdjustment) : null,
+        // Production trading-quality audit, Phase 4 (2026-08-06) - see
+        // migration 073's own header. Same "project once, read cheaply
+        // later" reasoning as every other field above.
+        momentumPhaseAtEntry: breakdown.momentumPhase ?? null,
         datasetVersion: DATASET_VERSION
     };
 }

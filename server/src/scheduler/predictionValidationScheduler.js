@@ -53,9 +53,25 @@ async function runOnce(){
         // failure here can NEVER break the real TP/SL/EXPIRED tracking
         // above - that cycle is load-bearing, this one is additive.
 
+        // TEMPORARY (validation-scheduler stall investigation, 2026-08-06) -
+        // wall-clock timing around this specific call. Two real
+        // event-loop-lag spikes (14134.8ms, 14998.8ms - see
+        // services/eventLoopLagDiagnostic.js) directly followed a
+        // "FINISHED - duration=Xms" line whose OWN X was ~10.2s larger
+        // than the sum of runCycle()'s own three measured phases -
+        // this line (learnService.recordDailySnapshot(), called AFTER
+        // runCycle() but BEFORE lockGuard.release(), with zero existing
+        // timing) is the one real candidate for that gap. Zero behavior
+        // change - no return value, control flow, or error handling is
+        // touched, only a console.log call is added. Remove once the
+        // investigation concludes.
+        const _diagLearnStart = process.hrtime.bigint();
+
         try{ learnService.recordDailySnapshot(); }
 
         catch(learnErr){ console.error(`[prediction-validation-scheduler] Learn System snapshot failed: ${learnErr.message}`, learnErr); }
+
+        console.log(`[prediction-validation-scheduler-diag] recordDailySnapshot: wallMs=${(Number(process.hrtime.bigint() - _diagLearnStart) / 1e6).toFixed(1)}`);
 
         lockGuard.release("FINISHED");
 

@@ -69,7 +69,14 @@ test("config.HELD_POSITION_REFRESH_MODE defaults to ALL_POSITIONS when unset - t
 
 });
 
-test("ALL_POSITIONS mode: a losing, still-fresh position IS realtime-refreshed - current production behavior", async () => {
+// Orphaned flag (production trading-quality audit, 2026-08-06 - see
+// config/env.js's own updated comment): manageOpenPositions() was
+// hardcoded to PROFIT_ONLY scope byte-for-byte once the RATE_LIMIT_BANNED
+// investigation concluded, and never actually branches on
+// config.HELD_POSITION_REFRESH_MODE - so setting it to ALL_POSITIONS has
+// no real effect any more. This proves that current (if surprising)
+// reality rather than the flag's now-stale original intent.
+test("ALL_POSITIONS mode: has NO effect - manageOpenPositions is hardcoded to PROFIT_ONLY scope regardless of this flag (orphaned)", async () => {
 
     const mods = freshEngineWithMode("ALL_POSITIONS");
 
@@ -98,7 +105,7 @@ test("ALL_POSITIONS mode: a losing, still-fresh position IS realtime-refreshed -
 
         await mods.engine.manageOpenPositions(1, fakeTradeManager, {}, tokensByAddress, ondemandService);
 
-        assert.equal(fetchCalls, 1, "ALL_POSITIONS mode must refresh a losing position on demand, same as production today");
+        assert.equal(fetchCalls, 0, "manageOpenPositions never reads config.HELD_POSITION_REFRESH_MODE - a losing position is NOT refreshed even with ALL_POSITIONS set, since real behavior is hardcoded to PROFIT_ONLY scope regardless");
 
     }
     finally{

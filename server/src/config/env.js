@@ -29,24 +29,29 @@ const config = Object.freeze({
 
     GMGN_HOST: process.env.GMGN_HOST || "https://openapi.gmgn.ai",
 
-    // RATE_LIMIT_BANNED investigation, isolation test: feature flag for
-    // held-position refresh SCOPE (services/tradingBotEngine.js's own
-    // manageOpenPositions) - lets the two real behaviors coexist,
-    // switchable, instead of one having to be deleted to test the other.
-    //   - "ALL_POSITIONS" (default - current production behavior,
-    //     unchanged by this flag's mere existence): every open position
-    //     gets a realtime refresh every exit cycle, upside and downside
-    //     alike - the Stop Loss reliability fix from FINAL PRODUCTION
-    //     SPRINT P0 (real incident: -20% SL not closing until -43.8%/-81%).
-    //   - "PROFIT_ONLY" (Arjuna a0a8759's own original behavior): only a
-    //     position already in profit-protection territory gets the
-    //     realtime refresh; a losing/breakeven position is refreshed only
-    //     via the slower `stale` (90s) path - fewer GMGN requests, but
-    //     the exact scope that FINAL PRODUCTION SPRINT P0 was written to
-    //     fix. See services/tradingBotEngine.js's own use of this flag.
-    // Default MUST stay ALL_POSITIONS - this flag exists to make an
-    // A/B comparison possible (scripts/regressionCompare/), never to
-    // silently change production behavior by its own addition.
+    // RATE_LIMIT_BANNED investigation, isolation test: feature flag
+    // originally built for held-position refresh SCOPE A/B comparison
+    // (scripts/regressionCompare/) between "ALL_POSITIONS" (every open
+    // position refreshed every exit cycle - the Stop Loss reliability
+    // fix from FINAL PRODUCTION SPRINT P0) and "PROFIT_ONLY" (Arjuna
+    // a0a8759's own original scope - only profit-protection-territory
+    // positions refreshed).
+    //
+    // STALE, ORPHANED as of the investigation's own conclusion
+    // (production trading-quality audit, 2026-08-06 found this while
+    // fixing an unrelated test): once PROFIT_ONLY was bisect-confirmed
+    // as the real root-cause fix, services/tradingBotEngine.js's
+    // manageOpenPositions() was hardcoded byte-for-byte to that scope
+    // (see its own header comment - "intentionally NOT restored") rather
+    // than left branching on this flag. This env var, and
+    // scripts/regressionCompare/'s flag-compare mode, currently have NO
+    // effect on real behavior - manageOpenPositions() never reads
+    // config.HELD_POSITION_REFRESH_MODE at all. Real production behavior
+    // is unconditionally PROFIT_ONLY regardless of this value. Left
+    // unwired deliberately here (re-wiring it risks reintroducing the
+    // real GMGN rate-limit incident this revert fixed) - flagged for the
+    // user's own call on whether to remove this dead flag/tooling or
+    // formally re-wire it.
     HELD_POSITION_REFRESH_MODE: (process.env.HELD_POSITION_REFRESH_MODE || "ALL_POSITIONS").trim().toUpperCase(),
 
     // Admin Panel (engine-quality sprint) - a single shared password,

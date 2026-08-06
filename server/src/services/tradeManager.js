@@ -55,6 +55,61 @@ const decisionEvidenceService = require("./decisionEvidenceService");
 
 const FEE_PCT_DEFAULT = 1;
 
+// Position sizing quality factor (production trading-quality audit,
+// 2026-08-06, live VPS). Scales the user's OWN chosen base size
+// (position_sizing_mode stays PERCENT or FIXED_USD, unchanged - this
+// is a multiplier on top of it, never a replacement) by a real,
+// backtested confidence/liquidity signal - previous sizing was blind
+// to signal quality entirely (flat % of available cash regardless of
+// confidence), which real trade history showed contributing directly
+// to negative total realized PnL despite a positive average ROI%:
+// losing trades in this account's own 266 real trades averaged 53%
+// LARGER size than winning trades (an artifact of pure cash-based
+// sizing, not a deliberate bet against quality).
+//
+// Backtested (exact historical replay against this account's own 243
+// real trades, official ROI = COALESCE(realized_roi_pct, roi_pct),
+// fee-inclusive PnL - see the audit report for the full methodology
+// and the walletQuality/EV-table derivation):
+//   baseline (blind, today's real sizing):          -7.06% pnl/dollar
+//   this confidence+liquidity factor alone:          +8.99% pnl/dollar
+//   same factor, restricted to confidence>=55 (the
+//   population this will actually see now that
+//   AGGRESSIVE's min_confidence is 55):             +25.29% pnl/dollar
+//
+// walletQuality was deliberately NOT folded into this factor - it's
+// already addressed upstream via AGGRESSIVE's own weights override
+// (see config/strategyProfileConfig.js), and the full per-token module
+// breakdown isn't available at this call site (only the lightweight
+// signalStub is, by design - see openPosition's own header on why this
+// file never re-scores a token) - double-counting the same signal at
+// both scoring and sizing was avoided rather than plumbed through for
+// a marginal, untested gain.
+//
+// EV-by-confidence-bucket is a real, measured lookup table (not a
+// smooth/invented curve) - explicitly NOT "multiply by confidence",
+// per the audit's own instruction: the 55-60 bucket measurably
+// outperformed even 60-70/70+ in this account's real history, so a
+// naive linear confidence multiplier would have UNDER-sized exactly
+// the trades that performed best. Bucket boundaries and liquidity
+// reference level are first-cut figures grounded in this account's own
+// real trade volume (n=243, most buckets 30-125 trades) - the same
+// "unvalidated starting point, re-check once more real volume
+// accumulates" convention already used throughout this codebase's own
+// threshold comments, not claimed to be a final-calibrated model.
+function confidenceLiquiditySizeFactor(confidence, liquidity){
+
+    let ev;
+    if(confidence == null || confidence < 55) ev = -0.5;
+    else if(confidence < 60) ev = 20.0;
+    else ev = 5.0;
+
+    const liqFactor = Math.min(1.3, Math.max(0.4, (Number(liquidity) || 0) / 15000));
+
+    return Math.max(0.3, (1 + ev / 22) * liqFactor);
+
+}
+
 // Arjuna V4 (Sprint 11), Part 1/2: position.actual_sol_spent (real,
 // captured once at BUY) covers the position's ORIGINAL full size - a
 // partial (TP1) or final close only ever accounts for a FRACTION of
@@ -180,9 +235,18 @@ function createTradeManager(repository, liveOptions = null){
         // capped by the same real max_position_size ceiling and floored by
         // the same real min_order_size check below - nothing about WHICH
         // token gets bought or WHEN changes, only how much.
+        // See confidenceLiquiditySizeFactor's own header for the real
+        // backtest this is grounded in. PERCENT mode only - the backtest
+        // was measured against this account's real trade history, which
+        // was ALL percent-of-cash sizing (this account's original, blind
+        // "flat % of available cash regardless of confidence" behavior).
+        // FIXED_USD is a Founder-set literal dollar amount by definition
+        // (see the sizing-mode comment below) - scaling a number the
+        // Founder explicitly fixed would silently break that contract,
+        // and no backtest evidence exists either way for that population.
         const rawSizeUsd = config.position_sizing_mode === "FIXED_USD"
             ? config.fixed_position_size_usd
-            : availableCash * (config.position_size_pct / 100);
+            : availableCash * (config.position_size_pct / 100) * confidenceLiquiditySizeFactor(live.confidence, token.liquidity);
 
         const sizeUsd = Math.min(config.max_position_size, rawSizeUsd);
 
@@ -842,12 +906,30 @@ function createTradeManager(repository, liveOptions = null){
         // the final spec), so the productionEngineResolver.analyzeToken
         // re-score this used to require is gone too, a real efficiency
         // win. position carries this cycle's own freshly-computed
-        // mfePctNow/maePctNow (previously stale by one cycle - Step 5's
-        // Time Exit check needs the REAL current peak, not last cycle's).
+        // mfePctNow (previously stale by one cycle - the
+        // MOMENTUM_WEAKENING_EARLY_EXIT check needs the REAL current peak,
+        // not last cycle's).
+        //
+        // mae_pct is deliberately left as the position's own ORIGINAL,
+        // pre-this-cycle value here (production trading-quality audit,
+        // 2026-08-06 - real bug found via runExitCycle's own end-to-end
+        // test, not caught by dynamicExitService.test.js's hand-built
+        // position fixtures which always passed a genuinely distinct
+        // prior mae_pct): MAE_ACCELERATED_EXIT's own contract is "a real,
+        // ALREADY-ESTABLISHED drawdown that gets WORSE this exact cycle"
+        // (see that check's own header) - it needs the PRIOR low to
+        // compare THIS cycle's roiPct against. Passing maePctNow instead
+        // (this cycle's own freshly-updated low) made the check compare
+        // the current low against itself, which is always true - firing
+        // MAE_ACCELERATED_EXIT_NO_SIGNAL on literally a brand-new
+        // position's very first losing tick, before any real acceleration
+        // ever happened. maePctNow is still written to the DB above
+        // (repository.updatePositionTracking) exactly as before - only
+        // the copy handed to evaluateDynamicExit changes.
         const trenchesEntry = gmgnTrenchesRepository.findByTokenAddress(token.token_address);
 
         const result = dynamicExitService.evaluateDynamicExit({
-            position: { ...position, last_volume_1h: volume1hNow, mfe_pct: mfePctNow, mae_pct: maePctNow },
+            position: { ...position, last_volume_1h: volume1hNow, mfe_pct: mfePctNow },
             token, trenchesEntry
         });
 
@@ -874,4 +956,4 @@ function createTradeManager(repository, liveOptions = null){
 // per cycle - the exact same factory every other caller
 // (benchmarkRunner.js, benchmarkRunService.js) already used.
 
-module.exports = { createTradeManager };
+module.exports = { createTradeManager, confidenceLiquiditySizeFactor };

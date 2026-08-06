@@ -87,7 +87,11 @@ test("switching strategy_profile applies the full real bundle", () => {
     const result = tradingBotService.updateConfig(userId, { strategy_profile: "AGGRESSIVE" });
     assert.equal(result.ok, true);
     assert.equal(result.config.strategy_profile, "AGGRESSIVE");
-    assert.equal(result.config.min_confidence, 45);
+    // 55, not the original 45 - production trading-quality audit,
+    // 2026-08-06 (commit f8d43e8): real backtest against this account's
+    // own 243 real trades proved confidence<55 was net-negative PnL. See
+    // config/strategyProfileConfig.js's AGGRESSIVE.min_confidence comment.
+    assert.equal(result.config.min_confidence, 55);
     assert.equal(result.config.opportunity_priority_enabled, 1);
     assert.equal(result.config.emi_enabled, 1);
 });
@@ -171,7 +175,7 @@ test("updateTradingConfiguration stamps trading_config_customized_at, and a late
         const switched = tradingBotService.updateConfig(tcUserId, { strategy_profile: "AGGRESSIVE" });
         assert.equal(switched.ok, true);
         assert.equal(switched.config.strategy_profile, "AGGRESSIVE");
-        assert.equal(switched.config.min_confidence, 45, "the real AGGRESSIVE philosophy bundle must still apply to every profile-owned field");
+        assert.equal(switched.config.min_confidence, 55, "the real AGGRESSIVE philosophy bundle must still apply to every profile-owned field"); // 55 since commit f8d43e8, see the other test's comment above
         assert.equal(switched.config.position_size_pct, 42, "customized position_size_pct must survive the profile switch");
         assert.equal(switched.config.max_open_positions, 2, "customized max_open_positions must survive the profile switch");
 

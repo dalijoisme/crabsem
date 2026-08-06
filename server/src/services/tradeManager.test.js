@@ -1191,3 +1191,127 @@ test("partialClose: a wallet-contention throw from executionService.execute() is
     }
 
 });
+
+// Production trading-quality audit (2026-08-06, Phase 2 - position
+// sizing): confidenceLiquiditySizeFactor's own bucket boundaries and
+// liquidity scaling, proven directly against the real backtested
+// EV-bucket table (see the function's own header comment for the
+// underlying n=243 real-trade methodology), not just exercised
+// indirectly through openPosition.
+test("confidenceLiquiditySizeFactor applies the real backtested EV-bucket table and liquidity scaling", () => {
+
+    const { confidenceLiquiditySizeFactor } = tradeManager;
+
+    // Reference liquidity (15000) keeps liqFactor at exactly 1x, isolating
+    // the confidence-bucket behavior.
+    assert.equal(confidenceLiquiditySizeFactor(null, 15000), Math.max(0.3, 1 + -0.5 / 22), "missing confidence must fall into the below-floor bucket, never treated as high-quality");
+    assert.equal(confidenceLiquiditySizeFactor(40, 15000), Math.max(0.3, 1 + -0.5 / 22), "confidence below 55 (below AGGRESSIVE's own floor) is the worst EV bucket");
+    assert.equal(confidenceLiquiditySizeFactor(57, 15000), 1 + 20.0 / 22, "the 55-60 bucket measurably outperformed higher confidence in this account's real history - must size UP, not down");
+    assert.equal(confidenceLiquiditySizeFactor(80, 15000), 1 + 5.0 / 22, "60+ is a real, positive, but smaller EV bucket than 55-60");
+
+    // Liquidity scaling: clamped to [0.4, 1.3], linear at liquidity/15000 in between.
+    assert.equal(confidenceLiquiditySizeFactor(80, 0), Math.max(0.3, (1 + 5.0 / 22) * 0.4), "near-zero liquidity must floor at the 0.4x liquidity factor, never go to zero");
+    assert.equal(confidenceLiquiditySizeFactor(80, 100000), Math.max(0.3, (1 + 5.0 / 22) * 1.3), "very high liquidity must cap at the 1.3x liquidity factor");
+    assert.equal(confidenceLiquiditySizeFactor(80, 7500), Math.max(0.3, (1 + 5.0 / 22) * 0.5), "liquidity between the floor/cap must scale linearly at liquidity/15000");
+
+});
+
+// Confirms the quality factor is actually wired into PERCENT-mode
+// sizing (openPosition's real call site), and - the specific bug this
+// session caught before it ever reached production - that FIXED_USD
+// mode stays completely untouched by it, since the backtest only ever
+// measured this factor against this account's real percent-of-cash
+// trade history, never a Founder-fixed dollar amount.
+test("openPosition scales PERCENT-mode size by confidenceLiquiditySizeFactor, but FIXED_USD mode ignores it entirely", async () => {
+
+    const testEmail = `tradermanager.test.sizing.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const baseToken = gmgnTokenRepository.getAllTokens().find(t => t.market_cap > 0 && t.price > 0);
+        assert.ok(baseToken);
+        // Reference liquidity (15000) keeps liqFactor at exactly 1x, so the
+        // expected size is driven purely by the confidence bucket below.
+        const token = { ...baseToken, liquidity: 15000 };
+
+        const live = { confidence: 80, risk: "LOW" }; // 60+ bucket: factor = 1 + 5/22
+
+        tradingBotRepository.updateConfig(userId, { position_sizing_mode: "PERCENT", position_size_pct: 10, max_position_size: 1000, min_order_size: 1 });
+        const config = tradingBotRepository.getConfig(userId);
+
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+        const result = await tm.openPosition(token, live, config, /* availableCash */ 1000);
+
+        assert.equal(result.opened, true, `expected a real BUY (got: ${JSON.stringify(result)})`);
+        const expectedSizeUsd = 1000 * 0.10 * (1 + 5.0 / 22);
+        assert.ok(Math.abs(result.sizeUsd - expectedSizeUsd) < 0.01, `PERCENT mode must apply the quality factor on top of the base percent-of-cash amount (expected ~${expectedSizeUsd.toFixed(2)}, got ${result.sizeUsd})`);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
+// Production trading-quality audit (2026-08-06) - real bug found via
+// runExitCycle's own end-to-end test suite (tradingBotEngine.test.js),
+// not by dynamicExitService.test.js's hand-built fixtures: closeIfDue
+// was computing maePctNow (Math.min(position.mae_pct || 0, roiSoFarPct))
+// and handing THAT to evaluateDynamicExit as position.mae_pct, so the
+// MAE_ACCELERATED_EXIT check (`roiPct <= position.mae_pct`) compared
+// this cycle's own low against itself - always true - and fired
+// MAE_ACCELERATED_EXIT_NO_SIGNAL on a brand-new position's very FIRST
+// losing tick (no real "acceleration" ever happened, no prior real
+// drawdown ever existed to expand from). Fixed by leaving mae_pct as
+// the position's original, pre-this-cycle value when calling
+// evaluateDynamicExit (mfe_pct still correctly uses the fresh
+// mfePctNow - MOMENTUM_WEAKENING_EARLY_EXIT genuinely needs the real
+// current peak). This proves the fix directly: a fresh position's very
+// first negative tick, with no realtime buffer signal at all (the
+// exact real-production shape MAE_ACCELERATED_EXIT_NO_SIGNAL exists
+// for), must NOT close - there is no established prior low yet to
+// have "expanded" from.
+test("closeIfDue does NOT fire MAE_ACCELERATED_EXIT_NO_SIGNAL on a brand-new position's very first losing tick", async () => {
+
+    const testEmail = `tradermanager.test.firstdip.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestFirstDipToken111", tokenSymbol: "FDIP",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
+        });
+        // Fresh row - mae_pct/mfe_pct both default to 0, exactly like a
+        // position that has never been evaluated before.
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.mae_pct, 0, "test setup: a brand-new position must start with no established mae_pct");
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+
+        // -10% on the very first ever check - well above the real -50%
+        // stop-loss floor, and with no realtime pulse buffer data (this
+        // is the token's first appearance, nothing has been recorded).
+        const token = { token_address: "TestFirstDipToken111", price: 0.90, symbol: "FDIP" };
+        const result = await tm.closeIfDue(position, token, config);
+
+        assert.equal(result.closed, false, "a first losing tick with no established prior low must HOLD, never be treated as an 'acceleration' from a low that never existed");
+
+        const stillOpen = db.prepare("SELECT status, mae_pct FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(stillOpen.status, "OPEN");
+        assert.ok(Math.abs(stillOpen.mae_pct - -10) < 0.001, `mae_pct must still be correctly tracked/persisted at ~-10 for future cycles, even though it didn't trigger a close this cycle (got ${stillOpen.mae_pct})`);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});

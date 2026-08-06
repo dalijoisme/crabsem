@@ -15,9 +15,26 @@ const assert = require("node:assert/strict");
 
 const predictionHistoryRepository = require("./predictionHistoryRepository");
 const tradePositionRepository = require("./tradePositionRepository");
+const predictionTimelineRepository = require("./predictionTimelineRepository");
 const db = require("../database/connection");
 
 const PREFIX = "PREDHISTREPO_TEST_";
+
+// Production trading-quality audit (2026-08-06): predictionHistoryRepository.
+// pruneOlderThan's own header comment is explicit - "Caller MUST prune
+// predictionTimelineRepository's children for the same maxAgeHours FIRST -
+// this repository never reaches across tables itself." prediction_timeline.
+// prediction_id is a SECOND real FK into this table (alongside
+// trade_positions.opened_by_prediction_id), and this real (long-running,
+// file-backed) dev DB has real historical rows with timeline children
+// older than any short test threshold - calling pruneOlderThan directly
+// without this precursor throws a real SQLITE_CONSTRAINT_FOREIGNKEY the
+// moment the batch reaches one of them. Mirrors retentionService.js's own
+// required ordering exactly.
+async function pruneOlderThanRespectingTimelineFk(maxAgeHours){
+    await predictionTimelineRepository.pruneForPredictionsOlderThan(maxAgeHours);
+    return predictionHistoryRepository.pruneOlderThan(maxAgeHours);
+}
 
 function insertPrediction(tokenAddress, overrides = {}){
     return predictionHistoryRepository.insertPrediction({
@@ -40,10 +57,15 @@ test("pruneOlderThan keeps rows still within the real age bound", async () => {
 
     const id = insertPrediction(`${PREFIX}A`);
 
-    const deleted = await predictionHistoryRepository.pruneOlderThan(1000);
+    try{
+        const deleted = await pruneOlderThanRespectingTimelineFk(1000);
 
-    assert.equal(deleted, 0);
-    assert.ok(predictionHistoryRepository.findById(id));
+        assert.equal(deleted, 0);
+        assert.ok(predictionHistoryRepository.findById(id));
+    }
+    finally{
+        db.prepare("DELETE FROM prediction_history WHERE id = ?").run(id);
+    }
 
 });
 
@@ -52,7 +74,7 @@ test("pruneOlderThan deletes a pure decision-log row (DECISION_ONLY) once it is 
     const id = insertPrediction(`${PREFIX}B`);
     backdate(id, 400); // older than the 14-day (336h) production retention window
 
-    const deleted = await predictionHistoryRepository.pruneOlderThan(336);
+    const deleted = await pruneOlderThanRespectingTimelineFk(336);
 
     assert.ok(deleted >= 1);
     assert.equal(predictionHistoryRepository.findById(id), undefined);
@@ -61,22 +83,37 @@ test("pruneOlderThan deletes a pure decision-log row (DECISION_ONLY) once it is 
 
 test("pruneOlderThan NEVER deletes a decision row that opened a real trade_positions row, no matter how old", async () => {
 
+    // Production trading-quality audit (2026-08-06): this test's own
+    // tokenAddress/prediction row were never cleaned up, so a second run
+    // against the same (persistent, file-backed) dev DB always failed -
+    // either the trade_positions unique-token-OPEN constraint on
+    // openPosition below, or (once C survived pruning as designed) a
+    // real 100000h-old row inflating a LATER test's own deleted-count
+    // expectation. try/finally below makes this test idempotent/rerunnable.
     const id = insertPrediction(`${PREFIX}C`, { initialStatus: "OPEN" });
     backdate(id, 100000); // absurdly old - the real point is this must still survive
 
-    const opened = tradePositionRepository.openPosition({
-        tokenAddress: `${PREFIX}C`, tokenSymbol: "TST", openedByPredictionId: id,
-        entryPrice: 1, entryMarketCap: 1000, entryLiquidity: 100, entryVolume: 100, entryHolders: 10,
-        targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
-        predictionHorizonSeconds: 86400
-    });
-    assert.ok(opened.opened !== false, "test setup: trade_positions row must open cleanly");
+    try{
 
-    const deleted = await predictionHistoryRepository.pruneOlderThan(1);
+        const opened = tradePositionRepository.openPosition({
+            tokenAddress: `${PREFIX}C`, tokenSymbol: "TST", openedByPredictionId: id,
+            entryPrice: 1, entryMarketCap: 1000, entryLiquidity: 100, entryVolume: 100, entryHolders: 10,
+            targetPrice: 2, targetMarketCap: 2000, stopLossPrice: 0.5, stopLossMarketCap: 500,
+            predictionHorizonSeconds: 86400
+        });
+        assert.ok(opened.opened !== false, "test setup: trade_positions row must open cleanly");
 
-    assert.ok(predictionHistoryRepository.findById(id), "a real trade's own decision-log row must survive pruning regardless of age");
-    // deleted may be >0 from other unrelated old rows in this same run,
-    // but must never include id above (asserted directly).
+        const deleted = await pruneOlderThanRespectingTimelineFk(1);
+
+        assert.ok(predictionHistoryRepository.findById(id), "a real trade's own decision-log row must survive pruning regardless of age");
+        // deleted may be >0 from other unrelated old rows in this same run,
+        // but must never include id above (asserted directly).
+
+    }
+    finally{
+        db.prepare("DELETE FROM trade_positions WHERE token_address = ?").run(`${PREFIX}C`);
+        db.prepare("DELETE FROM prediction_history WHERE id = ?").run(id);
+    }
 
 });
 

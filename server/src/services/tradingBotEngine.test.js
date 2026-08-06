@@ -1014,7 +1014,16 @@ test("runExitCycle refreshes an in-profit position's price on demand even while 
 // one does - Stop Loss is evaluated against the SAME up-to-30s-stale
 // shared-snapshot price otherwise, and a fast-dumping token can blow
 // through -20% long before the next 30s trending tick ever notices.
-test("runExitCycle refreshes a still-fresh, still-LOSING position's price on demand too - not only positions already in profit", async () => {
+// RATE_LIMIT_BANNED investigation (see manageOpenPositions's own header
+// comment in tradingBotEngine.js): the symmetric all-positions refresh
+// this test originally proved was bisect-confirmed as the root cause of
+// a real production traffic incident and was deliberately reverted back
+// to Arjuna a0a8759's original scope - only a position already at/above
+// its own take-profit floor gets refreshed every exit cycle now; a
+// losing/below-floor position does NOT, on purpose. This test now
+// proves that reverted (current, intentional) behavior instead of the
+// since-undone one.
+test("runExitCycle does NOT trigger an on-demand refresh for a still-fresh, still-LOSING position - reverted scope, profit-protection-only", async () => {
 
     const testEmail = `tradingbotengine.test.belowfloor.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -1035,9 +1044,10 @@ test("runExitCycle refreshes a still-fresh, still-LOSING position's price on dem
             targetPrice: 999, targetMarketCap: null, stopLossPrice: 0.5, stopLossMarketCap: null
         });
 
-        // Shared snapshot still shows -10% (above the -20% Stop Loss
-        // floor) - but the REAL, on-demand price has since crashed to
-        // -30%, past Stop Loss. Only a genuine refresh can catch this.
+        // Shared snapshot shows -10% (above the -50% Stop Loss floor) -
+        // still fresh (nowStamp) and not in profit-protection territory,
+        // so the reverted scope means this position gets NO on-demand
+        // refresh this cycle, and stays evaluated against this -10% price.
         gmgnTokenRepository.getTokenByAddress = () => ({
             token_address: "TestBelowFloorToken111", symbol: "BELOWFLOOR", price: 0.90,
             price_change_5m: -2, volume_1h: 1000,
@@ -1047,16 +1057,15 @@ test("runExitCycle refreshes a still-fresh, still-LOSING position's price on dem
         let refreshCalls = 0;
         const spyOndemand = {
             async getTokenPoolInfo(){ refreshCalls++; return { data: { liquidity: "500" } }; },
-            async getTokenKline(){ return { data: { list: [{ close: "0.70" }] } }; } // real crash past -20% SL
+            async getTokenKline(){ return { data: { list: [{ close: "0.70" }] } }; }
         };
 
         await runExitCycle(userId, spyOndemand);
 
-        assert.equal(refreshCalls, 1, "a losing/below-floor position must be refreshed on demand every exit cycle too - symmetric with the profit-side fix");
+        assert.equal(refreshCalls, 0, "a losing/below-floor position must NOT be refreshed on demand every exit cycle - reverted per the RATE_LIMIT_BANNED incident, profit-protection-territory only");
 
         const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND token_address = 'TestBelowFloorToken111'").get(userId);
-        assert.ok(trade, "Stop Loss must have actually fired against the freshly-refreshed crashed price, not the stale -10% snapshot");
-        assert.equal(trade.reason, "STOP_LOSS");
+        assert.equal(trade, undefined, "Stop Loss must NOT fire against a price that was never actually refreshed - the -10% snapshot price never crossed the -50% floor");
 
     }
     finally{
@@ -1129,11 +1138,15 @@ test("runCycle refreshes a held position's price on-demand when its token has fa
 
 });
 
-// FINAL PRODUCTION SPRINT P0: a FRESH, still-trending token now DOES
-// still get an on-demand realtime refresh every cycle (the fix for the
-// asymmetric-refresh root cause above) - the refreshed price must win
-// over the shared snapshot's own, since that's the entire point.
-test("runCycle refreshes a still-fresh position's price on demand every cycle - the realtime-exit fix applies here too, not only to the independent exit scheduler", async () => {
+// RATE_LIMIT_BANNED investigation (see manageOpenPositions's own header
+// comment in tradingBotEngine.js): FINAL PRODUCTION SPRINT P0's
+// symmetric every-cycle refresh (below) was bisect-confirmed as the
+// root cause of a real production traffic incident and was deliberately
+// reverted back to Arjuna a0a8759's original scope - a still-fresh
+// position sitting below its own take-profit floor (here: +5%, below
+// the default fixed_tp_pct floor) no longer gets refreshed every cycle.
+// This test now proves that reverted (current, intentional) behavior.
+test("runCycle does NOT trigger an on-demand refresh for a still-fresh position below its take-profit floor - reverted scope, profit-protection-only", async () => {
 
     const testEmail = `tradingbotengine.test.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
     const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
@@ -1174,9 +1187,9 @@ test("runCycle refreshes a still-fresh position's price on demand every cycle - 
 
         await runCycle(userId, cycleTokens, cycleLiveByAddress, spyOndemand);
 
-        assert.equal(refreshCalls, 1, "every open position's own on-demand refresh must fire every cycle now, not only once already stale or in profit");
+        assert.equal(refreshCalls, 0, "a still-fresh position below its own take-profit floor must NOT be refreshed on demand every cycle - reverted per the RATE_LIMIT_BANNED incident, profit-protection-territory only");
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
-        assert.equal(position.current_price, 1.07, "the freshly-refreshed price must win over the shared snapshot's own (potentially up to 30s stale) 1.05");
+        assert.equal(position.current_price, 1.05, "with no refresh triggered, current_price must come from the shared snapshot's own price, never the on-demand spy's");
 
     }
     finally{
@@ -1245,16 +1258,22 @@ test("runExitCycle closes a real STOP_LOSS position via gmgnTokenRepository.getT
         const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
         assert.equal(position.status, "CLOSED");
 
-        // Either real reason proves the same thing here (a genuine
+        // Any of these real reasons proves the same thing here (a genuine
         // dynamicExitService close reached through the per-address
         // token lookup, unchanged from runCycle()'s own wiring) -
         // REVERSAL fires first in evaluateDynamicExit whenever the real,
         // un-stubbed engine itself reads this sparse, crashed (-50%)
-        // fake token as AVOID; STOP_LOSS is the fallback otherwise. This
-        // test isn't about which one wins, only that manageOpenPositions
-        // reached a real close via gmgnTokenRepository.getTokenByAddress.
+        // fake token as AVOID; STOP_LOSS is a fallback otherwise.
+        // MAE_ACCELERATED_EXIT_NO_SIGNAL (production trading-quality
+        // audit, 2026-08-06, commit d34120f) is now the real, INTENDED
+        // fallback ahead of both when a genuine new low is hit with no
+        // realtime pulse buffer data at all (this bare test token, by
+        // construction, has none) - the exact STOP_LOSS-overshoot fix
+        // this session shipped. This test isn't about which one wins,
+        // only that manageOpenPositions reached a real close via
+        // gmgnTokenRepository.getTokenByAddress.
         const trade = db.prepare("SELECT reason FROM trading_bot_trades WHERE position_id = ?").get(positionId);
-        assert.ok(["STOP_LOSS", "REVERSAL"].includes(trade.reason), `expected a real close reason, got ${trade.reason}`);
+        assert.ok(["STOP_LOSS", "REVERSAL", "MAE_ACCELERATED_EXIT_NO_SIGNAL"].includes(trade.reason), `expected a real close reason, got ${trade.reason}`);
 
     }
     finally{

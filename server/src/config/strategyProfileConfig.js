@@ -123,17 +123,35 @@ const PROFILES = {
 
     AGGRESSIVE: {
         // Production trading-quality audit (2026-08-06, live VPS):
-        // raised from 45 - real backtest against this account's own 243
-        // real trades (official ROI = COALESCE(realized_roi_pct, roi_pct),
-        // fee-inclusive PnL) proved confidence<50 was 39.5% of all real
-        // volume at avgROI=-7.43%/winRate=31.7%, while every confidence
-        // floor from 55 up produced positive total PnL - floor=45 (today's
-        // value, i.e. no floor beyond what already applies) backtested to
-        // -41.48 total; floor=55 backtested to +6.40; floor=58 to +13.23
-        // (smaller n=52, held out as a less robust, single-point choice).
-        // 55 sits at the start of the broad, non-overfit positive zone
-        // rather than the small-sample tail peak.
-        min_confidence: 55,
+        // raised from 45 to 55 - real backtest against this account's own
+        // 243 real trades (official ROI = COALESCE(realized_roi_pct,
+        // roi_pct), fee-inclusive PnL) proved confidence<50 was 39.5% of
+        // all real volume at avgROI=-7.43%/winRate=31.7%, while every
+        // confidence floor from 55 up produced positive total PnL in that
+        // backtest - floor=45 (the prior value) backtested to -41.48
+        // total; floor=55 backtested to +6.40; floor=58 to +13.23 (smaller
+        // n=52, held out as a less robust, single-point choice).
+        //
+        // Lowered back to 50 (2026-08-07, paper-trading validation run,
+        // live VPS): the backtest's +6.40 prediction at floor=55 did NOT
+        // hold live - the 44 real SIMULATION trades executed under it
+        // (all clustered 55-59, since that's all the floor let through)
+        // ran avgROI=-3.52%, and confidence=55 itself (the least-selective
+        // executed band) was the BEST performer of that group
+        // (avgROI=+5.18%, n=11) - confidence in the high-50s was not
+        // discriminating quality the way the backtest implied. Worse,
+        // floor=55 nearly halted real trade volume outright: 256/286
+        // (89.5%) of all BUY-tier candidates over one continuous
+        // ~4.5-hour stretch were rejected by this floor alone, versus a
+        // ~30% (74/243) backtested retention rate - live candidate
+        // quality right now skews lower than the historical backtest
+        // sample did, so the same floor cuts far deeper live than
+        // predicted. 50 keeps the floor above the backtest's own
+        // clearly-worst segment (confidence<50) while restoring
+        // meaningful throughput - re-tune from real post-change volume/
+        // WR/ROI data, not from the original 243-trade backtest alone,
+        // once enough new trades exist under this value.
+        min_confidence: 50,
         min_decay_fraction: 0.85,
         position_size_pct: 15,
         max_position_size: 150,

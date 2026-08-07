@@ -74,8 +74,14 @@ const FEE_PCT_DEFAULT = 1;
 //   baseline (blind, today's real sizing):          -7.06% pnl/dollar
 //   this confidence+liquidity factor alone:          +8.99% pnl/dollar
 //   same factor, restricted to confidence>=55 (the
-//   population this will actually see now that
-//   AGGRESSIVE's min_confidence is 55):             +25.29% pnl/dollar
+//   population this was expected to see when
+//   AGGRESSIVE's min_confidence was 55):             +25.29% pnl/dollar
+//
+// (min_confidence lowered to 50 on 2026-08-07 after live paper-trading
+// data showed 55 nearly halted real trade volume without this backtest's
+// predicted PnL holding up live - see config/strategyProfileConfig.js's
+// AGGRESSIVE.min_confidence comment. The bucket table above is historical
+// backtest evidence, not re-run against the new floor.)
 //
 // walletQuality was deliberately NOT folded into this factor - it's
 // already addressed upstream via AGGRESSIVE's own weights override

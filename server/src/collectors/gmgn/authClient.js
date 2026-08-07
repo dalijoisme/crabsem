@@ -110,7 +110,7 @@ class GmgnAuthError extends Error {
 
 }
 
-function createGmgnClient({ apiKey, privateKeyPem, host, coalesceRequests = false }){
+function createGmgnClient({ apiKey, privateKeyPem, host, coalesceRequests = false, coalesceTtlMs = REQUEST_TIMEOUT_MS + 10000 }){
 
     if(!apiKey){
 
@@ -149,6 +149,35 @@ function createGmgnClient({ apiKey, privateKeyPem, host, coalesceRequests = fals
         return `${method} ${subPath} ${JSON.stringify(queryExtra)} ${body !== null ? JSON.stringify(body) : ""}`;
     }
 
+    // ROOT-CAUSE FIX (gmgn-scheduler chronic-hang investigation,
+    // 2026-08-07): fetchWithTimeout's AbortSignal.timeout only bounds
+    // fetch() itself - it does NOT cover parseResponse()'s later
+    // `await res.text()`, which runs after fetch() has already resolved
+    // with a 200 and headers. If GMGN ever returns headers but then
+    // stalls mid-body (proxy hiccup, half-open connection), that read
+    // hangs with no timeout at all, and `run()` above never settles.
+    // Every one of gmgnTrendingScheduler.js's 6 coalesced collectors
+    // calls THIS gateway with byte-identical params every single 30s
+    // tick, so the coalesce key never changes tick to tick - once one
+    // call hangs, every later tick for that same collector just joins
+    // the same dead promise forever, silently, with no new HTTP request
+    // ever attempted again. That matches the observed incident exactly:
+    // gmgn_tokens stops updating and only a full pm2 restart (which
+    // wipes this in-memory map) recovers it - the scheduler's own
+    // 5-minute lock-guard watchdog does NOT help, since it only
+    // force-releases the NEXT tick's ability to acquire the lock, while
+    // the still-pinned dead promise keeps blocking every tick that
+    // reaches this same coalesce key.
+    //
+    // Fix: an entry older than coalesceTtlMs is no longer trusted by
+    // future callers. There's no reliable way to cancel an already-hung
+    // res.text() call, so a stale entry isn't cancelled - it's simply
+    // abandoned, and the next caller for that key gets a fresh,
+    // independent request instead of joining the dead one. If the old
+    // promise does eventually settle later, its own cleanup only
+    // deletes the map entry if it's still the current one for that key
+    // (guards against deleting a newer entry that has since replaced it
+    // - see the `finally` below).
     async function coalesce(method, subPath, queryExtra, body, run){
 
         if(!inFlightRequests) return run();
@@ -156,16 +185,30 @@ function createGmgnClient({ apiKey, privateKeyPem, host, coalesceRequests = fals
         const key = buildCoalesceKey(method, subPath, queryExtra, body);
         const existing = inFlightRequests.get(key);
 
-        if(existing) return existing;
+        if(existing){
 
-        const promise = run();
-        inFlightRequests.set(key, promise);
+            const age = Date.now() - existing.startedAt;
+
+            if(age < coalesceTtlMs) return existing.promise;
+
+            // TEMPORARY diagnostic (remove once the underlying hang is
+            // confirmed/fixed at its true source) - confirms live
+            // whether this is really what fires during a stall.
+            console.warn(`[gmgn-coalesce] STALE in-flight entry for key="${key}" age=${age}ms exceeds ${coalesceTtlMs}ms ceiling - abandoning it and issuing a fresh request instead of joining a possibly-dead promise`);
+
+        }
+
+        const entry = { startedAt: Date.now(), promise: null };
+        entry.promise = run();
+        inFlightRequests.set(key, entry);
 
         try{
-            return await promise;
+            return await entry.promise;
         }
         finally{
-            inFlightRequests.delete(key);
+            if(inFlightRequests.get(key) === entry){
+                inFlightRequests.delete(key);
+            }
         }
 
     }

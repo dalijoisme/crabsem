@@ -174,3 +174,43 @@ test("coalesceRequests ON - a rejected in-flight request is shared too, then cle
     }
 
 });
+
+test("coalesceRequests ON - a permanently-hung in-flight entry (fetch resolves but body read never settles) does not block callers forever past coalesceTtlMs", async () => {
+
+    const originalFetch = global.fetch;
+    let fetchCallCount = 0;
+
+    global.fetch = async () => {
+        fetchCallCount++;
+        if(fetchCallCount === 1){
+            // Simulates GMGN returning headers fine but then stalling
+            // mid-body forever - fetchWithTimeout's AbortSignal.timeout
+            // has already resolved fetch() by this point, so nothing
+            // times out `text()` here. This is the real hang scenario
+            // the coalesceTtlMs staleness bypass exists for.
+            return { status: 200, text: () => new Promise(() => {}) };
+        }
+        return fakeOkResponse({ liquidity: "500" });
+    };
+
+    try{
+
+        const client = createGmgnClient({ apiKey: "test-key", host: "https://gmgn.example.invalid", coalesceRequests: true, coalesceTtlMs: 20 });
+
+        const call1 = client.getTokenPoolInfo("sol", "ADDR_F"); // never settles - left dangling on purpose
+
+        await new Promise(resolve => setTimeout(resolve, 30)); // past coalesceTtlMs
+
+        const call2 = await client.getTokenPoolInfo("sol", "ADDR_F");
+
+        assert.equal(fetchCallCount, 2, "a caller arriving after coalesceTtlMs must get a genuinely fresh request instead of joining the dead promise from call1");
+        assert.equal(call2.data.liquidity, "500");
+
+        void call1; // intentionally never awaited/settled - proves the fix doesn't depend on the old promise ever resolving
+
+    }
+    finally{
+        global.fetch = originalFetch;
+    }
+
+});

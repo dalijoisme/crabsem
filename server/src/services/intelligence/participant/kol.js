@@ -135,7 +135,16 @@ function score(activities, change1h, realtimeSignal){
     }
 
     return {
-        score: finalScore, max: MAX_SCORE, hasData: true, reasons, riskReasons,
+        // CORRECTNESS fix (engine-quality audit, 2026-08-07): smartMoney.js's
+        // otherwise-identical pipeline has always clamped its final score
+        // to [0, MAX_SCORE] - this file never did. Not currently reachable
+        // with today's config values (earlinessCurve's own factors never
+        // exceed 1.00 and raw's own bounds keep it non-negative), but a
+        // defensive floor/ceiling here costs nothing and keeps this
+        // function's contract consistent with its sibling module rather
+        // than relying on every future config change staying inside
+        // implicit bounds no one enforces.
+        score: Math.max(0, Math.min(MAX_SCORE, finalScore)), max: MAX_SCORE, hasData: true, reasons, riskReasons,
         // Additive observability only - see this function's own header.
         realtimeFacts: realtimeSignal ?? null
     };

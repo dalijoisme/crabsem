@@ -232,14 +232,39 @@ module.exports = {
             penalty: 15
         },
 
-        // Part 8 - age is a BONUS only, never a reject. Buckets are
-        // upper-bound-exclusive except the last (20+min gets the top
-        // bonus). Missing age data = +0 (neutral, never guessed).
+        // Part 8 - age was BONUS-only until the paper-trading validation
+        // mission (2026-08-07, live VPS): real evidence from this
+        // account's own 41-trade paper-trading run showed buying very
+        // young tokens isn't just "less good," it's actively bad - a
+        // clean, non-liquidity-confounded threshold (liquidity was
+        // ~$12-13k across every age bucket, ruling that out as the real
+        // driver): tokens bought under ~12 real minutes old realized
+        // 13/15 losses (86.7%), avg ROI roughly -27% to -30% depending on
+        // exact sub-bucket, while every bucket from ~40min onward showed
+        // a healthy, roughly balanced mix including several of this
+        // account's largest real winners (Molly +74.6%/+65.1% at 44min,
+        // KISS +31.6%/+39.6% at 48min, Founder +52.1% at 110min, Juws
+        // +32.2%/+39.9% at 262min). This directly explains most of this
+        // same dataset's worst, fastest STOP_LOSS crashes (Muffins -79.8%
+        // at 9min old, PENGUIN -68.4% at 8.6min, CHONK -60.2% at 7.9min,
+        // kryptsip -44.6% at 3.1min) - a price crash that fast, on a
+        // token that fresh, structurally cannot be caught by any
+        // realtime-refresh/exit-timing fix (the position is often closed
+        // within seconds of the very first re-check) - only avoiding the
+        // BUY in the first place helps. Still additive/never a hard
+        // reject (a token with an otherwise exceptional signal profile
+        // can still clear the bar) - now penalizes real youth instead of
+        // treating it as neutral. n=41 overall, ~13-15 per bucket - real
+        // but not huge; kept proportionate to (not larger than) this same
+        // file's other evidence-based modifier (momentumModifier's own
+        // -15/+10 range) rather than chasing the single sharpest in-
+        // sample cutoff. Missing age data = +0 (neutral, never guessed).
         ageBonus: [
-            { maxMinutes: 5, bonus: 0 },
-            { maxMinutes: 10, bonus: 2 },
-            { maxMinutes: 20, bonus: 5 },
-            { maxMinutes: Infinity, bonus: 8 }
+            { maxMinutes: 5, bonus: -12 },
+            { maxMinutes: 12, bonus: -8 },
+            { maxMinutes: 20, bonus: -2 },
+            { maxMinutes: 60, bonus: 3 },
+            { maxMinutes: Infinity, bonus: 6 }
         ],
 
         // SPRINT 12 (Arjuna V5) - CTO DECISION (FINAL): Momentum is a

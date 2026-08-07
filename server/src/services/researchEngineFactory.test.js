@@ -285,36 +285,45 @@ test("real replay: MOON and Fukuruto's own real trenches data, under Arjuna V3's
     // so both real, large 1h/5m moves classify as EARLY_MOMENTUM
     // (drawdownFromPeak is honestly null, never a fabricated crash) -
     // the CTO's own +10 scoring modifier applies uniformly, 75 -> 85.
-    assert.equal(fukResult.participantScore, 85);
+    // goodToken()'s default 2h-old launch_time now falls in the paper-
+    // trading-validated ageBonus table's 60min+ bucket (+6, was +8 under
+    // the old 0/2/5/8 table) - 85 -> 83.
+    assert.equal(fukResult.participantScore, 83);
     assert.equal(fukResult.action, "STRONG BUY");
 
     // MOON: real 18 holders falls in Part 4's <40 bucket (0 credit) -
     // stays well short of FUK's score despite similar accumulation/price
     // action, exactly the real differentiator this sprint intended.
-    // Same EARLY_MOMENTUM +10 modifier applies here too, 62 -> 72 - still
-    // well under AGGRESSIVE's strongBuy floor (75).
-    assert.equal(moonResult.participantScore, 72);
+    // Same EARLY_MOMENTUM +10 modifier applies here too, 62 -> 72, then
+    // the same -2 ageBonus table shift as FUK above -> 70 - still well
+    // under AGGRESSIVE's strongBuy floor (75).
+    assert.equal(moonResult.participantScore, 70);
     assert.ok(moonResult.participantScore < 75, "MOON's real 18 holders must keep it below AGGRESSIVE's strongBuy floor (75), unlike FUK's real 255");
     assert.equal(moonResult.action, "BUY");
 });
 
-// Arjuna V3 (FINAL SPRINT), Part 8: age is now a BONUS only - the
-// earlier sprint's hard entryGate (reject below 10 minutes) is REMOVED.
-// A young token can still reach BUY on its own merits; it just never
-// gets the older token's small additive bonus (config.entryScore.ageBonus).
-test("Part 8: age is bonus-only - a genuinely young token is NOT rejected/downgraded on age alone, just scores a few points lower than an identical older one", () => {
+// Arjuna V3 (FINAL SPRINT), Part 8: age is a scoring MODIFIER, never a
+// hard entryGate reject. A young token can still reach BUY on its own
+// merits; it just carries the real, evidence-based headwind/tailwind
+// (config.entryScore.ageBonus) real trade history now supports (see
+// that table's own header comment - paper-trading validation mission,
+// 2026-08-07: buying under ~12 real minutes old realized 86.7% losses
+// in this account's own 41-trade run).
+test("Part 8: age is additive-only - a genuinely young token is NOT rejected/downgraded to a different tier on age alone, just scores real points lower than an identical older one", () => {
     const ctx = ctxWithAccumulation();
-    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 2 min old, +0 bonus
-    const oldToken = goodToken({ launch_time: new Date(Date.now() - 25 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 25 min old, +8 bonus
+    const youngToken = goodToken({ launch_time: new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 2 min old, -12 penalty
+    const oldToken = goodToken({ launch_time: new Date(Date.now() - 25 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") }); // 25 min old, +3 bonus
 
     const [youngResult] = analyzeTokensWithOverride([youngToken], ctx, "momentumHunter", null);
     const [oldResult] = analyzeTokensWithOverride([oldToken], ctx, "momentumHunter", null);
 
-    assert.equal(youngResult.entryScoreBreakdown.ageBonusPoints, 0);
-    assert.equal(oldResult.entryScoreBreakdown.ageBonusPoints, 8);
-    // Same +8-point gap reflected in the final score - age never rejects,
-    // it only ever adds a small amount on top of everything else.
-    assert.equal(oldResult.participantScore - youngResult.participantScore, 8);
+    assert.equal(youngResult.entryScoreBreakdown.ageBonusPoints, -12);
+    assert.equal(oldResult.entryScoreBreakdown.ageBonusPoints, 3);
+    // Same 15-point gap reflected in the final score - age never rejects
+    // outright (a token with an otherwise exceptional signal profile can
+    // still clear the bar), it only ever adds/subtracts a real, bounded
+    // amount on top of everything else.
+    assert.equal(oldResult.participantScore - youngResult.participantScore, 15);
 });
 
 test("Part 8: missing age data is neutral (+0 bonus), never a rejection or a guessed bonus", () => {
@@ -325,18 +334,19 @@ test("Part 8: missing age data is neutral (+0 bonus), never a rejection or a gue
     assert.equal(result.entryScoreBreakdown.ageMinutes, null);
 });
 
-test("Part 8: age bonus buckets match the final spec exactly (0/2/5/8)", () => {
+test("Part 8: age bonus buckets match the evidence-based paper-trading validation table exactly (-12/-8/-2/3/6)", () => {
     const ctx = ctxWithAccumulation();
     const cases = [
-        { minutesAgo: 3, expectedBonus: 0 },
-        { minutesAgo: 7, expectedBonus: 2 },
-        { minutesAgo: 15, expectedBonus: 5 },
-        { minutesAgo: 30, expectedBonus: 8 }
+        { minutesAgo: 3, expectedBonus: -12 },
+        { minutesAgo: 7, expectedBonus: -8 },
+        { minutesAgo: 15, expectedBonus: -2 },
+        { minutesAgo: 30, expectedBonus: 3 },
+        { minutesAgo: 90, expectedBonus: 6 }
     ];
     for(const { minutesAgo, expectedBonus } of cases){
         const token = goodToken({ launch_time: new Date(Date.now() - minutesAgo * 60 * 1000).toISOString().slice(0, 19).replace("T", " ") });
         const [result] = analyzeTokensWithOverride([token], ctx, "momentumHunter", null);
-        assert.equal(result.entryScoreBreakdown.ageBonusPoints, expectedBonus, `${minutesAgo}min old should get +${expectedBonus}`);
+        assert.equal(result.entryScoreBreakdown.ageBonusPoints, expectedBonus, `${minutesAgo}min old should get ${expectedBonus}`);
     }
 });
 

@@ -935,11 +935,34 @@ function createTradeManager(repository, liveOptions = null){
 
         if(result.action === "HOLD") return { closed: false };
 
+        // Production trading-quality audit, Phase 1 (paper-trading
+        // validation mission, 2026-08-07) - real bug found via direct
+        // production-data forensics: 17/41 real paper trades (41.5%) had
+        // an mae_pct/mfe_pct that didn't even reach their own final,
+        // recorded ROI (e.g. a real STOP_LOSS closing at roi=-68.4% with
+        // mae_pct persisted as 0.0). Root cause: finalizeClose/
+        // partialClose below were being handed the ORIGINAL `position`
+        // parameter this function received at the top - captured BEFORE
+        // this cycle's own updatePositionTracking() call (above) wrote
+        // the freshly-computed mfePctNow/maePctNow to the database. The
+        // in-memory `position` object was never updated to match, so the
+        // persisted trade row's "worst/best ROI ever" silently missed the
+        // very move that triggered the close on a same-cycle crash/spike -
+        // exactly the common case for STOP_LOSS/MAE_ACCELERATED_EXIT
+        // (together 65.9% of this dataset's trades). Fixed by handing the
+        // close path a position record with THIS cycle's real tracking
+        // values, never the stale one - mirrors the fresh mfe_pct already
+        // passed to evaluateDynamicExit two lines above, just extended to
+        // the persistence path (mae_pct is intentionally NOT overridden
+        // for evaluateDynamicExit itself - see that call's own comment -
+        // but the CLOSE record always wants the true final extremes).
+        const positionForClose = { ...position, mfe_pct: mfePctNow, mae_pct: maePctNow };
+
         if(result.action === "SELL_PARTIAL"){
-            return partialClose(position, result.currentPrice, result.sellFraction, result.reason, config);
+            return partialClose(positionForClose, result.currentPrice, result.sellFraction, result.reason, config);
         }
 
-        return finalizeClose(position, result.currentPrice, result.reason, config);
+        return finalizeClose(positionForClose, result.currentPrice, result.reason, config);
 
     }
 

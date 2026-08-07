@@ -713,6 +713,63 @@ test("closeIfDue: TP1 (+25%) sells 80% (Arjuna V4, Part 3), keeps the position O
 
 });
 
+// Production trading-quality audit, Phase 1 (paper-trading validation
+// mission, 2026-08-07) - real bug found via direct production-data
+// forensics on this session's own paper-trading run: 17/41 real trades
+// (41.5%) had a persisted mae_pct/mfe_pct that didn't even reach their
+// own final ROI (e.g. a real STOP_LOSS trade closing at roi=-68.4% with
+// mae_pct recorded as 0.0). Root cause: closeIfDue was calling
+// finalizeClose/partialClose with the ORIGINAL, stale `position`
+// parameter (captured before this cycle's own fresh mfePctNow/maePctNow
+// were computed and written to the DB) instead of a copy carrying those
+// fresh values - so a position that crashes/spikes and closes on the
+// SAME cycle silently lost its own worst/best-ever ROI. This test
+// reproduces the exact real shape: a fresh position (mae_pct starts at
+// its 0 default) that crashes straight through Stop Loss on its very
+// first evaluation, in one single closeIfDue call - no prior cycle ever
+// ran to have already written a non-zero mae_pct the old, buggy code
+// could have accidentally gotten right by coincidence.
+test("closeIfDue: a same-cycle Stop Loss crash persists its own real mae_pct on the trade row, never the stale pre-cycle default", async () => {
+
+    const testEmail = `tradermanager.test.samecyclesl.${crypto.randomBytes(8).toString("hex")}@example.invalid`;
+    const registerResult = userAuthService.register(null, testEmail, "test-password-12345");
+    assert.equal(registerResult.ok, true);
+    const userId = registerResult.userId;
+
+    try{
+
+        const positionId = tradingBotRepository.insertPosition(userId, {
+            tokenAddress: "TestTokenSameCycleSL111", tokenSymbol: "SCSL",
+            entryPrice: 1.0, sizeUsd: 10, confidence: 60,
+            exitStrategy: "dynamicExit", engineVersion: "production_v2",
+            targetPrice: 2, targetMarketCap: null, stopLossPrice: 0.8, stopLossMarketCap: null
+        });
+        const position = db.prepare("SELECT * FROM trading_bot_positions WHERE id = ?").get(positionId);
+        assert.equal(position.mae_pct, 0, "test setup: a brand-new position must start with no established mae_pct");
+
+        const config = tradingBotRepository.getConfig(userId);
+        const tm = tradeManager.createTradeManager(tradingBotRepository.forUser(userId));
+
+        // -50% in one shot, no realtime buffer signal - the real
+        // PENGUIN/CHONK/Muffins shape from this session's own dataset.
+        const token = healthyToken({ token_address: "TestTokenSameCycleSL111", price: 0.50 });
+        const result = await tm.closeIfDue(position, token, config);
+
+        assert.equal(result.closed, true);
+        assert.equal(result.reason, "STOP_LOSS");
+
+        const trade = db.prepare("SELECT * FROM trading_bot_trades WHERE user_id = ? AND reason = 'STOP_LOSS'").get(userId);
+        assert.ok(trade, "a real STOP_LOSS trade row must exist");
+        assert.ok(Math.abs(trade.roi_pct - -50) < 0.01, `test setup check: expected roi_pct ~-50, got ${trade.roi_pct}`);
+        assert.ok(trade.mae_pct <= -49.9, `mae_pct must reflect this SAME cycle's real -50% crash, not the stale pre-cycle 0 default (got ${trade.mae_pct})`);
+
+    }
+    finally{
+        deleteTestUser(userId);
+    }
+
+});
+
 test("closeIfDue: TP1 does not re-fire on a position that already has tp1_hit_at set", async () => {
 
     const testEmail = `tradermanager.test.tp1once.${crypto.randomBytes(8).toString("hex")}@example.invalid`;

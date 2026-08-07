@@ -136,6 +136,14 @@ function createEntryGateService(repository){
         }
 
         if(live.confidence < config.min_confidence){
+            // TEMPORARY (2026-08-07 throughput investigation - remove once
+            // the real live.confidence distribution at rejection time is
+            // confirmed) - trading_bot_missed_opportunity has no
+            // confidence column, and token_last_decision is overwritten by
+            // later cycles, so neither gives a time-accurate read of what
+            // confidence actually was AT this rejection. This logs the
+            // real, unmodified gate inputs at the exact moment of rejection.
+            console.log(`[confidence-gate-diag] REJECT token=${token?.symbol || token?.token_address} action=${live.action} confidence=${live.confidence} floor=${config.min_confidence} decayFraction=${live.decayFraction}`);
             return { eligible: false, reason: "CONFIDENCE_BELOW_FLOOR" };
         }
 

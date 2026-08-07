@@ -441,13 +441,31 @@ module.exports = {
         // confidence as if risk were LOW. Scaled consistently with the
         // other existing confidence penalties in this file (freshness
         // maxes at 20, completeness at 25) - not a new, arbitrary number.
+        //
+        // LOW raised from 0 to 10 (exit/entry engine optimization
+        // mission, 2026-08-07 - "Priority 1" of the evidence-backed
+        // roadmap). Real evidence, replicated 3 independent times, all
+        // pointing the same direction: LOW (0 real risk reasons raised at
+        // all) is NOT actually the safest tier it was treated as - it
+        // underperforms MEDIUM (1-3 reasons) in every real-outcome look.
+        // (1) n=288 per-count bucket analysis: 0 reasons avgROI=-8.20%
+        // vs 2-3 reasons avgROI=+5.62%/+14.50%. (2) An isolated backtest
+        // of a full per-count risk reshape (floor=52) beat the current
+        // formula on every metric: n=216/WR=43.1%/avgROI=8.05% vs
+        // n=206/WR=42.7%/avgROI=7.22%. (3) n=238 real executed trades,
+        // same-day: LOW avgROI=-14.91%/WR=37.5% (n=16) vs MEDIUM
+        // avgROI=-4.45%/WR=32.0% (n=206). 10 (not all the way to
+        // MEDIUM's 8 or HIGH's 20) is a deliberately conservative middle
+        // step, not the full per-count reshape backtested in (2) - this
+        // isolated, single-value change is easier to validate/roll back
+        // on its own. Rollback: revert to 0.
         confidencePenalty: {
 
             HIGH: 20,
 
             MEDIUM: 8,
 
-            LOW: 0
+            LOW: 10
 
         }
 

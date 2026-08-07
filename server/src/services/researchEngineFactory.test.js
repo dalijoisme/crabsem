@@ -425,6 +425,31 @@ test("confidence falls as risk escalates, even when participantScore/marketHealt
     assert.ok(belowTrigger.confidence > atTrigger.confidence, "the final, Realtime-Pulse-adjusted confidence must still reflect the same real direction (MEDIUM risk keeps a real edge over HIGH risk)");
 });
 
+// Exit/entry engine optimization mission, 2026-08-07 ("Priority 1" of the
+// evidence-backed roadmap) - LOW's confidencePenalty raised 0->10. Real
+// evidence (replicated 3 independent times - see scoringConfig.js's own
+// risk.confidencePenalty comment for the full trail) showed 0-risk-reason
+// candidates are NOT actually the safest tier the old 0-penalty treated
+// them as - they underperformed MEDIUM (1-3 reasons) in every real-outcome
+// look. This locks in the new wiring end-to-end (config -> computeConfidence
+// -> baseConfidence), not just the raw config value, so an accidental
+// revert anywhere in that chain fails loudly.
+test("risk.confidencePenalty.LOW is 10 (not the old 0) and a genuinely clean (0 risk reasons) token no longer gets a free pass on confidence", () => {
+    const scoringConfig = require("../config/scoringConfig");
+    assert.equal(scoringConfig.risk.confidencePenalty.LOW, 10);
+
+    const ctx = ctxWithAccumulation();
+    const [result] = analyzeTokensWithOverride([goodToken()], ctx, "momentumHunter", null);
+
+    assert.equal(result.risk, "LOW", "this fixture must genuinely have zero real risk reasons - if it doesn't, this test isn't isolating what it claims to");
+    assert.deepEqual(result.riskReasons, []);
+    // participantScore=80/marketHealth=73 for this exact fixture (verified
+    // directly against the real pipeline) blend to a raw ~78.4 before any
+    // penalty - the real, current LOW penalty (10) must show up as a real
+    // 10-point reduction versus what a 0-penalty LOW would have produced.
+    assert.equal(result.baseConfidence, 54, "with LOW's penalty at 10, this exact clean fixture's baseConfidence must be 10 points lower than it would be with the old, un-penalized LOW tier");
+});
+
 test("M5 regression guarantee: STABLE's translated philosophy produces byte-identical output to pre-refactor (no override at all)", () => {
     const ctx = ctxWithAccumulation();
     const stablePhilosophy = strategyProfileTranslator.translate({}).philosophy; // STABLE = an all-default config

@@ -18,13 +18,13 @@ function series(direction, consistency){
 
 // ---- Token Age ----
 
-test("resolveTokenAgeMultiplier matches the Architect's exact bucket table", () => {
+test("resolveTokenAgeMultiplier matches the current bucket table (60-180min softened 0.90->0.95, 2026-08-07 engine-optimization roadmap - see realtimeAdjustmentConfig.js's own header for the real-outcome evidence)", () => {
     assert.equal(svc.resolveTokenAgeMultiplier(5).multiplier, 0.95);
     assert.equal(svc.resolveTokenAgeMultiplier(10).multiplier, 0.95);
     assert.equal(svc.resolveTokenAgeMultiplier(10.01).multiplier, 1.00);
     assert.equal(svc.resolveTokenAgeMultiplier(60).multiplier, 1.00);
-    assert.equal(svc.resolveTokenAgeMultiplier(60.01).multiplier, 0.90);
-    assert.equal(svc.resolveTokenAgeMultiplier(180).multiplier, 0.90);
+    assert.equal(svc.resolveTokenAgeMultiplier(60.01).multiplier, 0.95);
+    assert.equal(svc.resolveTokenAgeMultiplier(180).multiplier, 0.95);
     assert.equal(svc.resolveTokenAgeMultiplier(180.01).multiplier, 0.75);
     assert.equal(svc.resolveTokenAgeMultiplier(360).multiplier, 0.75);
     assert.equal(svc.resolveTokenAgeMultiplier(360.01).multiplier, 0.60);

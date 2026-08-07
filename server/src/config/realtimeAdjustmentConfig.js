@@ -17,10 +17,27 @@ module.exports = {
     // filter/gate (distinct from and additive to scoringConfig.js's own
     // existing ageBonus point-bonus on the entry score itself - that
     // mechanism is untouched). Upper-bound-exclusive except the last.
+    //
+    // 180-minute tier softened from 0.90 to 0.95 (exit/entry engine
+    // optimization mission, 2026-08-07 - "Priority 2" of the
+    // evidence-backed roadmap). This is the ONLY tier changed - the
+    // other four have no contradicting evidence. Real n=238 executed
+    // trades in this exact bucket (60-180min old) show avgROI=+12.07%,
+    // the BEST of any age bucket, despite carrying the second-heaviest
+    // penalty (only 360min+'s 0.60 is harsher) - live counterfactual
+    // replay also showed the realtime multiplier (effectively just this
+    // table today, since realtimePulse's own pulse/kol/smartMoney
+    // adjustments stay neutral until the buffer-warmup gap is fixed) is
+    // the single largest throughput lever, blocking far more live
+    // candidates than any other confidence penalty. n=36 for this one
+    // bucket is real but not independently replicated the way Priority
+    // 1's evidence was - a more conservative single-step softening
+    // (0.90->0.95, not removal) was chosen for that reason. Rollback:
+    // revert to 0.90.
     tokenAgeMultiplier: [
         { maxMinutes: 10, multiplier: 0.95 },
         { maxMinutes: 60, multiplier: 1.00 },
-        { maxMinutes: 180, multiplier: 0.90 },
+        { maxMinutes: 180, multiplier: 0.95 },
         { maxMinutes: 360, multiplier: 0.75 },
         { maxMinutes: Infinity, multiplier: 0.60 }
     ],

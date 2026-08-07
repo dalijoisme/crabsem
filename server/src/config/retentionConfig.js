@@ -42,6 +42,15 @@ module.exports = {
     // to a new table rather than a fresh number).
     realtimePulseSnapshotsMaxAgeHours: 48,
 
+    // Exit/entry engine optimization mission, Phase 5 (2026-08-07) -
+    // token_decision_snapshots (migration 074), the decision-side
+    // counterpart to realtime_pulse_snapshots above. Same retention class
+    // and same reasoning - a real per-token time series, append-only,
+    // needed for after-the-fact "how did confidence/participant score/
+    // momentum phase evolve before this BUY" analysis over roughly the
+    // last day or two, not indefinitely.
+    tokenDecisionSnapshotsMaxAgeHours: 48,
+
     // RATE_LIMIT_BANNED incident (2026-08-05), real root cause: this
     // pair of tables (prediction_history - the AI Validation Framework's
     // append-only decision log, migration 017 - and its child

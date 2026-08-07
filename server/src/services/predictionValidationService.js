@@ -80,6 +80,7 @@ const predictionHistoryRepository = require("../repositories/predictionHistoryRe
 const predictionTimelineRepository = require("../repositories/predictionTimelineRepository");
 const tradePositionRepository = require("../repositories/tradePositionRepository");
 const tokenLastDecisionRepository = require("../repositories/tokenLastDecisionRepository");
+const tokenDecisionSnapshotRepository = require("../repositories/tokenDecisionSnapshotRepository");
 const decisionCycleLogRepository = require("../repositories/decisionCycleLogRepository");
 const productionEngineResolver = require("./productionEngineResolver");
 const scoringWorkerPool = require("./scoringWorkerPool");
@@ -510,6 +511,31 @@ async function evaluateAndRecordDecisions(){
             lastWhaleScore: signal.breakdown?.participant?.whale?.score ?? null,
             lastRisk: signal.risk ?? null
         });
+
+        // Decision-timing instrumentation (2026-08-07, exit/entry engine
+        // optimization mission, Phase 5 - see migration 074's own header
+        // for the full rationale). token_last_decision above is
+        // overwritten in place every cycle - this is the durable time
+        // series that survives it, so a future "how did this token's
+        // confidence/participant score/momentum phase evolve in the
+        // minutes before BUY" comparison has real history to read instead
+        // of only the single final snapshot. Skips AVOID-tier tokens to
+        // bound table growth to genuinely-interesting candidates - the
+        // vast majority of a multi-thousand-token scan is never a real
+        // BUY/STRONG BUY/HOLD candidate at all.
+        if(signal.action !== "AVOID"){
+            tokenDecisionSnapshotRepository.insertSnapshot({
+                tokenAddress: token.token_address,
+                recommendation: signal.action,
+                confidence: signal.confidence,
+                baseConfidence: signal.baseConfidence ?? null,
+                participantScore: signal.participantScore,
+                marketHealth: signal.marketHealth,
+                risk: signal.risk ?? null,
+                momentumPhase: signal.momentumPhase ?? null,
+                moduleScores: signal.breakdown ?? null
+            });
+        }
 
         if((i + 1) % EVENT_LOOP_YIELD_BATCH_SIZE === 0) await yieldToEventLoop();
 

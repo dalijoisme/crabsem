@@ -14,6 +14,10 @@ const tokenPriceHistoryRepository = require("../repositories/tokenPriceHistoryRe
 // Arjuna V4 Phase 2 (Realtime Pulse) - same bounded-growth guarantee
 // every other time-series table in this file already gets.
 const realtimePulseRepository = require("../repositories/realtimePulseRepository");
+// Exit/entry engine optimization mission, Phase 5 (2026-08-07) - same
+// bounded-growth guarantee, decision-side counterpart to
+// realtimePulseRepository above.
+const tokenDecisionSnapshotRepository = require("../repositories/tokenDecisionSnapshotRepository");
 // RATE_LIMIT_BANNED incident (2026-08-05) - see
 // config/retentionConfig.js's predictionHistoryMaxAgeHours for the real
 // production root-cause evidence this closes.
@@ -42,6 +46,7 @@ async function pruneOldData(){
     const predictionHistoryPruned = await predictionHistoryRepository.pruneOlderThan(retentionConfig.predictionHistoryMaxAgeHours);
     const priceHistoryPruned = await tokenPriceHistoryRepository.pruneOlderThan(retentionConfig.tokenPriceHistoryMaxAgeHours);
     const realtimePulseSnapshotsPruned = await realtimePulseRepository.pruneOlderThan(retentionConfig.realtimePulseSnapshotsMaxAgeHours);
+    const tokenDecisionSnapshotsPruned = await tokenDecisionSnapshotRepository.pruneOlderThan(retentionConfig.tokenDecisionSnapshotsMaxAgeHours);
 
     return {
 
@@ -54,6 +59,8 @@ async function pruneOldData(){
         priceHistoryPruned,
 
         realtimePulseSnapshotsPruned,
+
+        tokenDecisionSnapshotsPruned,
 
         predictionTimelinePruned,
 

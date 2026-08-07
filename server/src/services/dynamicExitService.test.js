@@ -432,3 +432,139 @@ test("MAE_ACCELERATED_EXIT_NO_SIGNAL fires on a real new low when no realtime bu
     }
 
 });
+
+// Give-back Profit Protection (exit-quality investigation, 2026-08-07) -
+// see exitSystemConfig.js's own givebackProtection header for the real
+// 12-position evidence trail this closes. Deliberately price-only, no
+// realtimePulse buffer needed - proves it fires exactly where
+// MOMENTUM_WEAKENING_EARLY_EXIT and MAE_ACCELERATED_EXIT structurally
+// cannot: a fast pullback from a real peak, with no prior negative
+// mae_pct and no realtime signal built up yet.
+
+test("GIVEBACK_PROFIT_PROTECTION fires on a real peak giving back past the configured threshold, with NO realtime signal at all (the target real-production case)", () => {
+
+    const token = { ...healthyToken(), price: 1.08 }; // roiPct=8, well above Stop Loss, below TP1
+    // Deliberately no realtimePulseBufferService.recordPoint() calls -
+    // matches the real traced positions (10 of 12 closed under 400s,
+    // never had time to build a buffer).
+    const pos = position({ mfe_pct: 20 }); // real peak +20%, giveback = 20-8 = 12, past the 10pt threshold
+
+    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+    assert.equal(result.action, "SELL_ALL");
+    assert.equal(result.sellFraction, 1);
+    assert.equal(result.reason, "GIVEBACK_PROFIT_PROTECTION");
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION does NOT fire when giveback is below the configured threshold - a normal, tolerable pullback", () => {
+
+    const token = { ...healthyToken(), price: 1.13 }; // roiPct=13, giveback = 20-13 = 7, below the 10pt threshold
+    const pos = position({ mfe_pct: 20 });
+
+    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+    assert.notEqual(result.reason, "GIVEBACK_PROFIT_PROTECTION");
+    assert.equal(result.action, "HOLD");
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION does NOT fire when MFE never exceeded 15% - matches MOMENTUM_WEAKENING_EARLY_EXIT's own bar for what counts as a real peak worth protecting", () => {
+
+    const token = { ...healthyToken(), price: 1.02 }; // roiPct=2, giveback = 15-2 = 13, well past 10pts
+    const pos = position({ mfe_pct: 15 }); // exactly AT the bar, not above it
+
+    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+    assert.notEqual(result.reason, "GIVEBACK_PROFIT_PROTECTION");
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION never fires post-TP1 - Free Ride Mode keeps its deliberate no-intermediate-floor design untouched", () => {
+
+    const token = { ...healthyToken(), price: 1.10 }; // roiPct=10, giveback = 30-10 = 20, well past the threshold
+    const pos = position({ tp1_hit_at: new Date().toISOString().slice(0, 19).replace("T", " "), mfe_pct: 30 });
+
+    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+    assert.notEqual(result.reason, "GIVEBACK_PROFIT_PROTECTION");
+    assert.equal(result.action, "HOLD"); // same outcome as the existing "Free Ride Mode...holds with no intermediate profit floor" test
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION yields to MOMENTUM_WEAKENING_EARLY_EXIT when that rule's own real, confirmed signal can already fire - the smarter, signal-confirmed reason wins on overlap", () => {
+
+    const address = "TEST_GIVEBACK_YIELDS_TO_MOMENTUM";
+    const token = { ...healthyToken(), token_address: address, price: 1.10 }; // roiPct=10, giveback=10 - both rules' conditions are true here
+
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now() - 30000, liquidity: 2000, volume1h: 200, buys5m: 10, sells5m: 1 });
+    realtimePulseBufferService.recordPoint(address, { recordedAtMs: Date.now(), liquidity: 1000, volume1h: 100, buys5m: 2, sells5m: 10 }); // real, consistent DOWN
+
+    try{
+
+        const pos = position({ mfe_pct: 20 });
+        const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+        // Same action/price either way (both rules would sell at the
+        // exact same currentPrice) - this proves the REASON reported
+        // prefers the real, signal-confirmed rule over the price-only
+        // fallback when both apply, exactly like MAE_ACCELERATED_EXIT's
+        // own hasRealtimeSignal preference.
+        assert.equal(result.action, "SELL_ALL");
+        assert.equal(result.reason, "MOMENTUM_WEAKENING_EARLY_EXIT");
+
+    }
+    finally{
+        realtimePulseBufferService.clear();
+    }
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION yields to MAE_ACCELERATED_EXIT when that rule's own condition already fires first", () => {
+
+    const token = { ...healthyToken(), price: 0.92 }; // roiPct=-8, a real new low vs prior mae_pct=-5
+    // mfe_pct=20 makes the give-back condition ALSO true here (giveback = 20-(-8) = 28, past the 10pt threshold) -
+    // proves MAE_ACCELERATED_EXIT (checked earlier in the function) wins the race.
+    const pos = position({ mae_pct: -5, mfe_pct: 20 });
+
+    const result = evaluateDynamicExit({ position: pos, token, trenchesEntry: healthyTrenches() });
+
+    assert.equal(result.action, "SELL_ALL");
+    assert.equal(result.reason, "MAE_ACCELERATED_EXIT_NO_SIGNAL");
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION still yields to Step 7 Emergency Exit on real severe structural collapse", () => {
+
+    // Reuses the SAME badMomentumToken/badMomentumTrenches fixture the
+    // existing "Step 7: Emergency Exit fires..." test already validates
+    // scores <= emergencyMomentumHealthFloor - price=1.05 (roiPct=5) is
+    // below the give-back rule's own mfe_pct>15 bar on its own, so
+    // mfe_pct=20 is added here specifically to make BOTH conditions true
+    // (giveback = 20-5 = 15, past the 10pt threshold) and prove Emergency
+    // Exit - checked first in the function - still wins the race.
+    const pos = position({ mfe_pct: 20, last_volume_1h: 1000 });
+
+    const result = evaluateDynamicExit({ position: pos, token: badMomentumToken, trenchesEntry: badMomentumTrenches });
+
+    assert.equal(result.action, "SELL_ALL");
+    assert.equal(result.reason, "MOMENTUM_HEALTH_EMERGENCY");
+
+});
+
+test("GIVEBACK_PROFIT_PROTECTION boundary: past the configured threshold fires, comfortably short does not", () => {
+
+    // Kept a full point away from the exact boundary on both sides -
+    // computeRoiPct's floating-point division (e.g. price=1.10 giving
+    // roiPct=9.999999999999991, not exactly 10) makes asserting the
+    // EXACT boundary itself unreliable, not a real production concern.
+    const pastThreshold = { ...healthyToken(), price: 1.09 }; // roiPct=9, giveback = 20-9 = 11, past the 10pt threshold
+    const shortOfThreshold = { ...healthyToken(), price: 1.11 }; // roiPct=11, giveback = 20-11 = 9, short of the 10pt threshold
+
+    const fireResult = evaluateDynamicExit({ position: position({ mfe_pct: 20 }), token: pastThreshold, trenchesEntry: healthyTrenches() });
+    const holdResult = evaluateDynamicExit({ position: position({ mfe_pct: 20 }), token: shortOfThreshold, trenchesEntry: healthyTrenches() });
+
+    assert.equal(fireResult.reason, "GIVEBACK_PROFIT_PROTECTION");
+    assert.notEqual(holdResult.reason, "GIVEBACK_PROFIT_PROTECTION");
+
+});

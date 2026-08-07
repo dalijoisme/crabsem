@@ -414,6 +414,35 @@ function evaluateDynamicExit({ position, token, trenchesEntry }){
 
     const tp1Hit = Boolean(position.tp1_hit_at);
 
+    // Give-back Profit Protection (exit-quality investigation,
+    // 2026-08-07 - see exitSystemConfig.js's own givebackProtection
+    // header for the full real-position evidence trail). A price-only
+    // fallback, deliberately never gated on realtimePulse/contextStale -
+    // same reasoning as MAE_ACCELERATED_EXIT above: the underlying
+    // price/mfe_pct reading is trustworthy regardless of whether momentum
+    // classification is. Checked AFTER MOMENTUM_WEAKENING_EARLY_EXIT so
+    // that already-tested rule keeps first right of refusal whenever its
+    // own real, confirmed signal can fire (identical price/action either
+    // way when both conditions overlap - only the reported reason would
+    // differ) - this rule exists specifically for what that one cannot
+    // catch: MOMENTUM_WEAKENING_EARLY_EXIT requires a real realtimePulse
+    // vote, which needs 2+ collector ticks (60s+) to exist at all, and
+    // MAE_ACCELERATED_EXIT requires an ALREADY-negative, worsening
+    // mae_pct - structurally cannot fire on the first pullback from a
+    // real peak. 12 real historical positions (mfe_pct>15%, never reached
+    // TP1) fell through both gaps and rode a real profit (avg +20.4%
+    // peak) all the way down to a full Hard Stop Loss (avg -45%/-16.5%
+    // final) - 10 of those 12 closed in under 400 seconds, confirming
+    // the realtime-pulse warm-up gap specifically. Deliberately scoped to
+    // PRE-TP1 only - Free Ride Mode's remaining 20% is deliberately built
+    // with NO intermediate profit floor (see exitConfig.tp2Pct's own
+    // header) and every real position this fix targets was pre-TP1.
+    const giveback = position.mfe_pct - roiPct;
+    if(!tp1Hit && position.mfe_pct > exitConfig.givebackProtection.minMfePct && giveback >= exitConfig.givebackProtection.maxGivebackPct){
+        console.log(`[momentum-health] token=${position.token_symbol || token.symbol} decision=SELL_ALL reason=GIVEBACK_PROFIT_PROTECTION roiPct=${roiPct.toFixed(2)} mfePct=${position.mfe_pct.toFixed(2)} giveback=${giveback.toFixed(2)}`);
+        return { action: "SELL_ALL", sellFraction: 1, reason: "GIVEBACK_PROFIT_PROTECTION", currentPrice, roiPct, momentumHealth };
+    }
+
     if(!tp1Hit){
 
         // Step 2/3 - TP1 (Dynamic TP): at the adaptive trigger ROI

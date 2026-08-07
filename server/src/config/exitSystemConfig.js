@@ -39,6 +39,58 @@ module.exports = {
     // Reuses momentumHealthConfig.js's own hardBreakdownFloor - the same
     // conservative, multiple-signals-bad threshold already validated,
     // not a new number.
-    emergencyMomentumHealthFloor: 25
+    emergencyMomentumHealthFloor: 25,
+
+    // Give-back Profit Protection (exit-quality investigation,
+    // 2026-08-07, real 234-position historical dataset, position-level
+    // - not per-trade-row, since a TP1-split position's two rows must be
+    // size-weighted blended, never counted as two independent trades).
+    // Root cause traced from real positions: MOMENTUM_WEAKENING_EARLY_EXIT
+    // (the only existing "trailing" mechanism) requires a real, confirmed
+    // realtimePulse DOWN vote, which needs 2+ collector ticks (60s+) to
+    // exist at all - and MAE_ACCELERATED_EXIT requires position.mae_pct
+    // to ALREADY be negative and getting worse, so it structurally cannot
+    // fire on the FIRST large pullback from a real peak. 12 real positions
+    // (mfe_pct>15%, never reached TP1) fell through BOTH gaps and rode
+    // a real profit (avg +20.4% peak) all the way down to a full Hard
+    // Stop Loss (avg -45%/-16.5% final) - 10 of those 12 closed in under
+    // 400 seconds, confirming the realtime-pulse warm-up gap specifically
+    // (not a threshold-calibration issue).
+    //
+    // This is a NEW, price-only check (mirrors MAE_ACCELERATED_EXIT's own
+    // already-approved pattern of never depending on realtimePulse/
+    // contextStale, since the underlying price/mfe_pct reading is
+    // trustworthy regardless of whether momentum classification is) -
+    // fires when a position that has never reached TP1 gives back
+    // maxGivebackPct points of ROI from its own real, already-tracked
+    // mfe_pct peak.
+    //
+    // Deliberately scoped to PRE-TP1 positions only (tp1_hit_at IS NULL) -
+    // Free Ride Mode's remaining 20% is deliberately built with NO
+    // intermediate profit-protection floor (see tp2Pct's own header) so
+    // it can genuinely ride to TP2; extending this check there would
+    // defeat that design intent and was never part of the traced failure
+    // (all 12 real positions this fixes were pre-TP1).
+    //
+    // minMfePct=15 reuses the SAME threshold MOMENTUM_WEAKENING_EARLY_EXIT
+    // already uses (not a new number) - a position that never reached a
+    // real +15% peak was never a "give-back" case as this file's own
+    // Momentum Exit rule already defines that term.
+    //
+    // maxGivebackPct=10: grid-searched (5/8/10/12/15/20/25/30 points)
+    // against the clean (non-TP1-split) 180-position historical subset.
+    // 5pts backtested marginally better (WR 21.1% vs 21.1%, avgROI
+    // -15.90% vs -16.37%) but was NOT chosen - the backtest can only see
+    // each position's own final recorded mfe_pct/roi_pct (no persisted
+    // tick-by-tick price history exists for held positions), so it cannot
+    // distinguish "gave back G points and kept falling" from "dipped G
+    // points, then pumped to an even higher real peak" - a tighter
+    // threshold is more exposed to that blind spot. 10 keeps almost all
+    // of the same backtested benefit (16 of 19 positions rescued at 5pts
+    // are still rescued at 10pts) with more room against ordinary noise.
+    givebackProtection: {
+        minMfePct: 15,
+        maxGivebackPct: 10
+    }
 
 };
